@@ -567,7 +567,7 @@ export class Books {
       try { tb = await st.tokenBalance(u.stellar_wallet, m.st_code, m.st_issuer); } catch { tb = undefined; }
       if (tb === undefined) { this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 60e3, 'Horizon unavailable', u.id, m.id); continue; }
       if (!tb || tb.balance === null) {
-        this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 5 * 60e3, `add a trustline for ${m.st_code} to receive the tokens`, u.id, m.id);
+        this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 60e3, `add a trustline for ${m.st_code} to receive the tokens`, u.id, m.id);
         continue;
       }
       try { await this.stEnsureAuth(m); } catch (e) { this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 60e3, 'auth: ' + String(e.message).slice(0, 100), u.id, m.id); continue; }
@@ -3108,7 +3108,7 @@ export class Books {
           const u = this.sql.exec('SELECT * FROM users WHERE username=? OR email=?', b.user, b.user).toArray()[0];
           if (!u) throw new Error('user not found');
           this.ctx.storage.transactionSync(() => {
-            const as = b.asset === 'eth' ? 'eth' : 'zro';
+            const as = ['eth', 'zro', 'xlm'].includes(b.asset) ? b.asset : 'zro';
             this.addBal(u.id, as, B(b.amount));
             this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?)`,
               u.id, 'deposit', b.chain || 'manual', String(b.amount), 'confirmed', b.note || 'Manual credit', now(), as);
