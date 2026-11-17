@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 [![secret scan](https://img.shields.io/badge/secrets-gitleaks%20on%20every%20push-black.svg)](.gitleaks.toml)
 
-![Rookery](docs/penguin-hero.png)
+![Open Source is Live](docs/open-source-live.png)
 
 Site: **https://rookery.stinkypenguin.xyz**
 
