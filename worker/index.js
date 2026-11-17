@@ -613,6 +613,7 @@ export class Books {
   }
   // tokens arriving at the hot wallet: a sell from a holder's wallet (memo s<intent>), or a plain return
   async stTokenInflow(it) {
+    if (it.from === it.issuer) return null;      // mint from the issuer (initial supply): not a holder deposit
     const st = await this.stellar();
     const m = this.sql.exec('SELECT * FROM markets WHERE st_code=? AND st_issuer=?', it.code, it.issuer).toArray()[0];
     const amt = xlm2wei(it.amount);
@@ -3443,6 +3444,7 @@ export class Books {
           const b = await req.json().catch(() => ({}));
           if (b.on === true || b.on === false) this.setMeta('st_send_now', b.on ? '1' : '');
           if (b.authz) this.setMeta('st_authz_last', '0');
+          if (b.cleanTokens) { const c = this.sql.exec(`UPDATE transfers SET status='ignored', note='token mint, not a deposit' WHERE status='unassigned' AND asset LIKE 't:%'`); }
           // send what current wallet holders already hold (pre-graduation tokens with a linked Stellar wallet)
           let seeded = 0;
           if (b.seed && this.stSendNowOn()) {
