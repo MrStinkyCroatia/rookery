@@ -2093,30 +2093,70 @@ const EVMW = {
   },
   close() { document.getElementById('evmBox')?.remove(); },
   status(html) { EVMW.box(`<div class="mono mu" style="margin-bottom:10px">Buy from wallet</div><p style="font-size:13.5px;line-height:1.55;margin:0">${html}</p>`); },
-  // choose what to pay with and from which network; resolves { pay, chain } or null when cancelled
-  pick(m, amounts) {
+  // choose what to pay with, how much, and from which network; resolves { pay, amount, chain } or null when cancelled
+  pick(m, init) {
     const q = (m.quote || 'ZRO').toLowerCase();
+    const MIN = { eth: 0.00005, zro: 0.1 };
+    const QUICK = { eth: ['0.005', '0.01', '0.05', '0.1'], zro: ['10', '25', '50', '100'] };
     return new Promise((done) => {
       let pay = q === 'eth' ? 'eth' : 'zro';
+      let val = { ...init };
       const chainsFor = (a) => (a === 'eth' ? (S.stats?.ethChains || ['ethereum', 'base', 'arbitrum']) : Object.keys(S.stats?.chains || {}))
         .map(k => ({ key: k, ...(S.stats?.chains?.[k] || {}) })).filter(c => c.chainId);
+      const est = () => {
+        const v = Number(val[pay]);
+        if (!(v > 0)) return 'Enter an amount';
+        let line = `≈ ${fmtUsd(v * assetUsd(pay))}`;
+        try {
+          const w = toWei(String(val[pay]));
+          const r = estBuy(m, convert(w, pay, q));
+          if (r.tokens > 0n) line += ` · ≈ ${fmtT(String(r.tokens))} $${esc(m.symbol)}`;
+        } catch { /* estimate only */ }
+        if (v < MIN[pay]) line = `Minimum is ${MIN[pay]} ${pay.toUpperCase()}`;
+        return line;
+      };
       const draw = () => {
         const el = EVMW.box(`<div class="mono mu" style="margin-bottom:10px">Buy $${esc(m.symbol)} from your wallet</div>
           <p style="font-size:13px;line-height:1.55;margin:0 0 12px">One signature, no deposit step. Pay with ETH or ZRO from the network you already use: Rookery converts and buys at the curve price when the payment confirms.</p>
           <div class="mono mu" style="font-size:11px;margin-bottom:6px">Pay with</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">
-            <button class="btn sm ${pay === 'eth' ? '' : 'ghost'}" data-p="eth">ETH · ${esc(amounts.eth)}</button>
-            <button class="btn sm ${pay === 'zro' ? '' : 'ghost'}" data-p="zro">ZRO · ${esc(amounts.zro)}</button>
+            <button class="btn sm ${pay === 'eth' ? '' : 'ghost'}" data-p="eth">ETH</button>
+            <button class="btn sm ${pay === 'zro' ? '' : 'ghost'}" data-p="zro">ZRO</button>
           </div>
+          <div class="mono mu" style="font-size:11px;margin-bottom:6px">Amount</div>
+          <div style="display:flex;align-items:center;gap:8px;border:1px solid #26262c;border-radius:10px;padding:8px 12px;margin-bottom:6px">
+            <input id="evmAmt" class="inp" inputmode="decimal" autocomplete="off" value="${esc(val[pay])}"
+              style="flex:1;border:0;background:transparent;padding:0;font-size:20px;font-weight:700;min-width:0">
+            <span class="mono" style="font-size:13px">${pay.toUpperCase()}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px">${QUICK[pay].map(v =>
+            `<button class="btn sm ghost" data-v="${v}">${v}</button>`).join('')}</div>
+          <div id="evmEst" class="mono mu" style="font-size:12px;margin-bottom:12px">${est()}</div>
           <div class="mono mu" style="font-size:11px;margin-bottom:6px">From network</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">${chainsFor(pay).map(c =>
             `<button class="btn sm ghost" data-c="${esc(c.key)}">${esc(c.label)}</button>`).join('')}</div>
           ${pay === 'eth' && q === 'zro' ? `<p class="mu" style="font-size:11.5px;line-height:1.5;margin:12px 0 0">This token trades against ZRO: your ETH is converted at the live ETH/ZRO rate when it lands.</p>` : ''}
+          ${pay === 'zro' && q === 'eth' ? `<p class="mu" style="font-size:11.5px;line-height:1.5;margin:12px 0 0">This token trades against ETH: your ZRO is converted at the live ZRO/ETH rate when it lands.</p>` : ''}
           <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">Valid for 10 minutes. Send the exact amount your wallet shows: the last digits mark this order.</p>
           <button class="btn sm ghost" id="evmCancel" style="margin-top:12px;width:100%">Cancel</button>`);
-        el.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { pay = b.dataset.p; draw(); });
-        el.querySelectorAll('[data-c]').forEach(b => b.onclick = () => done({ pay, chain: chainsFor(pay).find(c => c.key === b.dataset.c) }));
+        const inp = el.querySelector('#evmAmt');
+        inp.oninput = () => { val[pay] = inp.value.replace(',', '.').replace(/[^0-9.]/g, ''); el.querySelector('#evmEst').textContent = ''; el.querySelector('#evmEst').innerHTML = est(); };
+        el.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { val[pay] = b.dataset.v; inp.value = b.dataset.v; el.querySelector('#evmEst').innerHTML = est(); });
+        el.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
+          const to = b.dataset.p;
+          if (to === pay) return;
+          // keep the same size in USD when switching what to pay with
+          const usd = Number(val[pay] || 0) * assetUsd(pay);
+          if (usd > 0 && assetUsd(to) > 0) val[to] = (usd / assetUsd(to)).toFixed(to === 'eth' ? 6 : 3);
+          pay = to; draw();
+        });
+        el.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+          const v = Number(val[pay]);
+          if (!(v >= MIN[pay])) { el.querySelector('#evmEst').innerHTML = `<span style="color:var(--red,#ff5c5c)">Minimum is ${MIN[pay]} ${pay.toUpperCase()}</span>`; inp.focus(); return; }
+          done({ pay, amount: String(val[pay]), chain: chainsFor(pay).find(c => c.key === b.dataset.c) });
+        });
         el.querySelector('#evmCancel').onclick = () => { EVMW.close(); done(null); };
+        setTimeout(() => { inp.focus(); inp.select(); }, 30);
       };
       draw();
     });
@@ -2142,15 +2182,15 @@ const EVMW = {
   // usd: the amount the user typed, expressed in USD so both pay options show the same size
   async buy(m, usd) {
     if (!S.stats?.walletBuy) return toast('Buying from a wallet is not live yet', 'bad');
-    if (!(usd > 0)) return toast('Enter an amount first', 'bad');
-    if (!S.me) { const r = await walletSignIn(); if (!r) return; }
     const ethUsd = S.stats?.ethUsd || 0, zroUsd = S.stats?.zroUsd || 0;
     if (!ethUsd || !zroUsd) return toast('Prices are loading, try again in a second', 'bad');
-    const amounts = { eth: (usd / ethUsd).toFixed(6), zro: (usd / zroUsd).toFixed(3) };
-    const sel = await EVMW.pick(m, amounts);
+    const init = { eth: (usd / ethUsd).toFixed(6), zro: (usd / zroUsd).toFixed(3) };
+    const sel = await EVMW.pick(m, init);
     if (!sel || !sel.chain) return;
+    // the order belongs to an account: sign in with the paying wallet if nobody is logged in yet
+    if (!S.me) { EVMW.status('Sign the free login message in your wallet…'); const r = await walletSignIn(); if (!r) { EVMW.close(); return; } }
     try {
-      const { order } = await api('/wallet/order', { market: m.id, amount: toWei(amounts[sel.pay]).toString(), pay: sel.pay });
+      const { order } = await api('/wallet/order', { market: m.id, amount: toWei(sel.amount).toString(), pay: sel.pay });
       const from = await EVMW.account();
       EVMW.status(`Switching your wallet to <b>${esc(sel.chain.label)}</b>…`);
       await EVMW.ensureChain(sel.chain.chainId);
