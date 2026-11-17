@@ -2101,6 +2101,13 @@ const EVMW = {
     return new Promise((done) => {
       let pay = q === 'eth' ? 'eth' : 'zro';
       let val = { ...init };
+      let chainKey = null;
+      const preselect = () => {
+        const list = chainsFor(pay);
+        if (chainKey && list.some(c => c.key === chainKey)) return;
+        const hit = list.find(c => c.chainId === EVMW.walletChain);
+        chainKey = hit ? hit.key : null;
+      };
       const chainsFor = (a) => (a === 'eth' ? (S.stats?.ethChains || ['ethereum', 'base', 'arbitrum']) : Object.keys(S.stats?.chains || {}))
         .map(k => ({ key: k, ...(S.stats?.chains?.[k] || {}) })).filter(c => c.chainId);
       const est = () => {
@@ -2134,32 +2141,48 @@ const EVMW = {
           <div id="evmEst" class="mono mu" style="font-size:12px;margin-bottom:12px">${est()}</div>
           <div class="mono mu" style="font-size:11px;margin-bottom:6px">From network</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">${chainsFor(pay).map(c =>
-            `<button class="btn sm ghost" data-c="${esc(c.key)}">${esc(c.label)}</button>`).join('')}</div>
+            `<button class="btn sm ${c.key === chainKey ? '' : 'ghost'}" data-c="${esc(c.key)}">${c.key === chainKey ? '✓ ' : ''}${esc(c.label)}</button>`).join('')}</div>
+          <button class="btn lg wide" id="evmGo" style="margin-top:14px;width:100%"></button>
           ${pay === 'eth' && q === 'zro' ? `<p class="mu" style="font-size:11.5px;line-height:1.5;margin:12px 0 0">This token trades against ZRO: your ETH is converted at the live ETH/ZRO rate when it lands.</p>` : ''}
           ${pay === 'zro' && q === 'eth' ? `<p class="mu" style="font-size:11.5px;line-height:1.5;margin:12px 0 0">This token trades against ETH: your ZRO is converted at the live ZRO/ETH rate when it lands.</p>` : ''}
           <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">Valid for 10 minutes. Send the exact amount your wallet shows: the last digits mark this order.</p>
           <button class="btn sm ghost" id="evmCancel" style="margin-top:12px;width:100%">Cancel</button>`);
-        const inp = el.querySelector('#evmAmt');
-        inp.oninput = () => { val[pay] = inp.value.replace(',', '.').replace(/[^0-9.]/g, ''); el.querySelector('#evmEst').textContent = ''; el.querySelector('#evmEst').innerHTML = est(); };
-        el.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { val[pay] = b.dataset.v; inp.value = b.dataset.v; el.querySelector('#evmEst').innerHTML = est(); });
+        const inp = el.querySelector('#evmAmt'), go = el.querySelector('#evmGo');
+        const paintGo = () => {
+          const v = Number(val[pay]);
+          const c = chainsFor(pay).find(x => x.key === chainKey);
+          go.disabled = !(v >= MIN[pay]) || !c;
+          go.innerHTML = !c ? 'Choose a network' : !(v >= MIN[pay]) ? `Minimum ${MIN[pay]} ${pay.toUpperCase()}`
+            : `Buy $${esc(m.symbol)} · ${esc(String(val[pay]))} ${pay.toUpperCase()} on ${esc(c.label)}`;
+        };
+        inp.oninput = () => { val[pay] = inp.value.replace(',', '.').replace(/[^0-9.]/g, ''); el.querySelector('#evmEst').innerHTML = est(); paintGo(); };
+        el.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { val[pay] = b.dataset.v; inp.value = b.dataset.v; el.querySelector('#evmEst').innerHTML = est(); paintGo(); });
         el.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
           const to = b.dataset.p;
           if (to === pay) return;
           // keep the same size in USD when switching what to pay with
           const usd = Number(val[pay] || 0) * assetUsd(pay);
           if (usd > 0 && assetUsd(to) > 0) val[to] = (usd / assetUsd(to)).toFixed(to === 'eth' ? 6 : 3);
-          pay = to; draw();
+          pay = to; preselect(); draw();
         });
-        el.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+        el.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { chainKey = b.dataset.c; draw(); });
+        go.onclick = () => {
           const v = Number(val[pay]);
-          if (!(v >= MIN[pay])) { el.querySelector('#evmEst').innerHTML = `<span style="color:var(--red,#ff5c5c)">Minimum is ${MIN[pay]} ${pay.toUpperCase()}</span>`; inp.focus(); return; }
-          done({ pay, amount: String(val[pay]), chain: chainsFor(pay).find(c => c.key === b.dataset.c) });
-        });
+          const c = chainsFor(pay).find(x => x.key === chainKey);
+          if (!(v >= MIN[pay]) || !c) return paintGo();
+          done({ pay, amount: String(val[pay]), chain: c });
+        };
+        paintGo();
         el.querySelector('#evmCancel').onclick = () => { EVMW.close(); done(null); };
         setTimeout(() => { inp.focus(); inp.select(); }, 30);
       };
+      preselect();
       draw();
     });
+  },
+  walletChain: null,
+  async readChain() {
+    try { if (window.ethereum) EVMW.walletChain = Number(BigInt(await window.ethereum.request({ method: 'eth_chainId' }))); } catch { /* no wallet yet */ }
   },
   async send(order, from) {
     const eth = EVMW.eth();
@@ -2185,17 +2208,20 @@ const EVMW = {
     const ethUsd = S.stats?.ethUsd || 0, zroUsd = S.stats?.zroUsd || 0;
     if (!ethUsd || !zroUsd) return toast('Prices are loading, try again in a second', 'bad');
     const init = { eth: (usd / ethUsd).toFixed(6), zro: (usd / zroUsd).toFixed(3) };
+    await EVMW.readChain();
     const sel = await EVMW.pick(m, init);
     if (!sel || !sel.chain) return;
     // the order belongs to an account: sign in with the paying wallet if nobody is logged in yet
     if (!S.me) { EVMW.status('Sign the free login message in your wallet…'); const r = await walletSignIn(); if (!r) { EVMW.close(); return; } }
+    let order = null, sent = false;
     try {
-      const { order } = await api('/wallet/order', { market: m.id, amount: toWei(sel.amount).toString(), pay: sel.pay });
+      ({ order } = await api('/wallet/order', { market: m.id, amount: toWei(sel.amount).toString(), pay: sel.pay }));
       const from = await EVMW.account();
       EVMW.status(`Switching your wallet to <b>${esc(sel.chain.label)}</b>…`);
       await EVMW.ensureChain(sel.chain.chainId);
       EVMW.status(`Confirm <b>${esc(weiToStr(B(order.amount), 6))} ${sel.pay.toUpperCase()}</b> in your wallet…`);
       const tx = await EVMW.send(order, from);
+      sent = true;
       EVMW.status(`Payment sent on ${esc(sel.chain.label)}. Waiting for confirmations, usually about a minute.<br>
         <a href="${esc(sel.chain.explorer)}/tx/${esc(tx)}" target="_blank" rel="noopener" style="text-decoration:underline">View transaction</a><br>
         <span class="mu" style="font-size:11.5px">You can close this: the tokens land in your Rookery wallet either way.</span>
@@ -2209,6 +2235,8 @@ const EVMW = {
       await loadMe();
     } catch (e) {
       EVMW.close();
+      // nothing left the wallet: close the order so it can never catch another payment
+      if (order && !sent) api('/wallet/order/cancel', { id: order.id }).catch(() => {});
       if (e?.code === 4001) toast('Payment cancelled in the wallet. Nothing was sent.', 'bad');
       else toast(esc(e.message || 'Wallet payment failed'), 'bad');
     }

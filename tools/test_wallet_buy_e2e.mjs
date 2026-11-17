@@ -138,6 +138,40 @@ me = await A.req('GET', '/me');
 ok('ETH on Base for a GIWA token, filled', s4?.status === 'filled', s4 ? `${s4.status} · ${s4.note}` : r.error);
 ok('GIWA balance grew', holding(me, gMk.id) > g1);
 
+// ── regression: an abandoned order must never catch the payment meant for another token
+console.log('== regression: abandoned order + payment for another token');
+const abandoned = (await A.req('POST', '/wallet/order', { market: zMk.id, amount: (WEI / 200n).toString(), pay: 'eth' })).order;
+const wanted = (await A.req('POST', '/wallet/order', { market: gMk.id, amount: (WEI / 200n).toString(), pay: 'eth' })).order;
+const zHold = holding(await A.req('GET', '/me'), zMk.id), gHold = holding(await A.req('GET', '/me'), gMk.id);
+await payEth(BASE, buyer, wanted.to, BigInt(wanted.amount));
+await confirm(BASE, 20);
+const sw = await settle(A, wanted.id);
+const sa = await orderStatus(A, abandoned.id);
+me = await A.req('GET', '/me');
+ok('payment fills the order it was sent for', sw?.status === 'filled' && sw.note === 'exact tag match', sw ? `${sw.status} · ${sw.note}` : '');
+ok('the older abandoned order stays untouched', sa?.status === 'open');
+ok('tokens land in the right token', holding(me, gMk.id) > gHold && holding(me, zMk.id) === zHold);
+
+// two orders open and a payment without a tag: nothing is bought, the money waits on the balance
+const second = (await A.req('POST', '/wallet/order', { market: zMk.id, amount: (WEI / 200n).toString(), pay: 'eth' })).order;
+const ethB = BigInt(me.eth);
+await payEth(BASE, buyer, second.to, WEI / 200n + 50_000n);   // no tag, both orders same size
+await confirm(BASE, 20);
+await scan();
+me = await A.req('GET', '/me');
+ok('ambiguous payment does not guess', (await orderStatus(A, abandoned.id))?.status === 'open' && (await orderStatus(A, second.id))?.status === 'open');
+ok('ambiguous payment is kept as balance', BigInt(me.eth) - ethB === WEI / 200n + 50_000n);
+
+// the wallet refused: the site cancels the order right away
+const c1 = (await A.req('POST', '/wallet/order', { market: zMk.id, amount: (WEI / 100n).toString(), pay: 'eth' })).order;
+await A.req('POST', '/wallet/order/cancel', { id: c1.id });
+ok('order cancelled when the wallet refuses', (await orderStatus(A, c1.id))?.status === 'cancelled');
+const other2 = new Client(); await other2.login(ethers.Wallet.createRandom());
+await other2.req('POST', '/wallet/order/cancel', { id: abandoned.id });
+ok('nobody else can cancel your order', (await orderStatus(A, abandoned.id))?.status === 'open');
+await A.req('POST', '/wallet/order/cancel', { id: abandoned.id });
+await A.req('POST', '/wallet/order/cancel', { id: second.id });
+
 // ── edge cases
 console.log('== edge cases');
 // underpaid by far more than 2%: order cancelled, money kept as balance

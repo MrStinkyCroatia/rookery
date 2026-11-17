@@ -1048,13 +1048,22 @@ export class Books {
       quote: { tokens: q.priceZro ? (Number(amt) / 1e18 / q.priceZro) : 0, priceUsd: q.priceUsd } };
   }
   // called right after a deposit is credited: does it settle an open order?
+  // 1) the unique tag picks the order (also up to an hour after it expired: the tag proves intent);
+  // 2) without a tag match the 2% tolerance applies only when exactly one order is open, so a payment
+  //    can never land in an older, abandoned order for a different token.
   evmOrderFill(userId, asset, deltaWei) {
     if (!this.evmOrdersOn()) return null;
     this.evmOrderExpire();
-    const o = this.sql.exec(`SELECT * FROM orders_evm WHERE user_id=? AND asset=? AND status='open' AND expires>=?
-      ORDER BY id LIMIT 1`, userId, asset, now()).toArray()[0];
-    if (!o) return null;
-    const res = matchOrder({ amount: o.amount, tagged: o.tagged }, deltaWei);
+    const d = B(deltaWei);
+    let o = this.sql.exec(`SELECT * FROM orders_evm WHERE user_id=? AND asset=? AND tagged=? AND
+      (status='open' OR (status='expired' AND expires>=?)) ORDER BY id DESC LIMIT 1`, userId, asset, d.toString(), now() - 3600e3).toArray()[0];
+    let res = o ? { action: 'fill', amount: o.amount, exact: true } : null;
+    if (!o) {
+      const open = this.sql.exec(`SELECT * FROM orders_evm WHERE user_id=? AND asset=? AND status='open' AND expires>=?`, userId, asset, now()).toArray();
+      if (open.length !== 1) return open.length ? { action: 'none', reason: 'ambiguous' } : null;
+      o = open[0];
+      res = matchOrder({ amount: o.amount, tagged: o.tagged }, deltaWei);
+    }
     if (res.action === 'none') return { order: o.id, action: 'none' };
     if (res.action === 'cancel') {
       this.sql.exec(`UPDATE orders_evm SET status='cancelled', note=? WHERE id=?`, 'paid ' + res.shortfall + ' wei short, kept as balance', o.id);
@@ -3020,7 +3029,9 @@ export class Books {
           if (b.on === true || b.on === false) this.setMeta('evm_orders', b.on ? '1' : '');
           this.evmOrderExpire();
           return json({ ok: true, on: this.evmOrdersOn(),
-            counts: Object.fromEntries(this.sql.exec(`SELECT status, COUNT(*) c FROM orders_evm GROUP BY status`).toArray().map(r => [r.status, r.c])) });
+            counts: Object.fromEntries(this.sql.exec(`SELECT status, COUNT(*) c FROM orders_evm GROUP BY status`).toArray().map(r => [r.status, r.c])),
+            recent: b.list ? this.sql.exec(`SELECT o.id, u.username, o.market, o.asset, o.amount, o.tagged, o.status, o.tokens, o.note, o.created, o.expires
+              FROM orders_evm o LEFT JOIN users u ON u.id=o.user_id ORDER BY o.id DESC LIMIT 50`).toArray() : undefined });
         }
         if (p === '/admin/audit') {
           const users = this.sql.exec('SELECT id, username, dep_address FROM users WHERE dep_address IS NOT NULL').toArray();
@@ -3291,6 +3302,12 @@ export class Books {
         if (!user) throw new Error('Log in first');
         const b = await req.json();
         return json({ ok: true, order: this.evmOrderCreate(user, b.market, b.amount, b.pay) });
+      }
+      if (method === 'POST' && p === '/wallet/order/cancel') {
+        if (!user) throw new Error('Log in first');
+        const b = await req.json();
+        this.sql.exec(`UPDATE orders_evm SET status='cancelled', note='cancelled before payment' WHERE id=? AND user_id=? AND status='open'`, Number(b.id) || 0, user.id);
+        return json({ ok: true });
       }
       if (method === 'GET' && p === '/wallet/orders') {
         if (!user) throw new Error('Log in first');
