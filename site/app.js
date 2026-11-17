@@ -2055,6 +2055,111 @@ async function viewProfile(name) {
 }
 
 
+/* ───────── live status of wallet buys, bottom-right; survives closing the dialog and reloading the page ───────── */
+const TXW = {
+  key: 'pl_txw',
+  load() { try { return JSON.parse(localStorage.getItem(TXW.key) || '[]'); } catch { return []; } },
+  save(list) { try { localStorage.setItem(TXW.key, JSON.stringify(list.slice(-4))); } catch { /* private mode */ } },
+  get(id) { return TXW.load().find(x => x.id === id); },
+  set(id, patch) {
+    const list = TXW.load(), i = list.findIndex(x => x.id === id);
+    if (i >= 0) list[i] = { ...list[i], ...patch }; else list.push({ id, ...patch });
+    TXW.save(list); TXW.render();
+  },
+  drop(id) { TXW.save(TXW.load().filter(x => x.id !== id)); TXW.render(); },
+  mmss(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; },
+  dock() {
+    let d = document.getElementById('txDock');
+    if (!d) {
+      d = document.createElement('div');
+      d.id = 'txDock';
+      d.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9998;display:flex;flex-direction:column;gap:8px;width:min(340px,calc(100vw - 32px))';
+      document.body.appendChild(d);
+    }
+    return d;
+  },
+  // stage: switch -> sign -> sent -> filled | failed | cancelled | expired
+  render() {
+    const list = TXW.load(), d = TXW.dock();
+    const order = ['switch', 'sign', 'sent', 'filled'];
+    d.innerHTML = list.map(t => {
+      const end = ['filled', 'failed', 'cancelled', 'expired'].includes(t.stage);
+      const at = order.indexOf(t.stage);
+      const step = (i, label) => {
+        const done = t.stage === 'filled' || (at > i && at >= 0);
+        const live = at === i && !end;
+        const bad = end && t.stage !== 'filled' && i === Math.max(at, 0);
+        const ico = done ? '<span style="color:#3ddc97">✓</span>' : live ? '<span class="txw-spin">◌</span>' : bad ? '<span style="color:#ff5c5c">✕</span>' : '<span class="mu">·</span>';
+        return `<div style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.45;${!done && !live && !bad ? 'opacity:.55' : ''}"><span style="width:14px;text-align:center">${ico}</span><span>${label}</span></div>`;
+      };
+      const txLink = t.tx ? ` · <a href="${esc(t.explorer)}/tx/${esc(t.tx)}" target="_blank" rel="noopener" style="text-decoration:underline">view tx ↗</a>` : '';
+      const head = t.stage === 'filled' ? 'Bought' : end ? 'Not completed' : 'Buying';
+      return `<div style="background:#0f0f11;border:1px solid ${t.stage === 'filled' ? '#1f6b4b' : end ? '#6b2a2a' : '#26262c'};border-radius:14px;padding:12px 14px;box-shadow:0 12px 32px rgba(0,0,0,.5)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <b style="font-size:13.5px">${head} $${esc(t.symbol)}</b>
+          <span class="mono mu txw-time" data-start="${t.started}" data-end="${t.ended || ''}" style="margin-left:auto;font-size:11.5px">${TXW.mmss((t.ended || Date.now()) - t.started)}</span>
+          <button data-x="${t.id}" title="Hide" style="background:none;border:0;color:inherit;opacity:.6;cursor:pointer;font-size:15px;padding:0 0 0 4px">×</button>
+        </div>
+        ${step(0, `Switch wallet to ${esc(t.chain)}`)}
+        ${step(1, `Approve ${esc(t.amount)} ${esc(t.unit)} in your wallet`)}
+        ${step(2, `Payment confirming on ${esc(t.chain)}${txLink}<br><span class="mu" style="font-size:11.5px">usually about a minute</span>`)}
+        ${step(3, t.stage === 'filled' ? `Received <b>${esc(t.tokens || '')} $${esc(t.symbol)}</b>` : `Tokens land in your Rookery wallet`)}
+        ${t.stage === 'filled' ? `<div style="margin-top:8px;font-size:12px;color:#3ddc97">All good. <a href="#/wallet" style="text-decoration:underline;color:inherit">Open wallet</a></div>` : ''}
+        ${end && t.stage !== 'filled' ? `<div class="mu" style="margin-top:8px;font-size:11.5px;line-height:1.5">${esc(t.note || 'Nothing was charged.')}</div>` : ''}
+      </div>`;
+    }).join('');
+    d.querySelectorAll('[data-x]').forEach(b => b.onclick = () => TXW.drop(Number(b.dataset.x)));
+    if (!document.getElementById('txwStyle')) {
+      const st = document.createElement('style');
+      st.id = 'txwStyle';
+      st.textContent = '@keyframes txwspin{to{transform:rotate(360deg)}}.txw-spin{display:inline-block;animation:txwspin 1s linear infinite}';
+      document.head.appendChild(st);
+    }
+  },
+  tick() {
+    document.querySelectorAll('#txDock .txw-time').forEach(el => {
+      const end = Number(el.dataset.end) || Date.now();
+      el.textContent = TXW.mmss(end - Number(el.dataset.start));
+    });
+  },
+  // poll the order until it settles (a tagged payment can still land up to an hour after the order expired)
+  async watch(id) {
+    if (TXW._w?.[id]) return;
+    (TXW._w = TXW._w || {})[id] = true;
+    const t0 = TXW.get(id)?.started || Date.now();
+    while (Date.now() - t0 < 70 * 60e3) {
+      await new Promise(r => setTimeout(r, 5000));
+      const t = TXW.get(id);
+      if (!t || t.stage !== 'sent') break;
+      try {
+        const r = await api('/wallet/orders');
+        const o = (r.orders || []).find(x => x.id === id);
+        if (!o) continue;
+        if (o.status === 'filled') {
+          TXW.set(id, { stage: 'filled', ended: Date.now(), tokens: weiToStr(B(o.tokens || '0'), 2) });
+          toast(`Bought <b>${esc(weiToStr(B(o.tokens || '0'), 2))} $${esc(t.symbol)}</b> straight from your wallet`);
+          loadMe().catch(() => {});
+          setTimeout(() => { const x = TXW.get(id); if (x && x.stage === 'filled') TXW.drop(id); }, 60e3);
+          break;
+        }
+        if (o.status === 'failed' || o.status === 'cancelled') {
+          TXW.set(id, { stage: o.status, ended: Date.now(), note: (o.note || 'Order ' + o.status) + '. Anything that arrived stays on your Rookery balance.' });
+          loadMe().catch(() => {});
+          break;
+        }
+      } catch { /* keep watching */ }
+    }
+    delete TXW._w[id];
+  },
+  resume() {
+    TXW.render();
+    for (const t of TXW.load()) if (t.stage === 'sent') TXW.watch(t.id);
+    // finished cards from an earlier visit only need to be seen once
+    for (const t of TXW.load()) if (['filled', 'cancelled'].includes(t.stage) && Date.now() - (t.ended || 0) > 10 * 60e3) TXW.drop(t.id);
+    if (!TXW._timer) TXW._timer = setInterval(TXW.tick, 1000);
+  },
+};
+
 /* ───────── EVM wallets: one-signature buys with ETH or ZRO from any EVM chain Rookery scans ───────── */
 const EVM_ADD = {
   1: { chainName: 'Ethereum', rpcUrls: ['https://ethereum-rpc.publicnode.com'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://etherscan.io'] },
@@ -2216,28 +2321,26 @@ const EVMW = {
     let order = null, sent = false;
     try {
       ({ order } = await api('/wallet/order', { market: m.id, amount: toWei(sel.amount).toString(), pay: sel.pay }));
+      EVMW.close();
+      const id = order.id;
+      TXW.set(id, { symbol: m.symbol, market: m.id, chain: sel.chain.label, explorer: sel.chain.explorer,
+        amount: weiToStr(B(order.amount), sel.pay === 'eth' ? 6 : 4), unit: sel.pay.toUpperCase(), stage: 'switch', started: Date.now() });
+      if (!TXW._timer) TXW._timer = setInterval(TXW.tick, 1000);
       const from = await EVMW.account();
-      EVMW.status(`Switching your wallet to <b>${esc(sel.chain.label)}</b>…`);
       await EVMW.ensureChain(sel.chain.chainId);
-      EVMW.status(`Confirm <b>${esc(weiToStr(B(order.amount), 6))} ${sel.pay.toUpperCase()}</b> in your wallet…`);
+      TXW.set(id, { stage: 'sign' });
       const tx = await EVMW.send(order, from);
       sent = true;
-      EVMW.status(`Payment sent on ${esc(sel.chain.label)}. Waiting for confirmations, usually about a minute.<br>
-        <a href="${esc(sel.chain.explorer)}/tx/${esc(tx)}" target="_blank" rel="noopener" style="text-decoration:underline">View transaction</a><br>
-        <span class="mu" style="font-size:11.5px">You can close this: the tokens land in your Rookery wallet either way.</span>
-        <br><button class="btn sm ghost" id="evmHide" style="margin-top:10px">Close</button>`);
-      document.getElementById('evmHide').onclick = () => EVMW.close();
-      const o = await EVMW.waitFill(order.id);
-      EVMW.close();
-      if (o?.status === 'filled') toast(`Bought <b>${esc(weiToStr(B(o.tokens || '0'), 2))} $${esc(m.symbol)}</b> straight from your wallet`);
-      else if (o) toast(esc(o.note || ('Order ' + o.status)) + '. Anything that arrived stays on your Rookery balance.', 'bad');
-      else toast('Still confirming. Your tokens appear in your wallet as soon as the payment lands.');
-      await loadMe();
+      TXW.set(id, { stage: 'sent', tx });
+      TXW.watch(id);
     } catch (e) {
       EVMW.close();
       // nothing left the wallet: close the order so it can never catch another payment
-      if (order && !sent) api('/wallet/order/cancel', { id: order.id }).catch(() => {});
-      if (e?.code === 4001) toast('Payment cancelled in the wallet. Nothing was sent.', 'bad');
+      if (order && !sent) {
+        api('/wallet/order/cancel', { id: order.id }).catch(() => {});
+        TXW.set(order.id, { stage: 'cancelled', ended: Date.now(), note: e?.code === 4001 ? 'Cancelled in the wallet. Nothing was sent.' : (e.message || 'Wallet payment failed') + '. Nothing was sent.' });
+        setTimeout(() => TXW.drop(order.id), 20e3);
+      } else if (e?.code === 4001) toast('Payment cancelled in the wallet. Nothing was sent.', 'bad');
       else toast(esc(e.message || 'Wallet payment failed'), 'bad');
     }
   },
@@ -2691,6 +2794,16 @@ async function route() {
   // remember ?ref=… from a referral link until the person signs up
   try { const r = new URLSearchParams(location.search).get('ref'); if (r) localStorage.setItem('pl_ref', r.slice(0, 20)); } catch { /* ignore */ }
   liveConnect();
+  TXW.resume();
+  // visual preview of the status cards (renders only, nothing is stored or sent): /?txdemo
+  if (/[?&]txdemo/.test(location.search)) {
+    const t = Date.now();
+    const fake = [
+      { id: -1, symbol: 'MERLIN', chain: 'Base', explorer: 'https://basescan.org', amount: '0.010000', unit: 'ETH', stage: 'sent', tx: '0x' + 'ab'.repeat(32), started: t - 41e3 },
+      { id: -2, symbol: 'BRYAN', chain: 'Arbitrum', explorer: 'https://arbiscan.io', amount: '25.0000', unit: 'ZRO', stage: 'filled', tx: '0x' + 'cd'.repeat(32), started: t - 74e3, ended: t - 2e3, tokens: '3,104,227.51' },
+    ];
+    TXW.load = () => fake; TXW.save = () => {}; TXW.watch = async () => {}; TXW.render();
+  }
   tickerInit();
   loadHatches();
   setInterval(loadStats, 30000);
