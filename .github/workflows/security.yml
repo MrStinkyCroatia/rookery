@@ -27,7 +27,7 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks version
-          gitleaks detect --source . --redact --no-banner --exit-code 1 --verbose
+          gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1 --verbose
       - name: no key files
         run: |
           if git ls-files | grep -Ei '(^|/)\.(admin_key|master_mnemonic|master_xprv|dev\.vars)$|^\.staging/|\.testnet_burn$'; then

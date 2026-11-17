@@ -1,0 +1,17 @@
+# Default gitleaks rules, plus allowances for values that are public by design.
+# Keep this list tight: anything that could authorise a transaction must stay flagged.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "public on-chain constants and docs"
+regexes = [
+  # EVM addresses (20 bytes). Private keys are 32 bytes and stay flagged.
+  '''0x[0-9a-fA-F]{40}''',
+  # Stellar public keys start with G; secret keys start with S and stay flagged.
+  '''G[A-Z2-7]{55}''',
+]
+paths = [
+  '''site/assets/''',
+]
