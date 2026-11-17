@@ -148,6 +148,7 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/api/')) {
+      if (url.pathname === '/api/_cron') return new Response('not found', { status: 404 });
       const ttl = EDGE_TTL[url.pathname];
       const cacheable = ttl && req.method === 'GET';
       const cache = cacheable ? caches.default : null;
@@ -197,6 +198,9 @@ export class Books {
     this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
+    if (env.RPC_OVERRIDE) {
+      try { for (const [c, u] of Object.entries(JSON.parse(env.RPC_OVERRIDE))) if (CHAINS[c]) { CHAINS[c].rpcs = [u]; CHAINS[c].rpc = u; } } catch { /* ignore */ }
+    }
     this.init();
     // live push: keep-alive pings are answered by the runtime without waking the object
     try { ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"ping":1}', '{"pong":1}')); } catch { /* older runtime */ }
@@ -313,6 +317,9 @@ export class Books {
     try { q(`ALTER TABLE markets ADD COLUMN st_issued INTEGER DEFAULT 0`); } catch { /* exists */ }
     q(`CREATE TABLE IF NOT EXISTS out_pending (id INTEGER PRIMARY KEY AUTOINCREMENT, transfer_id INTEGER, src_user INTEGER, chain TEXT, amount TEXT, txid TEXT, ts INTEGER)`);
     try { q(`ALTER TABLE out_pending ADD COLUMN raw TEXT`); } catch { /* exists */ }
+    // on a brand-new database the generic column loop above ran before this table existed
+    try { q(`ALTER TABLE out_pending ADD COLUMN asset TEXT DEFAULT 'zro'`); } catch { /* exists */ }
+    try { q(`ALTER TABLE out_pending ADD COLUMN pre_bal TEXT`); } catch { /* exists */ }
     q(`CREATE TABLE IF NOT EXISTS siwe_nonces (nonce TEXT PRIMARY KEY, address TEXT, message TEXT, expires INTEGER)`);
     // "hatching soon": a creator announces a token with a countdown; people sign up to be told when it goes live
     q(`CREATE TABLE IF NOT EXISTS hatches (
@@ -1012,13 +1019,17 @@ export class Books {
   evmOrderExpire() {
     this.sql.exec(`UPDATE orders_evm SET status='expired' WHERE status='open' AND expires<?`, now());
   }
-  evmOrderCreate(user, market, amountWei) {
+  evmOrderCreate(user, market, amountWei, pay) {
     if (!this.evmOrdersOn()) throw new Error('Wallet buys are not live yet');
     const m = this.market(String(market || ''));
     if (!m) throw new Error('Unknown token');
     if (m.network === 'stellar') throw new Error('Stellar tokens are bought with a Stellar wallet');
     if (m.migrated) throw new Error('This token already graduated');
-    const asset = qa(m);
+    const asset = pay === 'eth' || pay === 'zro' ? pay : qa(m);
+    if (asset === 'eth') this.ensureEthAddresses();
+    const me = this.sql.exec('SELECT dep_address, eth_dep_address FROM users WHERE id=?', user.id).one();
+    const to = asset === 'eth' ? me.eth_dep_address : me.dep_address;
+    if (!to) throw new Error('No deposit address yet, try again in a minute');
     const amt = B(amountWei);
     if (amt < MIN_BUY[asset]) throw new Error(asset === 'eth' ? 'Minimum buy is 0.00005 ETH' : 'Minimum buy is 0.1 ZRO');
     this.evmOrderExpire();
@@ -1028,10 +1039,12 @@ export class Books {
     for (let i = 0; i < 999 && used.has(tag); i++) tag = (tag % 998) + 1;
     const tagged = amt + BigInt(tag);
     const id = this.sql.exec(`INSERT INTO orders_evm (user_id,market,asset,amount,tagged,tag,status,created,expires)
-      VALUES (?,?,?,?,?,?,?,?,?)`, user.id, m.id, asset, amt.toString(), tagged.toString(), tag, 'open', now(), now() + ORDER_TTL_MS).one().last_insert_rowid;
+      VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`, user.id, m.id, asset, amt.toString(), tagged.toString(), tag, 'open', now(), now() + ORDER_TTL_MS).one().id;
     const q = this.view(m);
+    const chains = (asset === 'eth' ? ETH_CHAINS : Object.keys(CHAINS))
+      .map(c => ({ key: c, label: CHAINS[c].label, chainId: CHAINS[c].chainId, explorer: CHAINS[c].explorer }));
     return { id, market: m.id, asset, amount: tagged.toString(), base: amt.toString(), tag,
-      to: user.dep_address, expires: now() + ORDER_TTL_MS,
+      to, token: asset === 'zro' ? ZRO_TOKEN : null, chains, expires: now() + ORDER_TTL_MS,
       quote: { tokens: q.priceZro ? (Number(amt) / 1e18 / q.priceZro) : 0, priceUsd: q.priceUsd } };
   }
   // called right after a deposit is credited: does it settle an open order?
@@ -1050,7 +1063,7 @@ export class Books {
     const u = this.sql.exec('SELECT * FROM users WHERE id=?', userId).toArray()[0];
     if (!u) return null;
     try {
-      const r = this.trade(u, { market: o.market, side: 'buy', amount: res.amount });
+      const r = this.trade(u, { market: o.market, side: 'buy', amount: res.amount, pay: o.asset });
       this.sql.exec(`UPDATE orders_evm SET status='filled', tokens=?, note=?, txid=? WHERE id=?`,
         String(r.tokens || ''), res.exact ? 'exact tag match' : 'within tolerance', String(r.txid || ''), o.id);
       return { order: o.id, action: 'fill', tokens: r.tokens };
@@ -2477,7 +2490,8 @@ export class Books {
           markets: this.sql.exec('SELECT COUNT(*) c FROM markets').one().c,
           netTokens: (() => { const o = { zero: 0, giwa: 0, stellar: 0 }; for (const r of this.sql.exec('SELECT network, COUNT(*) c FROM markets GROUP BY network').toArray()) o[r.network] = r.c; return o; })(),
           traders: this.sql.exec('SELECT COUNT(*) c FROM users').one().c,
-          networks: NETWORKS, chains: Object.fromEntries(Object.entries(CHAINS).map(([k, v]) => [k, { label: v.label, explorer: v.explorer }])),
+          networks: NETWORKS, chains: Object.fromEntries(Object.entries(CHAINS).map(([k, v]) => [k, { label: v.label, explorer: v.explorer, chainId: v.chainId }])),
+          walletBuy: this.evmOrdersOn(), zroToken: ZRO_TOKEN,
           tgBot: this.meta('tg_bot') || '', zroToken: ZRO_TOKEN, curve: { supply: CURVE.supply.toString(), curve: CURVE.curve.toString(), vZro: CURVE.vZro.toString(), vTok: CURVE.vTok.toString() },
         });
       }
@@ -3001,6 +3015,13 @@ export class Books {
         if (p === '/admin/recover') { try { return json({ ok: true, recovered: await this.wserial(() => this.recoverWithdrawals()) }); } catch (e) { return json({ ok: false, error: String(e.stack || e) }); } }
         if (p === '/admin/sweep') return json({ ok: true, swept: await this.wserial(() => this.sweepDeposits()) });
         if (p === '/admin/scan') return json({ ok: true, scan: await this.scanDeposits() });
+        if (p === '/admin/evm-orders') {
+          const b = await req.json().catch(() => ({}));
+          if (b.on === true || b.on === false) this.setMeta('evm_orders', b.on ? '1' : '');
+          this.evmOrderExpire();
+          return json({ ok: true, on: this.evmOrdersOn(),
+            counts: Object.fromEntries(this.sql.exec(`SELECT status, COUNT(*) c FROM orders_evm GROUP BY status`).toArray().map(r => [r.status, r.c])) });
+        }
         if (p === '/admin/audit') {
           const users = this.sql.exec('SELECT id, username, dep_address FROM users WHERE dep_address IS NOT NULL').toArray();
           const hot = this.hotWallet().address;
@@ -3269,7 +3290,7 @@ export class Books {
       if (method === 'POST' && p === '/wallet/order') {
         if (!user) throw new Error('Log in first');
         const b = await req.json();
-        return json({ ok: true, order: this.evmOrderCreate(user, b.market, b.amount) });
+        return json({ ok: true, order: this.evmOrderCreate(user, b.market, b.amount, b.pay) });
       }
       if (method === 'GET' && p === '/wallet/orders') {
         if (!user) throw new Error('Log in first');

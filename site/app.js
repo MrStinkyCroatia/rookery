@@ -1215,6 +1215,7 @@ async function viewToken(id) {
         <div class="quick" id="quick"></div>
         <div class="est" id="est"></div>
         <button class="btn lg wide up" id="go">${S.me ? 'Buy' : 'Log in to trade'}</button>
+        ${m.network !== 'stellar' && !m.migrated && S.stats?.walletBuy ? `<button class="btn lg wide ghost" id="evmBuy" style="margin-top:8px;gap:8px"><span style="font-size:15px">⬡</span>Buy from wallet · ETH or ZRO</button>` : ''}
         ${m.network === 'stellar' && !m.migrated ? `<button class="btn lg wide ghost" id="stBuy" style="margin-top:8px;gap:8px"><span style="font-size:15px">✶</span>Buy from wallet</button>
         <button class="btn lg wide ghost" id="wcBuy" style="margin-top:6px;gap:8px"><span style="font-size:14px">▲</span>Buy with Lobstr</button>` : ''}
         <div class="qb" id="qbRow"><span class="mono mu">Quick buy</span><input id="qbAmt" value=""><span class="mu" style="font-size:12px" id="qbUnit">ZRO</span>
@@ -1367,6 +1368,16 @@ async function viewToken(id) {
     try { await STW.buyWc(m.id, xlm); }
     catch (e) { toast(esc(e.message || e), 'bad'); WC.hideQr(); }
     finally { b.disabled = false; b.innerHTML = was; }
+  };
+  if ($('#evmBuy')) $('#evmBuy').onclick = async () => {
+    const b = $('#evmBuy'), old = b.innerHTML;
+    // whatever is typed in the trade box, in the selected pay asset, becomes a USD size
+    const v = Number(amt.value || 0) || (pay === 'eth' ? Number(S.quickEth || 0.005) : Number(S.quick || 10));
+    const usd = v * (pay === 'eth' ? (S.stats?.ethUsd || 0) : (S.stats?.zroUsd || 0));
+    b.disabled = true; b.innerHTML = 'Waiting for your wallet…';
+    try { await EVMW.buy(m, usd); }
+    catch (e) { toast(esc(e.message || e), 'bad'); }
+    finally { b.disabled = false; b.innerHTML = old; }
   };
   if ($('#stBuy')) $('#stBuy').onclick = async () => {
     const b = $('#stBuy'), old = b.innerHTML;
@@ -2043,6 +2054,126 @@ async function viewProfile(name) {
   };
 }
 
+
+/* ───────── EVM wallets: one-signature buys with ETH or ZRO from any EVM chain Rookery scans ───────── */
+const EVM_ADD = {
+  1: { chainName: 'Ethereum', rpcUrls: ['https://ethereum-rpc.publicnode.com'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://etherscan.io'] },
+  8453: { chainName: 'Base', rpcUrls: ['https://mainnet.base.org'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://basescan.org'] },
+  42161: { chainName: 'Arbitrum One', rpcUrls: ['https://arb1.arbitrum.io/rpc'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://arbiscan.io'] },
+  56: { chainName: 'BNB Chain', rpcUrls: ['https://bsc-dataseed.bnbchain.org'], nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 }, blockExplorerUrls: ['https://bscscan.com'] },
+  10: { chainName: 'Optimism', rpcUrls: ['https://mainnet.optimism.io'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://optimistic.etherscan.io'] },
+};
+const EVMW = {
+  hex: (n) => '0x' + BigInt(n).toString(16),
+  eth() {
+    if (!window.ethereum) throw new Error('No wallet found. Install MetaMask or Rabby, or open Rookery in your wallet app browser.');
+    return window.ethereum;
+  },
+  async account() { const [a] = await EVMW.eth().request({ method: 'eth_requestAccounts' }); return a; },
+  async ensureChain(chainId) {
+    const eth = EVMW.eth(), want = EVMW.hex(chainId);
+    const cur = String(await eth.request({ method: 'eth_chainId' }) || '').toLowerCase();
+    if (cur === want) return;
+    try { await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: want }] }); }
+    catch (e) {
+      if (e?.code !== 4902 || !EVM_ADD[chainId]) throw e;
+      await eth.request({ method: 'wallet_addEthereumChain', params: [{ chainId: want, ...EVM_ADD[chainId] }] });
+    }
+  },
+  box(html) {
+    let el = document.getElementById('evmBox');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'evmBox';
+      el.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.86);display:grid;place-items:center;padding:20px';
+      document.body.appendChild(el);
+    }
+    el.innerHTML = `<div style="background:#0f0f11;border:1px solid #26262c;border-radius:16px;padding:22px;width:100%;max-width:380px">${html}</div>`;
+    return el;
+  },
+  close() { document.getElementById('evmBox')?.remove(); },
+  status(html) { EVMW.box(`<div class="mono mu" style="margin-bottom:10px">Buy from wallet</div><p style="font-size:13.5px;line-height:1.55;margin:0">${html}</p>`); },
+  // choose what to pay with and from which network; resolves { pay, chain } or null when cancelled
+  pick(m, amounts) {
+    const q = (m.quote || 'ZRO').toLowerCase();
+    return new Promise((done) => {
+      let pay = q === 'eth' ? 'eth' : 'zro';
+      const chainsFor = (a) => (a === 'eth' ? (S.stats?.ethChains || ['ethereum', 'base', 'arbitrum']) : Object.keys(S.stats?.chains || {}))
+        .map(k => ({ key: k, ...(S.stats?.chains?.[k] || {}) })).filter(c => c.chainId);
+      const draw = () => {
+        const el = EVMW.box(`<div class="mono mu" style="margin-bottom:10px">Buy $${esc(m.symbol)} from your wallet</div>
+          <p style="font-size:13px;line-height:1.55;margin:0 0 12px">One signature, no deposit step. Pay with ETH or ZRO from the network you already use: Rookery converts and buys at the curve price when the payment confirms.</p>
+          <div class="mono mu" style="font-size:11px;margin-bottom:6px">Pay with</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">
+            <button class="btn sm ${pay === 'eth' ? '' : 'ghost'}" data-p="eth">ETH · ${esc(amounts.eth)}</button>
+            <button class="btn sm ${pay === 'zro' ? '' : 'ghost'}" data-p="zro">ZRO · ${esc(amounts.zro)}</button>
+          </div>
+          <div class="mono mu" style="font-size:11px;margin-bottom:6px">From network</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">${chainsFor(pay).map(c =>
+            `<button class="btn sm ghost" data-c="${esc(c.key)}">${esc(c.label)}</button>`).join('')}</div>
+          ${pay === 'eth' && q === 'zro' ? `<p class="mu" style="font-size:11.5px;line-height:1.5;margin:12px 0 0">This token trades against ZRO: your ETH is converted at the live ETH/ZRO rate when it lands.</p>` : ''}
+          <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">Valid for 10 minutes. Send the exact amount your wallet shows: the last digits mark this order.</p>
+          <button class="btn sm ghost" id="evmCancel" style="margin-top:12px;width:100%">Cancel</button>`);
+        el.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { pay = b.dataset.p; draw(); });
+        el.querySelectorAll('[data-c]').forEach(b => b.onclick = () => done({ pay, chain: chainsFor(pay).find(c => c.key === b.dataset.c) }));
+        el.querySelector('#evmCancel').onclick = () => { EVMW.close(); done(null); };
+      };
+      draw();
+    });
+  },
+  async send(order, from) {
+    const eth = EVMW.eth();
+    if (order.asset === 'eth') return eth.request({ method: 'eth_sendTransaction', params: [{ from, to: order.to, value: EVMW.hex(order.amount) }] });
+    const data = '0xa9059cbb' + order.to.slice(2).toLowerCase().padStart(64, '0') + BigInt(order.amount).toString(16).padStart(64, '0');
+    return eth.request({ method: 'eth_sendTransaction', params: [{ from, to: order.token, data }] });
+  },
+  async waitFill(id, maxMs = 15 * 60e3) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      await new Promise(r => setTimeout(r, 6000));
+      try {
+        const r = await api('/wallet/orders');
+        const o = (r.orders || []).find(x => x.id === id);
+        if (o && o.status !== 'open') return o;
+      } catch { /* keep waiting */ }
+    }
+    return null;
+  },
+  // usd: the amount the user typed, expressed in USD so both pay options show the same size
+  async buy(m, usd) {
+    if (!S.stats?.walletBuy) return toast('Buying from a wallet is not live yet', 'bad');
+    if (!(usd > 0)) return toast('Enter an amount first', 'bad');
+    if (!S.me) { const r = await walletSignIn(); if (!r) return; }
+    const ethUsd = S.stats?.ethUsd || 0, zroUsd = S.stats?.zroUsd || 0;
+    if (!ethUsd || !zroUsd) return toast('Prices are loading, try again in a second', 'bad');
+    const amounts = { eth: (usd / ethUsd).toFixed(6), zro: (usd / zroUsd).toFixed(3) };
+    const sel = await EVMW.pick(m, amounts);
+    if (!sel || !sel.chain) return;
+    try {
+      const { order } = await api('/wallet/order', { market: m.id, amount: toWei(amounts[sel.pay]).toString(), pay: sel.pay });
+      const from = await EVMW.account();
+      EVMW.status(`Switching your wallet to <b>${esc(sel.chain.label)}</b>…`);
+      await EVMW.ensureChain(sel.chain.chainId);
+      EVMW.status(`Confirm <b>${esc(weiToStr(B(order.amount), 6))} ${sel.pay.toUpperCase()}</b> in your wallet…`);
+      const tx = await EVMW.send(order, from);
+      EVMW.status(`Payment sent on ${esc(sel.chain.label)}. Waiting for confirmations, usually about a minute.<br>
+        <a href="${esc(sel.chain.explorer)}/tx/${esc(tx)}" target="_blank" rel="noopener" style="text-decoration:underline">View transaction</a><br>
+        <span class="mu" style="font-size:11.5px">You can close this: the tokens land in your Rookery wallet either way.</span>
+        <br><button class="btn sm ghost" id="evmHide" style="margin-top:10px">Close</button>`);
+      document.getElementById('evmHide').onclick = () => EVMW.close();
+      const o = await EVMW.waitFill(order.id);
+      EVMW.close();
+      if (o?.status === 'filled') toast(`Bought <b>${esc(weiToStr(B(o.tokens || '0'), 2))} $${esc(m.symbol)}</b> straight from your wallet`);
+      else if (o) toast(esc(o.note || ('Order ' + o.status)) + '. Anything that arrived stays on your Rookery balance.', 'bad');
+      else toast('Still confirming. Your tokens appear in your wallet as soon as the payment lands.');
+      await loadMe();
+    } catch (e) {
+      EVMW.close();
+      if (e?.code === 4001) toast('Payment cancelled in the wallet. Nothing was sent.', 'bad');
+      else toast(esc(e.message || 'Wallet payment failed'), 'bad');
+    }
+  },
+};
 
 /* ───────── wallet sign-in (SIWE) ───────── */
 async function walletSignIn(link = false) {

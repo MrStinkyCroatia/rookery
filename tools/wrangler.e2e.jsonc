@@ -1,0 +1,13 @@
+// Local end-to-end config: the real worker code, a throwaway Durable Object, chains pointed at anvil forks.
+// Secrets for this run are generated into tools/.dev.vars (git-ignored) by tools/run_wallet_e2e.sh.
+{
+  "name": "rookery-e2e",
+  "main": "../worker/index.js",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "../site", "binding": "ASSETS", "not_found_handling": "single-page-application" },
+  "durable_objects": { "bindings": [{ "name": "BOOKS", "class_name": "Books" }] },
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "rookery-e2e" }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Books"] }],
+  "triggers": { "crons": ["* * * * *"] }
+}
