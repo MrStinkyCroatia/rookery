@@ -4,6 +4,8 @@
 [![license](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 [![secret scan](https://img.shields.io/badge/secrets-gitleaks%20on%20every%20push-black.svg)](.gitleaks.toml)
 
+![Rookery](docs/penguin-hero.png)
+
 Site: **https://rookery.stinkypenguin.xyz**
 
 Networks: **Zero** (LayerZero, mainnet 30 Nov) and **GIWA** (Upbit, testnet, mainnet TBA), plus **Stellar** on mainnet.
