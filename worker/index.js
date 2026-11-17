@@ -1837,6 +1837,8 @@ export class Books {
           const w = new Wallet(this.master().deriveChild(c.dep_index).privateKey);
           const bal = await this.zroBalanceOf(chain, w.address);
           if (bal < SWEEP_MIN[chain]) continue;
+          // only sweep what has been credited: a fresh, not yet confirmed deposit would otherwise leave with it
+          if (bal !== B(c.last)) continue;
           const data = XFER_IFACE.encodeFunctionData('transfer', [hot.address, bal]);
           let gasLimit;
           try { gasLimit = BigInt(await rpc(chain, 'eth_estimateGas', [{ from: w.address, to: ZRO_TOKEN, data }])) * 13n / 10n; } catch { gasLimit = WD_GAS; }
@@ -1862,8 +1864,8 @@ export class Books {
           });
           try { await broadcastAll(chain, sg.raw); sg.used(); done.push({ chain, user: c.user_id, action: 'sweep', zro: Number(bal) / 1e18, tx: sg.hash }); }
           catch (e) {
-            const known = await rpc(chain, 'eth_getTransactionByHash', [sg.hash]).catch(() => 'err');
-            if (!known) this.sql.exec('DELETE FROM out_pending WHERE id=?', oid);
+            sg.used();   // keep it on the books: the scanner settles it from the receipt or drops it after 10 minutes
+            done.push({ chain, user: c.user_id, action: 'sweep', zro: Number(bal) / 1e18, tx: sg.hash, note: 'broadcast uncertain: ' + String(e.message || e).slice(0, 80) });
           }
         }
       } catch (e) { done.push({ chain, error: String(e.message || e).slice(0, 120) }); }
@@ -2092,7 +2094,9 @@ export class Books {
         for (const c of cands) {
           const w = this.ethWallet(c.dep_index), seen = B(c.last);
           const onchain = BigInt(await rpc(chain, 'eth_getBalance', [w.address, 'latest']));
-          if (onchain < seen) continue; // not settled yet
+          // anything else means a payment or an earlier sweep is still in flight: sweeping now could move
+          // money the scanner has not credited yet. Wait for the next tick.
+          if (onchain !== seen) continue;
           const gp = BigInt(await rpc(chain, 'eth_gasPrice', [])) * 5n / 4n + 1n;
           let gasLimit = 21000n;
           try { gasLimit = BigInt(await rpc(chain, 'eth_estimateGas', [{ from: w.address, to: hot, value: toHex(1n) }])) * 13n / 10n; } catch {}
@@ -2104,8 +2108,10 @@ export class Books {
             0, c.user_id, chain, value.toString(), sg.hash, now(), sg.raw, 'eth', seen.toString());
           try { await broadcastAll(chain, sg.raw); sg.used(); done.push({ chain, user: c.user_id, eth: Number(value) / 1e18, tx: sg.hash }); }
           catch (e) {
-            const known = await rpc(chain, 'eth_getTransactionByHash', [sg.hash]).catch(() => 'err');
-            if (!known) this.sql.exec('DELETE FROM out_pending WHERE txid=?', sg.hash);
+            // never forget a signed sweep on a failed broadcast: it may still land. The scanner rebroadcasts it,
+            // settles it from its receipt, or drops it after 10 minutes without one.
+            sg.used();
+            done.push({ chain, user: c.user_id, eth: Number(value) / 1e18, tx: sg.hash, note: 'broadcast uncertain: ' + String(e.message || e).slice(0, 80) });
           }
         }
       } catch (e) { done.push({ chain, error: String(e.message || e).slice(0, 120) }); }
@@ -2870,6 +2876,13 @@ export class Books {
               u.id, 'deposit', b.chain || 'manual', String(b.amount), 'confirmed', b.note || 'Manual credit', now(), as);
           });
           return json({ ok: true, zro: this.bal(u.id, 'zro').toString(), eth: this.bal(u.id, 'eth').toString() });
+        }
+        // corrective trade on a user's behalf (e.g. a payment that bought the wrong token); recorded like any trade
+        if (p === '/admin/trade') {
+          const b = await req.json();
+          const u = this.sql.exec('SELECT * FROM users WHERE username=?', String(b.user || '')).toArray()[0];
+          if (!u) throw new Error('user not found');
+          return json(this.trade(u, { market: String(b.market || ''), side: b.side === 'sell' ? 'sell' : 'buy', amount: String(b.amount || '0'), pay: b.pay }));
         }
         if (p === '/admin/migrate-quote') {
           // ZRO market -> ETH market, keeping the token price in USD exactly; holders keep their tokens 1:1

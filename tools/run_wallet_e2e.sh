@@ -12,6 +12,8 @@ trap cleanup EXIT
 
 anvil --fork-url https://base-rpc.publicnode.com --port 8547 --silent &
 anvil --fork-url https://arb1.arbitrum.io/rpc --port 8548 --silent &
+# the worker reaches Base through a proxy that can simulate a flaky RPC (tools/fault_proxy.mjs)
+node tools/fault_proxy.mjs 8549 http://127.0.0.1:8547 &
 
 # throwaway keys for this run only
 XPRV=$(node -e "const {HDNodeWallet}=require('ethers');console.log(HDNodeWallet.createRandom().extendedKey)")
@@ -20,7 +22,7 @@ cat > tools/.dev.vars <<EOF
 MASTER_XPRV=$XPRV
 ADMIN_KEY=$ADMIN
 STELLAR_NET=testnet
-RPC_OVERRIDE={"base":"http://127.0.0.1:8547","arbitrum":"http://127.0.0.1:8548","ethereum":"http://127.0.0.1:9","bsc":"http://127.0.0.1:9","optimism":"http://127.0.0.1:9"}
+RPC_OVERRIDE={"base":"http://127.0.0.1:8549","arbitrum":"http://127.0.0.1:8548","ethereum":"http://127.0.0.1:9","bsc":"http://127.0.0.1:9","optimism":"http://127.0.0.1:9"}
 EOF
 
 for p in 8547 8548; do

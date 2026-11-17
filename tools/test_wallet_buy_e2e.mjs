@@ -172,6 +172,32 @@ ok('nobody else can cancel your order', (await orderStatus(A, abandoned.id))?.st
 await A.req('POST', '/wallet/order/cancel', { id: abandoned.id });
 await A.req('POST', '/wallet/order/cancel', { id: second.id });
 
+// ── regression (mainnet, 17 Nov): a sweep lands while the RPC reports failure, then a new payment arrives
+console.log('== regression: flaky RPC during a sweep, then a second payment');
+const tick = async () => { await fetch('http://127.0.0.1:8787/__scheduled').catch(() => {}); await sleep(6000); };
+const fault = async (on) => (await fetch('http://127.0.0.1:8549/__fault?on=' + (on ? 1 : 0))).json();
+const dW = ethers.Wallet.createRandom();
+const D = new Client(); await D.login(dW);
+await setEth(BASE, dW.address, WEI);
+await fault(true);
+const px = (await D.req('POST', '/wallet/order', { market: gMk.id, amount: (WEI / 100n).toString(), pay: 'eth' })).order;
+await payEth(BASE, dW, px.to, BigInt(px.amount));
+// tick 1 credits the payment, tick 2 sweeps it through the flaky RPC; the next payment lands before any further scan
+for (let i = 0; i < 2; i++) { await confirm(BASE, 20); await tick(); }
+const hidden = (await fault(true)).hidden;
+const py = (await D.req('POST', '/wallet/order', { market: gMk.id, amount: (WEI / 100n).toString(), pay: 'eth' })).order;
+await payEth(BASE, dW, py.to, BigInt(py.amount));
+for (let i = 0; i < 4; i++) { await confirm(BASE, 20); await tick(); }
+await fault(false);
+const ox = await orderStatus(D, px.id), oy = await orderStatus(D, py.id);
+const dMe = await D.req('GET', '/me');
+const credited = (dMe.transfers || []).filter(t => t.kind === 'deposit' && t.asset === 'eth').reduce((a, t) => a + BigInt(t.amount), 0n);
+const paid = BigInt(px.amount) + BigInt(py.amount);
+ok('a sweep went out through the flaky RPC', hidden >= 1, `${hidden} tx reported as failed but mined`);
+ok('first payment filled', ox?.status === 'filled', ox ? `${ox.status} · ${ox.note}` : '');
+ok('second payment filled in full', oy?.status === 'filled', oy ? `${oy.status} · ${oy.note}` : '');
+ok('credited exactly what was paid', credited === paid, `${fmt(credited)} of ${fmt(paid)} ETH`);
+
 // ── edge cases
 console.log('== edge cases');
 // underpaid by far more than 2%: order cancelled, money kept as balance
