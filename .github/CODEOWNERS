@@ -1,0 +1,7 @@
+# Every path is owned by the account owner: a pull request from anyone else needs an explicit review.
+* @MrStinkyCroatia
+
+# money-moving code gets a closer look
+/worker/ @MrStinkyCroatia
+/stellar/ @MrStinkyCroatia
+/deploy.sh @MrStinkyCroatia

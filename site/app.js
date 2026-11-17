@@ -1,0 +1,2501 @@
+/* Rookery — frontend (vanilla, hash routed) */
+'use strict';
+
+const S = {
+  me: null, stats: null, timer: null, chart: null,
+  net: localStorage.getItem('pl_net') || '',
+  quick: localStorage.getItem('pl_quick') || '10',
+};
+const app = document.getElementById('app');
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const B = (v) => BigInt(v || 0);
+const WEI = 10n ** 18n;
+
+/* ───────── formatting ───────── */
+const SUB = '₀₁₂₃₄₅₆₇₈₉';
+function fmtUsd(v) {
+  if (v == null || isNaN(v)) return '—';
+  const a = Math.abs(v), s = v < 0 ? '-' : '';
+  if (a >= 1e9) return `${s}$${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${s}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e4) return `${s}$${(a / 1e3).toFixed(1)}K`;
+  if (a >= 1) return `${s}$${a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (a === 0) return '$0';
+  if (a >= 0.01) return `${s}$${a.toFixed(4)}`;
+  const z = Math.floor(-Math.log10(a)) - 1;
+  const digits = Math.round(a * 10 ** (z + 4)).toString().slice(0, 4);
+  return `${s}$0.0${[...String(z)].map(d => SUB[d]).join('')}${digits}`;
+}
+const axisUsd = (v) => (v >= 1 ? v.toFixed(2) : v === 0 ? '0' : v.toPrecision(3));
+const fmtPct = (v) => `<span class="${v >= 0 ? 'up' : 'dn'}">${v >= 0 ? '+' : ''}${(v || 0).toFixed(1)}%</span>`;
+const zNum = (v) => (typeof v === 'number' ? v : Number(B(v)) / 1e18); // accepts wei (string/BigInt) or an already-human number
+function fmtZ(wei, dp = 2) {
+  const n = zNum(wei);
+  if (n === 0) return '0';
+  if (n >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n < 0.01) return n.toPrecision(2);
+  return n.toLocaleString('en-US', { maximumFractionDigits: dp });
+}
+function fmtT(wei) {
+  const n = zNum(wei);
+  if (!n) return '0';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toFixed(n < 1 ? 4 : 2);
+}
+function toWei(str) {
+  str = String(str || '').trim().replace(/,/g, '');
+  if (!/^\d*\.?\d*$/.test(str) || str === '' || str === '.') return 0n;
+  const [i, f = ''] = str.split('.');
+  return B(i || '0') * WEI + B((f + '0'.repeat(18)).slice(0, 18));
+}
+// exact, always rounds DOWN (MAX must never exceed the real balance)
+const weiToStr = (wei, dp = 6) => {
+  const v = B(wei); if (v <= 0n) return '0';
+  const t = v / 10n ** BigInt(18 - dp), base = 10n ** BigInt(dp);
+  const f = (t % base).toString().padStart(dp, '0').replace(/0+$/, '');
+  return f ? `${t / base}.${f}` : `${t / base}`;
+};
+function ago(ts) {
+  const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return s + 's'; if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd';
+}
+const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '';
+const initials = (s) => esc(String(s || '?').replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || '?');
+const timg = (m, cls = '') => `<div class="timg ${cls}">${m.image ? `<img src="${esc(m.image)}" alt="" loading="lazy">` : initials(m.symbol)}</div>`;
+const avatar = (u, url) => `<div class="av">${url ? `<img src="${esc(url)}" alt="">` : initials(u)}</div>`;
+const netTag = (n) => `<span class="tag ${n}">${n === 'giwa' ? '<img src="/assets/giwa.png" alt="">GIWA' : n === 'stellar' ? '<img src="/assets/chains/stellar.svg" alt="">STELLAR' : 'ZERO'}</span>`;
+const netName = (n) => (n === 'giwa' ? 'GIWA' : n === 'stellar' ? 'Stellar' : 'Zero');
+
+/* ───────── api ───────── */
+async function api(path, body, method) {
+  const opt = { method: method || (body ? 'POST' : 'GET'), credentials: 'same-origin', headers: { 'x-pl': '1' } };
+  if (body) { opt.headers['content-type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch('/api' + path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) { const e = new Error(j.error || 'Request failed'); e.status = r.status; throw e; }
+  return j;
+}
+function toast(msg, kind = 'ok') {
+  const t = h(`<div class="toast ${kind}">${msg}</div>`);
+  $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), 5200);
+}
+
+/* ───────── curve math (mirror of the server) ───────── */
+function reserves(m) {
+  if (m.graduated) return { z: B(m.poolZro), t: B(m.poolTok) };
+  const c = S.stats.curve;
+  return { z: (m.vQuote ? B(m.vQuote) : B(c.vZro) * WEI) + B(m.reserveZro), t: B(c.vTok) * WEI - B(m.sold) };
+}
+const bpsOf = (pct) => BigInt(Math.round((pct || 0) * 100));
+const ASSET = { zro: { label: 'ZRO', ico: 'Z', quick: ['1', '5', '10', '50'], dp: 4 }, eth: { label: 'ETH', ico: 'Ξ', quick: ['0.001', '0.005', '0.01', '0.05'], dp: 6 }, xlm: { label: 'XLM', ico: 'X', quick: ['10', '50', '100', '500'], dp: 4 } };
+const assetUsd = (a) => (a === 'eth' ? S.stats?.ethUsd : a === 'xlm' ? S.stats?.xlmUsd : S.stats?.zroUsd) || 0;
+const qaOf = (q) => (q === 'ETH' ? 'eth' : q === 'XLM' ? 'xlm' : 'zro');
+// mirror of the server's instant conversion (0.5% fee) for estimates only
+const convert = (wei, from, to) => (from === to ? wei : (wei * BigInt(Math.round(assetUsd(from) * 1e8)) / BigInt(Math.max(1, Math.round(assetUsd(to) * 1e8))) * 9950n) / 10000n);
+const fmtA = (wei, a, dp) => `${fmtZ(wei, dp ?? ASSET[a].dp)} ${ASSET[a].label}`;
+function estBuy(m, zroIn) {
+  const tx = m.taxes, fee = (v, p) => (v * bpsOf(p)) / 10000n;
+  const net = zroIn - fee(zroIn, tx.platform) - fee(zroIn, tx.marketing) - fee(zroIn, tx.rewards);
+  if (net <= 0n) return { tokens: 0n };
+  const { z, t } = reserves(m);
+  let out = t - (z * t) / (z + net);
+  const left = B(m.curveTokens) * WEI - B(m.sold);
+  if (!m.graduated && out > left) out = left;
+  const burn = fee(out, tx.burn);
+  const avg = out > 0n ? Number(zroIn) / Number(out - burn) : 0;
+  const after = m.graduated ? { ...m, poolZro: (B(m.poolZro) + net).toString(), poolTok: (B(m.poolTok) - out).toString() }
+    : { ...m, reserveZro: (B(m.reserveZro) + net).toString(), sold: (B(m.sold) + out).toString() };
+  const r2 = reserves(after);
+  const impact = m.priceZro ? (Number((r2.z * WEI) / r2.t) / 1e18 / m.priceZro - 1) * 100 : 0;
+  return { tokens: out - burn, burn, avg, impact };
+}
+function estSell(m, tokIn) {
+  const tx = m.taxes, fee = (v, p) => (v * bpsOf(p)) / 10000n;
+  const burn = fee(tokIn, tx.burn);
+  const sellTok = tokIn - burn;
+  const { z, t } = reserves(m);
+  let gross = z - (z * t) / (t + sellTok);
+  const cap = m.graduated ? B(m.poolZro) : B(m.reserveZro);
+  if (gross > cap) gross = cap;
+  const net = gross - fee(gross, tx.platform) - fee(gross, tx.marketing) - fee(gross, tx.rewards);
+  return { zro: net > 0n ? net : 0n, burn };
+}
+
+/* ───────── Stellar wallets (SEP-43 providers + Freighter / xBull / Albedo / Rabet / Lobstr via WalletConnect) ───────── */
+const WC_PID = '7e1a3a63f6cfcac97c152d5fa0a0e4ef';
+const WC = {
+  client: null, session: null,
+  chain() { return 'stellar:' + (S.stats?.stellar?.net === 'mainnet' ? 'pubnet' : 'testnet'); },
+  async init() {
+    if (WC.client) return WC.client;
+    const { SignClient } = await import('https://esm.sh/@walletconnect/sign-client@2.17.0?bundle');
+    WC.client = await SignClient.init({
+      projectId: WC_PID,
+      metadata: { name: 'Rookery', description: 'The Stinky Penguin launchpad', url: location.origin, icons: [location.origin + '/assets/penguin/sticky.webp'] },
+    });
+    const last = localStorage.getItem('wc_topic');
+    if (last) { const sess = WC.client.session.getAll().find(x => x.topic === last); if (sess && sess.expiry * 1000 > Date.now()) WC.session = sess; }
+    return WC.client;
+  },
+  address() {
+    const acc = WC.session?.namespaces?.stellar?.accounts?.[0] || '';
+    const a = acc.split(':')[2] || '';
+    return /^G[A-Z2-7]{55}$/.test(a) ? a : '';
+  },
+  async connect() {
+    const c = await WC.init();
+    if (WC.session && WC.address()) return WC.address();
+    const { uri, approval } = await c.connect({
+      requiredNamespaces: { stellar: { methods: ['stellar_signMessage', 'stellar_signXDR'], chains: [WC.chain()], events: ['accountsChanged'] } },
+    });
+    await WC.showQr(uri);
+    const session = await approval();
+    WC.session = session;
+    localStorage.setItem('wc_topic', session.topic);
+    WC.hideQr();
+    return WC.address();
+  },
+  async signMessage(message) {
+    const c = await WC.init();
+    const r = await c.request({ topic: WC.session.topic, chainId: WC.chain(), request: { method: 'stellar_signMessage', params: { message } } });
+    const sig = r?.signedMessage || r?.signature || r?.signed_message;
+    if (!sig) throw new Error('Lobstr did not return a signature');
+    return sig;
+  },
+  async signTx(xdr) {
+    const c = await WC.init();
+    const r = await c.request({ topic: WC.session.topic, chainId: WC.chain(), request: { method: 'stellar_signXDR', params: { xdr } } });
+    const out = r?.signedXDR || r?.signed_xdr || r?.xdr;
+    if (!out) throw new Error('Lobstr did not sign the payment');
+    return out;
+  },
+  async showQr(uri) {
+    WC.hideQr();
+    const { default: QR } = await import('https://esm.sh/qrcode@1.5.4?bundle');
+    const dataUrl = await QR.toDataURL(uri, { margin: 1, width: 300, color: { dark: '#000', light: '#fff' } });
+    const el = document.createElement('div');
+    el.id = 'wcBox';
+    el.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.86);display:grid;place-items:center;padding:20px';
+    el.innerHTML = `<div style="background:#0f0f11;border:1px solid #26262c;border-radius:16px;padding:22px;max-width:360px;text-align:center">
+      <div class="mono mu" style="margin-bottom:10px">Scan with Lobstr</div>
+      <img alt="WalletConnect" src="${dataUrl}" style="width:300px;height:300px;border-radius:12px;background:#fff">
+      <p class="mu" style="font-size:12px;line-height:1.5;margin:10px 0 0">Open Lobstr on your phone, tap WalletConnect and scan this code. On the phone, <a href="${esc(uri)}" style="text-decoration:underline;color:var(--tx)">tap here instead</a>.</p>
+      <button class="btn sm ghost" id="wcClose" style="margin-top:12px">Cancel</button></div>`;
+    document.body.appendChild(el);
+    el.querySelector('#wcClose').onclick = () => WC.hideQr();
+  },
+  hideQr() { document.getElementById('wcBox')?.remove(); },
+};
+
+/* ───────── Stellar wallets (SEP-43 providers + Freighter / xBull / Albedo / Rabet) ───────── */
+const STW = {
+  async detect() {
+    if (window.freighterApi?.signMessage || window.freighter?.signMessage) return 'freighter';
+    if (window.albedo?.publicKey) return 'albedo';
+    if (window.xBullSDK?.connect) return 'xbull';
+    if (window.rabet?.connect) return 'rabet';
+    if (window.stellar?.getPublicKey) return 'sep43';
+    return null;
+  },
+  async connect(kind) {
+    if (kind === 'freighter') {
+      const api = window.freighterApi || window.freighter;
+      let r = await api.requestAccess?.() ?? await api.getPublicKey();
+      const addr = typeof r === 'string' ? r : r?.publicKey || r?.address;
+      if (!/^G[A-Z2-7]{55}$/.test(addr || '')) throw new Error('Freighter returned no address');
+      return addr;
+    }
+    if (kind === 'albedo') { const r = await window.albedo.publicKey({}); return r.pubkey || r.publicKey; }
+    if (kind === 'xbull') { const r = await window.xBullSDK.connect({ canRequestPublicKey: true, canRequestSign: true }); return r.publicKey || r; }
+    if (kind === 'rabet') { const r = await window.rabet.connect(); return r.publicKey || r; }
+    if (kind === 'sep43') { const r = await window.stellar.getPublicKey(); return r.address || r.publicKey || r; }
+    throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+  },
+  async signMessage(kind, address, message) {
+    if (kind === 'freighter') {
+      const api = window.freighterApi || window.freighter;
+      const r = await api.signMessage(message, { address });
+      const sig = r?.signedMessage || r?.signature;
+      if (!sig) throw new Error(r?.error || 'Wallet did not return a signature');
+      return sig;
+    }
+    if (kind === 'albedo') { const r = await window.albedo.signMessage({ message, pubkey: address }); return r.signature; }
+    if (kind === 'xbull') { const r = await window.xBullSDK.signMessage({ message, publicKey: address }); return r.signature || r; }
+    if (kind === 'rabet') { const r = await window.rabet.signMessage?.(message, address); return r?.signature || r; }
+    if (kind === 'sep43') { const r = await window.stellar.signMessage(message, { address }); return r.signedMessage || r.signature; }
+    throw new Error('This wallet cannot sign a message');
+  },
+  async signTx(kind, address, xdr) {
+    if (kind === 'freighter') {
+      const api = window.freighterApi || window.freighter;
+      const r = await api.signTransaction(xdr, { address, network: S.stats?.stellar?.net === 'mainnet' ? 'PUBLIC' : 'TESTNET' });
+      const out = r?.signedTxXdr || r?.signedXDR;
+      if (!out) throw new Error(r?.error || 'Wallet did not sign the payment');
+      return out;
+    }
+    if (kind === 'albedo') { const r = await window.albedo.tx({ xdr, pubkey: address, network: S.stats?.stellar?.net === 'mainnet' ? 'public' : 'testnet' }); return r.signed_envelope_xdr; }
+    if (kind === 'xbull') { const r = await window.xBullSDK.signXDR(xdr, { publicKey: address }); return r.signedXDR || r; }
+    if (kind === 'rabet') { const r = await window.rabet.sign(xdr, address); return r.xdr || r; }
+    if (kind === 'sep43') { const r = await window.stellar.signTransaction(xdr, { address, networkPassphrase: S.stats?.stellar?.net === 'mainnet' ? 'Public Global Stellar Network ; September 2015' : 'Test SDF Network ; September 2015' }); return r.signedTxXdr || r; }
+    throw new Error('This wallet cannot sign a transaction');
+  },
+  async loginWc() {
+    const address = await WC.connect();
+    const n = await api('/auth/stellar/nonce', { address });
+    const sig = await WC.signMessage(n.message);
+    await api('/auth/stellar/verify', { address, nonce: n.nonce, signature: sig });
+    S.me = null; await loadMe(); paintAcct();
+    toast('Signed in with Lobstr');
+    return address;
+  },
+  async buyWc(marketId, xlm) {
+    const address = await WC.connect();
+    if (!S.me) { const n = await api('/auth/stellar/nonce', { address }); const sig = await WC.signMessage(n.message); await api('/auth/stellar/verify', { address, nonce: n.nonce, signature: sig }); S.me = await api('/me'); }
+    const p = await api('/stellar/prep', { market: marketId, amount: BigInt(Math.round(xlm * 1e6)) * 10n ** 12n + '', address });
+    const signed = await WC.signTx(p.xdr);
+    const r = await api('/stellar/submit', { xdr: signed });
+    toast('Payment sent. Your tokens arrive in about a minute.');
+    return r;
+  },
+  // full sign-in: one message signature, no transaction
+  async login() {
+    const kind = await STW.detect();
+    if (!kind) throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+    const address = await STW.connect(kind);
+    const n = await api('/auth/stellar/nonce', { address });
+    const sig = await STW.signMessage(kind, address, n.message);
+    await api('/auth/stellar/verify', { address, nonce: n.nonce, signature: sig });
+    S.me = null; await loadMe(); paintAcct();
+    toast('Signed in with ' + short(address));
+    return address;
+  },
+  // buy straight from the wallet: server builds the payment, the wallet signs it, we submit
+  async buy(marketId, xlm) {
+    const kind = await STW.detect();
+    if (!kind) throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+    const address = await STW.connect(kind);
+    const p = await api('/stellar/prep', { market: marketId, amount: BigInt(Math.round(xlm * 1e6)) * 10n ** 12n + '', address });
+    const signed = await STW.signTx(kind, address, p.xdr);
+    const r = await api('/stellar/submit', { xdr: signed });
+    toast('Payment sent. Your tokens arrive in about a minute.');
+    return r;
+  },
+};
+
+/* ───────── header: price, burn, network, account ───────── */
+// the header price pill follows the network picked in the menu: ZRO / ETH / XLM
+function paintPx() {
+  const st = S.stats; if (!st) return;
+  const a = S.net === 'giwa' ? 'eth' : S.net === 'stellar' ? 'xlm' : 'zro';
+  const px = a === 'eth' ? st.ethUsd : a === 'xlm' ? st.xlmUsd : st.zroUsd;
+  const ico = $('#pxIco'), lbl = $('#pxLbl'), p = $('#zroPx'), ch = $('#zroCh');
+  if (!ico || !lbl || !p) return;
+  ico.textContent = ASSET[a].ico; ico.className = 'zro-ico' + (a === 'eth' ? ' eth' : a === 'xlm' ? ' xlm' : '');
+  lbl.textContent = ASSET[a].label;
+  p.textContent = '$' + (Number(px) || 0).toLocaleString('en-US', { minimumFractionDigits: a === 'eth' ? 0 : 3, maximumFractionDigits: a === 'eth' ? 0 : 3 });
+  ch.innerHTML = a === 'zro' ? fmtPct(st.zroChange24h) : '';
+}
+async function loadStats() {
+  try {
+    S.stats = await api('/stats');
+    paintPx();
+    liveNum($('#burnPx'), S.stats.burnReserveUsd ?? S.stats.plaunchBurnUsd, fmtUsd);
+    fitHeader();
+  } catch { /* ignore */ }
+}
+async function loadMe() {
+  try { S.me = await api('/me'); } catch { S.me = null; }
+  paintAcct();
+}
+function paintAcct() {
+  const el = $('#acct');
+  if (!S.me) {
+    el.innerHTML = `<div style="display:flex;gap:8px"><a class="btn ghost" href="#/login">Log in</a><a class="btn hide-xs" href="#/signup">Sign up</a></div>`;
+    fitHeader();
+    return;
+  }
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center">
+      <a class="pill num" href="#/wallet" title="Your balances"><span class="zro-ico">Z</span><b>${fmtZ(S.me.zro)}</b>${B(S.me.eth || '0') > 0n ? `<span class="zro-ico" style="margin-left:4px">Ξ</span><b>${fmtZ(S.me.eth, 4)}</b>` : ''}<span class="mu hide-xs">${fmtUsd((S.me.zroUsd || 0) + (S.me.ethUsd || 0))}</span></a>
+      ${S.myHatches && S.myHatches.length ? `<a class="pill bell" href="#/" title="Hatches you follow">🔔<b>${S.myHatches.length}</b></a>` : ''}
+      <div class="sw">
+        <button class="icon-btn" id="meBtn" style="padding:0;border-radius:50%;width:36px;overflow:hidden">${avatar(S.me.username, S.me.avatar).replace('class="av"', 'class="av" style="width:34px;height:34px;border:0"')}</button>
+        <div class="menu" id="meMenu" style="min-width:210px">
+          <div class="menu-h">${esc(S.me.username)} ${badgeHTML(S.me.badges)}</div>
+          <a class="mi" href="#/u/${encodeURIComponent(S.me.username)}">Profile</a>
+          <a class="mi" href="#/wallet">Wallet</a>
+          <a class="mi" href="#/create">Create token</a>
+          <button class="mi" id="logout">Log out</button>
+        </div>
+      </div>
+    </div>`;
+  $('#meBtn').onclick = (e) => { e.stopPropagation(); $('#meMenu').classList.toggle('open'); };
+  $('#logout').onclick = async () => { await api('/auth/logout', {}); S.me = null; paintAcct(); location.hash = '#/'; };
+  fitHeader();
+}
+const gradK = (v) => { const g = Number(v) || S.stats?.stellar?.gradUsd || 46000; return '$' + (g >= 10000 ? Math.round(g / 1000) : (g / 1000).toFixed(1).replace(/\.0$/, '')) + 'K'; };
+// header must never clip the nav: drop low-priority items, one at a time, until everything fits
+function fitHeader() {
+  const nav = document.querySelector('.top .nav');
+  if (!nav) return;
+  const order = ['.app-pill .app-l', '.brand .by', '#appPill', '#zroPill', '#burnPill'];
+  order.forEach(sel => document.querySelectorAll(sel).forEach(el => el.classList.remove('fit-hide')));
+  const over = () => nav.offsetParent !== null && nav.scrollWidth > nav.clientWidth + 1;
+  for (const sel of order) { if (!over()) break; document.querySelectorAll(sel).forEach(el => el.classList.add('fit-hide')); }
+}
+window.addEventListener('resize', () => { clearTimeout(fitHeader._t); fitHeader._t = setTimeout(fitHeader, 80); });
+document.fonts?.ready?.then(() => fitHeader());
+// Android app: not out yet
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('#appPill, #appFoot');
+  if (!a) return;
+  e.preventDefault();
+  toast('The Rookery Android app is coming soon. Follow <a href="https://x.com/StinkyPenguinL0" target="_blank" rel="noopener" style="text-decoration:underline">@StinkyPenguinL0</a> for the launch.');
+});
+// any [data-copy] button copies its value (asset code / issuer on graduated tokens)
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('[data-copy]');
+  if (!b) return;
+  const v = b.getAttribute('data-copy') || '';
+  navigator.clipboard.writeText(v).then(() => toast('Copied')).catch(() => {});
+});
+function initNet() {
+  const set = (n) => {
+    S.net = n; localStorage.setItem('pl_net', n);
+    $('#netLabel').textContent = n === 'zero' ? 'Zero · LayerZero' : n === 'giwa' ? 'GIWA · Upbit' : n === 'stellar' ? 'Stellar · on-chain' : 'All networks';
+    $$('#netMenu .mi[data-net]').forEach(b => b.classList.toggle('on', b.dataset.net === n));
+    paintPx();
+  };
+  set(S.net);
+  window.plSetNet = set;
+  $('#netBtn').onclick = (e) => { e.stopPropagation(); $('#netMenu').classList.toggle('open'); };
+  $$('#netMenu .mi[data-net]').forEach(b => b.onclick = () => { set(b.dataset.net); $('#netMenu').classList.remove('open'); if (location.hash.startsWith('#/chain')) location.hash = '#/'; else route(); });
+  document.addEventListener('click', () => $$('.menu.open').forEach(m => m.classList.remove('open')));
+}
+function countdown(iso) {
+  if (!iso) return 'TBA';
+  const d = new Date(iso).getTime() - Date.now();
+  if (d <= 0) return 'LIVE';
+  const dd = Math.floor(d / 864e5), hh = Math.floor(d % 864e5 / 36e5), mm = Math.floor(d % 36e5 / 6e4);
+  return `${dd}d ${String(hh).padStart(2, '0')}h ${String(mm).padStart(2, '0')}m`;
+}
+
+/* ───────── shared bits ───────── */
+function cardHTML(m) {
+  return `
+  <a class="card" href="#/t/${m.id}" data-id="${m.id}">
+    ${timg(m)}
+    <div class="card-b">
+      <div class="card-t"><h3>${esc(m.name)}</h3><span class="sym">$${esc(m.symbol)}</span>${netTag(m.network)}${m.graduated ? (m.network === 'stellar' && m.migrated ? '<span class="tag grad">ON AQUARIUS</span>' : '<span class="tag grad">BONDED</span>') : ''}</div>
+      <div class="mu" style="font-size:11.5px">by <b class="tx2">${esc(m.creator)}</b> · ${ago(m.created)} ago</div>
+      <div class="desc">${esc(m.description || 'No description yet.')}</div>
+      <div class="card-m num"><span class="mu">MC <b class="tx2 c-mc" style="color:var(--tx)">${fmtUsd(m.mcapUsd)}</b></span><span class="c-ch">${fmtPct(m.change24h)}</span></div>
+      <div class="prog"><i class="c-bar" style="width:${Math.max(1.5, m.progress)}%"></i></div>
+      <div class="card-m mu" style="font-size:11px"><span><span class="c-bond">${m.progress.toFixed(1)}</span>% ${m.network === 'stellar' ? 'to ' + gradK(m.stellar?.gradUsd || 46000) : 'bonded'}</span><span><span class="c-hold">${m.holders}</span> holders · <span class="c-tr">${m.trades}</span> trades</span></div>
+    </div>
+  </a>`;
+}
+// update one Explore card in place (numbers tween, nothing re-rendered)
+function updateCard(el, m) {
+  const q = (c) => el.querySelector(c);
+  liveNum(q('.c-mc'), m.mcapUsd, fmtUsd);
+  liveText(q('.c-ch'), fmtPct(m.change24h));
+  liveNum(q('.c-bond'), m.progress, (v) => v.toFixed(1), false);
+  liveNum(q('.c-hold'), m.holders, fmtInt); liveNum(q('.c-tr'), m.trades, fmtInt, false);
+  const bar = q('.c-bar'); if (bar) bar.style.width = Math.max(1.5, m.progress) + '%';
+  if (m.graduated && !q('.tag.grad')) q('.card-t')?.insertAdjacentHTML('beforeend', '<span class="tag grad">BONDED</span>');
+}
+// keyed grid: reuse cards, update them in place, and slide moved cards to their new spot (FLIP)
+function paintGrid(grid, list, emptyHTML) {
+  if (!list.length) { grid.innerHTML = emptyHTML; return; }
+  if (grid.querySelector('.skel, .empty')) grid.innerHTML = '';
+  const before = new Map();
+  for (const el of grid.children) before.set(el.dataset.id, el.getBoundingClientRect());
+  const keep = new Set(list.map(m => m.id));
+  for (const el of [...grid.children]) if (!keep.has(el.dataset.id)) el.remove();
+  const byId = new Map([...grid.children].map(el => [el.dataset.id, el]));
+  list.forEach((m, i) => {
+    let el = byId.get(m.id);
+    if (!el) { el = h(cardHTML(m)); if (before.size) el.classList.add('card-in'); updateCard(el, m); } else updateCard(el, m);
+    if (grid.children[i] !== el) grid.insertBefore(el, grid.children[i] || null);
+  });
+  for (const el of grid.children) {
+    const r0 = before.get(el.dataset.id); if (!r0) continue;
+    const r1 = el.getBoundingClientRect(), dx = r0.left - r1.left, dy = r0.top - r1.top;
+    if (!dx && !dy) continue;
+    el.style.transition = 'none'; el.style.transform = `translate(${dx}px,${dy}px)`;
+    requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transition = 'transform .5s cubic-bezier(.2,.8,.2,1)'; el.style.transform = ''; }));
+  }
+}
+/* sortable holdings tables: click a header to sort, click again to flip */
+const HOLD_KEYS = { token: x => String(x.symbol || '').toLowerCase(), amount: x => zNum(x.amount || '0'), price: x => Number(x.priceUsd) || 0,
+  value: x => Number(x.valueUsd) || 0, rewards: x => zNum(x.pendingRewards || '0'), pnl: x => Number(x.pnlUsd) || 0 };
+// signed USD amount coloured by direction, e.g. +$12.40 / −$3.10
+const sUsd = (v) => `<span class="${v >= 0 ? 'up' : 'dn'}">${v >= 0 ? '+' : '−'}${fmtUsd(Math.abs(v || 0))}</span>`;
+S.holdSort = S.holdSort || { key: 'value', dir: -1 };
+function sortHoldings(rows) {
+  const st = S.holdSort, f = HOLD_KEYS[st.key] || HOLD_KEYS.value;
+  return [...rows].sort((a, b) => { const x = f(a), y = f(b); return (x < y ? -1 : x > y ? 1 : 0) * st.dir; });
+}
+function thSort(label, key, right = true) {
+  const st = S.holdSort, on = st.key === key;
+  return `<th class="${right ? 'r ' : ''}sortable${on ? ' on' : ''}" data-sort="${key}">${label}<span class="sort-ar">${on ? (st.dir < 0 ? '↓' : '↑') : '↕'}</span></th>`;
+}
+function bindSort(root, repaint) {
+  root.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
+    const k = th.dataset.sort, st = S.holdSort;
+    if (st.key === k) st.dir = -st.dir; else { st.key = k; st.dir = k === 'token' ? 1 : -1; }
+    repaint();
+  });
+}
+// Polling timer. With live=true it becomes a slow safety net (every 15 s) while the live socket is up.
+function setTimer(fn, ms, live = false) {
+  clearInterval(S.timer); S.lastPoll = Date.now();
+  S.timer = setInterval(() => { if (live && Live.up && Date.now() - S.lastPoll < 15000) return; S.lastPoll = Date.now(); fn(); }, ms);
+  S.tick = fn;
+}
+
+/* ═══════════ LIVE (server push over WebSocket) ═══════════ */
+// One socket per tab. Each view says what it wants ('all' or 'm:<id>') and how to react; reconnects with backoff.
+const Live = { ws: null, up: false, subs: ['all'], fn: null, retry: 0 };
+function liveConnect() {
+  if (Live.ws || !('WebSocket' in window)) return;
+  let ws;
+  try { ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/ws'); } catch { return; }
+  Live.ws = ws;
+  ws.onopen = () => { Live.up = true; Live.retry = 0; ws.send(JSON.stringify({ sub: Live.subs })); document.body.classList.add('is-live'); };
+  ws.onmessage = (e) => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.t === 'trades') return tickerAdd(msg.trades);
+    if (msg.t !== 'market') return;
+    if (msg.stats) liveStats(msg.stats);
+    try { Live.fn?.(msg); } catch (err) { console.warn('live', err); }
+  };
+  ws.onclose = () => {
+    Live.up = false; Live.ws = null; document.body.classList.remove('is-live');
+    setTimeout(liveConnect, Math.min(15000, 800 * 2 ** Live.retry++));
+  };
+  ws.onerror = () => { try { ws.close(); } catch { /* gone */ } };
+}
+function liveSub(subs, fn) {
+  Live.subs = subs; Live.fn = fn || null;
+  if (Live.ws?.readyState === 1) Live.ws.send(JSON.stringify({ sub: subs }));
+}
+setInterval(() => { if (Live.ws?.readyState === 1) Live.ws.send('{"ping":1}'); }, 25000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !Live.ws) liveConnect(); });
+/* ═══════════ BADGES ═══════════ */
+// Earned on Rookery, never sold. The server decides (per user id); the labels live here.
+const BADGES = {
+  early:   { i: '🐣', l: 'Early hatcher', t: 'One of the first 500 accounts on Rookery' },
+  creator: { i: '🥚', l: 'Hatcher', t: 'Launched at least one token' },
+  bonded:  { i: '💎', l: 'Bonded a token', t: 'One of their tokens reached 100% of the curve and opened a pool' },
+  diamond: { i: '⚡', l: 'Diamond flipper', t: '25 or more trades' },
+};
+const badgeHTML = (ids, labels = false) => (ids || []).filter(id => BADGES[id])
+  .map(id => `<span class="bdg ${id}" title="${esc(BADGES[id].t)}">${BADGES[id].i}${labels ? ' ' + esc(BADGES[id].l) : ''}</span>`).join('');
+
+/* ═══════════ HATCHING SOON ═══════════ */
+// A creator announces a token with a countdown; people tap "Notify me" and get a bell + toast when it goes live.
+S.hatches = S.hatches || []; S.myHatches = S.myHatches || [];
+const cdText = (ms) => {
+  if (ms <= 0) return 'Hatching now';
+  const t = Math.floor(ms / 1000), d = Math.floor(t / 86400), hh = Math.floor((t % 86400) / 3600), mm = Math.floor((t % 3600) / 60), ss = t % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return d ? `${d}d ${p(hh)}h ${p(mm)}m` : `${p(hh)}:${p(mm)}:${p(ss)}`;
+};
+setInterval(() => document.querySelectorAll('[data-cd]').forEach(el => {
+  if (!el.offsetParent) return;
+  const t = +el.dataset.cd; el.textContent = t ? cdText(t - Date.now()) : 'Hatching now';
+  el.classList.toggle('soon', !!t && t - Date.now() < 15 * 60e3);
+}), 1000);
+async function loadHatches() {
+  try { S.hatches = (await api('/hatches')).hatches || []; } catch { S.hatches = []; }
+  S.myHatches = S.hatches.filter(h => h.subscribed || h.isMine);
+  hatchNotify();
+  paintHatches(); paintAcct();
+}
+// one toast per hatch when something you follow goes live
+function hatchNotify() {
+  let seen = {}; try { seen = JSON.parse(localStorage.getItem('pl_hatch_seen') || '{}'); } catch { seen = {}; }
+  let changed = false;
+  for (const h of S.hatches) {
+    if (!h.subscribed || h.status !== 'live' || seen[h.id]) continue;
+    seen[h.id] = Date.now(); changed = true;
+    toast(`🔔 <b>$${esc(h.symbol)}</b> is hatching now${h.isMine ? ' — go launch it' : ' — be early'}!`);
+  }
+  if (changed) localStorage.setItem('pl_hatch_seen', JSON.stringify(seen));
+}
+const hatchCard = (h) => {
+  const live = h.status === 'live';
+  const img = h.image ? `<img src="${esc(h.image)}" alt="">` : esc((h.symbol || '?').slice(0, 2).toUpperCase());
+  return `<div class="hc ${live ? 'live' : ''}">
+    <div class="hc-h"><span class="hc-ico">${img}</span><div class="hc-n"><b>$${esc(h.symbol)}</b><span class="mu">${esc(h.name)}</span></div><span class="tag ${h.network}">${netName(h.network).toUpperCase()}</span></div>
+    <div class="hc-cd" data-cd="${live ? 0 : h.launchAt}">${live ? 'Hatching now' : cdText(h.launchAt - Date.now())}</div>
+    <div class="hc-f"><span class="mu hc-w">👥 <b>${h.waiting}</b> waiting</span>
+      ${live ? (h.marketId ? `<a class="btn sm up" href="#/t/${esc(h.marketId)}">Trade now ↗</a>` : '<span class="hc-live">● LIVE</span>')
+        : `<button class="btn sm ${h.subscribed ? 'ghost on' : ''}" data-sub="${esc(h.id)}">${h.subscribed ? '✓ Notified' : '🔔 Notify me'}</button>`}</div>
+    ${h.isMine ? `<div class="hc-mine">${live ? `<a class="btn sm up" href="#/create/${esc(h.id)}">Hatch it now ↗</a>` : '<span class="mu" style="font-size:11.5px">Your hatch</span>'}<button class="btn sm ghost" data-hcancel="${esc(h.id)}">Cancel</button></div>` : ''}
+  </div>`;
+};
+function paintHatches() {
+  const el = $('#hatchStrip'); if (!el) return;
+  const list = S.hatches || [];
+  el.innerHTML = `<div class="hatch-head"><div><span class="mono mu">Hatching soon</span>
+      <p class="mu">Announce a token with a countdown and collect a crowd before it goes live.</p></div>
+    <button class="btn ghost" id="announceBtn">＋ Announce a hatch</button></div>
+    ${list.length ? `<div class="hatch-row">${list.map(hatchCard).join('')}</div>`
+      : '<div class="hatch-empty mu">Nothing on the nest yet — be the first to announce one.</div>'}`;
+  $('#announceBtn').onclick = openAnnounce;
+  $$('[data-sub]').forEach(b => b.onclick = async () => {
+    if (!S.me) return needLogin();
+    try {
+      const r = await api('/hatch/sub', { id: b.dataset.sub });
+      toast(r.subscribed ? '🔔 You are on the list. We will ping you when it hatches.' : 'Notifications off for this hatch.');
+      await loadHatches();
+    } catch (e) { toast(esc(e.message), 'bad'); }
+  });
+  $$('[data-hcancel]').forEach(b => b.onclick = async () => {
+    try { await api('/hatch/cancel', { id: b.dataset.hcancel }); toast('Hatch cancelled'); await loadHatches(); }
+    catch (e) { toast(esc(e.message), 'bad'); }
+  });
+}
+function openAnnounce() {
+  if (!S.me) return needLogin();
+  const at = (mins) => { const d = new Date(Date.now() + mins * 60e3); d.setSeconds(0, 0); const off = d.getTime() - d.getTimezoneOffset() * 60e3; return new Date(off).toISOString().slice(0, 16); };
+  const md = h(`<div class="modal-bg"><div class="modal" style="max-width:540px">
+    <h3 style="font-size:22px;letter-spacing:-.03em;margin-bottom:6px">Announce a hatch 🥚</h3>
+    <p class="mu" style="font-size:13px;margin-bottom:16px">People see the countdown, tap “Notify me”, and get pinged the moment it goes live. Launching later fills this in for you.</p>
+    <div class="f2"><div class="f"><label>Name</label><input class="inp" id="hName" maxlength="32" placeholder="Stinky Penguin"></div>
+      <div class="f"><label>Ticker</label><input class="inp" id="hSym" maxlength="12" placeholder="PENGU"></div></div>
+    <div class="f"><label>Network</label><select class="inp" id="hNet"><option value="zero">Zero · by LayerZero</option><option value="giwa">GIWA · by Upbit</option></select></div>
+    <div class="f"><label>Description (optional)</label><textarea class="inp" id="hDesc" maxlength="300" placeholder="One line about why this one matters"></textarea></div>
+    <div class="f"><label>Hatches in</label>
+      <div class="choice" id="hQuick">${[['1 hour', 60], ['6 hours', 360], ['24 hours', 1440], ['3 days', 4320]].map(([l, m]) => `<button class="opt hq" data-m="${m}"><div><b>${l}</b></div></button>`).join('')}</div></div>
+    <div class="f"><label>Exact time</label><input class="inp" type="datetime-local" id="hAt" value="${at(1440)}"></div>
+    <div class="err" id="hErr"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn ghost" id="hX">Cancel</button><button class="btn" id="hGo">Announce it</button></div>
+  </div></div>`);
+  document.body.append(md);
+  const close = () => md.remove();
+  md.onclick = (e) => { if (e.target === md) close(); };
+  $('#hX').onclick = close;
+  $$('#hQuick .hq').forEach(b => b.onclick = () => { $('#hAt').value = at(+b.dataset.m); $$('#hQuick .hq').forEach(x => x.classList.toggle('on', x === b)); });
+  $('#hGo').onclick = async () => {
+    $('#hErr').textContent = '';
+    const launchAt = new Date($('#hAt').value).getTime();
+    try {
+      $('#hGo').disabled = true;
+      await api('/hatch', { name: $('#hName').value.trim(), symbol: $('#hSym').value.trim(), network: $('#hNet').value,
+        description: $('#hDesc').value.trim(), launchAt });
+      close(); toast('🥚 Announced. Share the link and the countdown does the work.'); await loadHatches();
+    } catch (e) { $('#hErr').textContent = e.message; }
+    finally { $('#hGo').disabled = false; }
+  };
+}
+
+/* ═══════════ LIVE TICKER ═══════════ */
+// Continuous right-to-left strip of trades. Items that scroll out on the left are recycled to the end;
+// a new live trade is slotted in just past the right edge, so it slides into view without any jump.
+const Ticker = { track: null, view: null, x: 0, last: 0, paused: false, speed: 46, gap: 30, n: 0 };
+function tickItem(t) {
+  const up = t.side !== 'sell';
+  return h(`<a class="tk-i" href="#/t/${esc(t.id)}"><i class="tk-d ${up ? 'up' : 'dn'}"></i><b>${esc(t.user || 'anon')}</b><span class="mu">${up ? 'bought' : 'sold'}</span><b class="${up ? 'up' : 'dn'}">${fmtUsd(t.usd)}</b><span class="mu">of</span><b>$${esc(t.symbol)}</b></a>`);
+}
+async function tickerInit() {
+  Ticker.track = $('#tkTrack'); Ticker.view = document.querySelector('#ticker .tk-view');
+  if (!Ticker.track) return;
+  try {
+    const { trades } = await api('/feed');
+    trades.slice(0, 30).forEach(t => Ticker.track.append(tickItem({ side: t.side, usd: zNum(t.zro) * t.usd, user: t.username, symbol: t.symbol, id: t.market })));
+  } catch { /* the strip fills from live trades */ }
+  tickerFill();
+  const tk = $('#ticker');
+  tk.onmouseenter = () => { Ticker.paused = true; }; tk.onmouseleave = () => { Ticker.paused = false; };
+  requestAnimationFrame(tickerFrame);
+}
+// make sure the strip is longer than the screen so the loop never shows a hole
+function tickerFill() {
+  const tr = Ticker.track, base = [...tr.children];
+  if (!base.length) return;
+  let guard = 0;
+  while (tr.scrollWidth < Ticker.view.clientWidth * 2 + 400 && guard++ < 40) base.forEach(el => tr.append(el.cloneNode(true)));
+}
+function tickerFrame(ts) {
+  const dt = Ticker.last ? Math.min(64, ts - Ticker.last) : 0; Ticker.last = ts;
+  const tr = Ticker.track;
+  if (tr.firstElementChild && !Ticker.paused && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    Ticker.x -= (Ticker.speed * dt) / 1000;
+    const f = tr.firstElementChild, w = f.offsetWidth + Ticker.gap;
+    if (-Ticker.x >= w) { Ticker.x += w; tr.append(f); }
+    tr.style.transform = `translate3d(${Ticker.x.toFixed(2)}px,0,0)`;
+  }
+  requestAnimationFrame(tickerFrame);
+}
+function tickerAdd(trades) {
+  const tr = Ticker.track; if (!tr || !trades?.length) return;
+  const edge = Ticker.view.clientWidth - Ticker.x;          // track coordinate of the right edge of the screen
+  let ref = [...tr.children].find(el => el.offsetLeft > edge) || null;
+  for (const t of trades) {
+    const el = tickItem(t); el.classList.add('tk-new');
+    tr.insertBefore(el, ref);
+  }
+  // keep the strip bounded: drop off-screen items from the far end
+  while (tr.children.length > 70) { const l = tr.lastElementChild; if (l.offsetLeft > edge + 200) l.remove(); else break; }
+  if (tr.children.length === trades.length) tickerFill();
+}
+
+/* ═══════════ PnL SHARE CARDS ═══════════ */
+// Drawn in the browser on a canvas (1200×675, X/Telegram friendly), then shared, copied or downloaded.
+// Four templates; the user picks one in the share dialog (remembered in localStorage).
+const withTimeout = (p, ms, v = null) => Promise.race([p, new Promise(r => setTimeout(() => r(v), ms))]);
+const IMG_CACHE = new Map();
+const loadImg = (src) => {
+  if (!src) return Promise.resolve(null);
+  if (!IMG_CACHE.has(src)) IMG_CACHE.set(src, withTimeout(new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src; }), 4000));
+  return IMG_CACHE.get(src);
+};
+const CARD_TEMPLATES = [
+  { id: 'classic', label: 'Classic' },
+  { id: 'minimal', label: 'Minimal' },
+  { id: 'neon', label: 'Neon' },
+  { id: 'ranking', label: 'Ranking' },
+];
+const CW = 1200, CH = 675, MONO = '"JetBrains Mono"';
+const usd2 = (v) => Math.abs(v) >= 1000 ? fmtUsd(v) : '$' + Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// footer: handle on the left, site right after it (measured in the handle's own font)
+function footer(g, D, x, y, userCol, urlCol, gap = 28) {
+  g.fillStyle = userCol; g.font = '600 20px Inter'; g.fillText(D.user, x, y);
+  const w = g.measureText(D.user).width;
+  g.fillStyle = urlCol; g.font = `500 16px ${MONO}`; g.fillText('rookery.stinkypenguin.xyz', x + w + gap, y - 1);
+}
+// numbers shared by every template
+function cardData(o) {
+  const win = o.pnlUsd >= 0;
+  const pctTxt = o.pnlPct === null || o.pnlPct === undefined || !isFinite(o.pnlPct) ? null
+    : `${o.pnlPct >= 0 ? '+' : '−'}${Math.abs(o.pnlPct) >= 1000 ? Math.round(Math.abs(o.pnlPct)).toLocaleString('en-US') : Math.abs(o.pnlPct).toFixed(1)}%`;
+  const usdTxt = `${win ? '+' : '−'}${fmtUsd(Math.abs(o.pnlUsd || 0))}`;
+  const title = o.kind === 'token' ? '$' + o.symbol : 'Portfolio PnL';
+  const sub = o.kind === 'token' ? String(o.name || '').slice(0, 34) : `${o.positions} token${o.positions === 1 ? '' : 's'} traded on Rookery`;
+  const stats = o.kind === 'token'
+    ? [['IN', fmtUsd(o.costUsd || 0)], ['NOW', fmtUsd(o.valueUsd || 0)], ['PnL', usdTxt]]
+    : [['BOUGHT', fmtUsd(o.boughtUsd || 0)], ['OPEN', `${(o.openUsd || 0) >= 0 ? '+' : '−'}${fmtUsd(Math.abs(o.openUsd || 0))}`], ['TOKENS', String(o.positions || 0)]];
+  return { win, pctTxt, usdTxt, big: pctTxt || usdTxt, title, sub, stats, user: '@' + (o.user || 'anon'), date: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase() };
+}
+// shrink a font until the text fits
+function fitFont(g, text, weight, size, maxW, min = 40, fam = 'Inter') {
+  let fs = size; g.font = `${weight} ${fs}px ${fam}`;
+  while (g.measureText(text).width > maxW && fs > min) { fs -= 4; g.font = `${weight} ${fs}px ${fam}`; }
+  return fs;
+}
+async function tokenBadge(g, o, x, y, r, dark = true) {
+  const ti = await loadImg(o.image);
+  g.save(); g.beginPath(); g.arc(x + r, y + r, r, 0, Math.PI * 2); g.closePath();
+  if (ti) { g.clip(); g.drawImage(ti, x, y, r * 2, r * 2); }
+  else { g.fillStyle = dark ? '#1b1b20' : '#e3e3de'; g.fill(); g.fillStyle = dark ? '#fff' : '#111'; g.font = `700 ${Math.round(r * .66)}px Inter`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(o.symbol || '?').slice(0, 2).toUpperCase(), x + r, y + r + 1); }
+  g.restore(); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+}
+async function brand(g, x, y, dark = true) {
+  const logo = await loadImg('/assets/logo-64.png');
+  if (logo) { g.save(); g.beginPath(); g.roundRect(x, y, 44, 44, 11); g.clip(); g.drawImage(logo, x, y, 44, 44); g.restore(); }
+  g.fillStyle = dark ? '#fff' : '#0a0a0a'; g.font = '800 26px Inter'; g.fillText('Rookery', x + 58, y + 30);
+  g.fillStyle = dark ? '#7d7d85' : '#8a8a84'; g.font = `500 14px ${MONO}`; g.fillText('BY STINKY PENGUIN', x + 172, y + 29);
+}
+const newCanvas = () => { const c = document.createElement('canvas'); c.width = CW; c.height = CH; return [c, c.getContext('2d')]; };
+
+/* 1 · Classic: dark card, penguin art on the right (win: cheering, loss: Atlas carrying the market) */
+async function drawClassic(o) {
+  const [c, g] = newCanvas(), D = cardData(o), col = D.win ? '#3DDC97' : '#FF5C5C';
+  g.fillStyle = '#070708'; g.fillRect(0, 0, CW, CH);
+  g.strokeStyle = 'rgba(255,255,255,.035)'; g.lineWidth = 1;
+  for (let x = -CH; x < CW; x += 18) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x + CH, CH); g.stroke(); }
+  const art = await loadImg(D.win ? '/assets/penguin/pnl-win.webp' : '/assets/penguin/pnl-loss.webp');
+  if (art) {
+    const aw = art.width * (CH / art.height), ax = CW - aw + 30;
+    g.drawImage(art, ax, 0, aw, CH);
+    const fade = g.createLinearGradient(ax, 0, ax + 260, 0); fade.addColorStop(0, '#070708'); fade.addColorStop(1, 'rgba(7,7,8,0)');
+    g.fillStyle = fade; g.fillRect(ax - 2, 0, 262, CH);
+    const glow = g.createRadialGradient(CW - 260, CH * .55, 20, CW - 260, CH * .55, 420);
+    glow.addColorStop(0, D.win ? 'rgba(61,220,151,.13)' : 'rgba(255,92,92,.12)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = glow; g.fillRect(0, 0, CW, CH);
+  }
+  await brand(g, 64, 56);
+  let y = 186;
+  if (o.kind === 'token') { await tokenBadge(g, o, 64, y - 44, 30); g.fillStyle = '#fff'; g.font = '800 46px Inter'; g.fillText(D.title, 142, y); g.fillStyle = '#8b8b93'; g.font = '500 18px Inter'; g.fillText(D.sub, 144, y + 30); }
+  else { g.fillStyle = '#fff'; g.font = '800 46px Inter'; g.fillText(D.title, 64, y); g.fillStyle = '#8b8b93'; g.font = '500 18px Inter'; g.fillText(D.sub, 66, y + 30); }
+  g.fillStyle = col; g.shadowColor = D.win ? 'rgba(61,220,151,.35)' : 'rgba(255,92,92,.3)'; g.shadowBlur = 40;
+  const fs = fitFont(g, D.big, 800, 150, 600, 70);
+  g.fillText(D.big, 58, 262 + fs * .82); g.shadowBlur = 0;
+  y = 262 + fs * .82 + 62;
+  if (D.pctTxt) { g.fillStyle = col; g.font = '700 40px Inter'; g.fillText(D.usdTxt, 64, y); y += 48; }
+  g.fillStyle = '#9b9ba3'; g.font = `500 20px ${MONO}`;
+  g.fillText(D.stats.slice(0, 2).map(s => `${s[0]} ${s[1]}`).join('  ·  '), 66, y + 6);
+  g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(64, CH - 86, 560, 1);
+  footer(g, D, 64, CH - 48, '#fff', '#8b8b93', 36);
+  return c;
+}
+
+/* 2 · Minimal: paper-white, black type, one huge number, hairlines. Colour only on the direction mark. */
+async function drawMinimal(o) {
+  const [c, g] = newCanvas(), D = cardData(o), col = D.win ? '#12a86a' : '#e0424b';
+  const INK = '#0b0b0c', MUTED = '#86867f', LINE = '#d9d9d3';
+  g.fillStyle = '#f4f4f1'; g.fillRect(0, 0, CW, CH);
+  // faint penguin mark as a watermark (black on white source, multiplied away)
+  const mark = await loadImg('/assets/penguin/mark.webp');
+  if (mark) { g.save(); g.globalAlpha = .07; g.globalCompositeOperation = 'multiply'; const mh = 300, mw = mark.width * mh / mark.height; g.drawImage(mark, CW - mw - 72, 160, mw, mh); g.restore(); }
+  await brand(g, 72, 60, false);
+  g.fillStyle = MUTED; g.font = `500 15px ${MONO}`; g.textAlign = 'right'; g.fillText(D.date, CW - 72, 88); g.textAlign = 'left';
+  g.fillStyle = LINE; g.fillRect(72, 132, CW - 144, 1);
+  // title
+  if (o.kind === 'token') { await tokenBadge(g, o, 72, 164, 22, false); g.fillStyle = INK; g.font = '700 34px Inter'; g.fillText(D.title, 128, 198); }
+  else { g.fillStyle = INK; g.font = '700 34px Inter'; g.fillText(D.title, 72, 198); }
+  if (o.kind === 'token') { g.font = '700 34px Inter'; const tw = g.measureText(D.title).width; g.fillStyle = MUTED; g.font = '500 17px Inter'; g.fillText('  ' + D.sub, 128 + tw, 197); }
+  // the number
+  g.fillStyle = INK;
+  const fs = fitFont(g, D.big, 800, 196, 820, 90);
+  const by = 224 + fs * .8;
+  g.fillText(D.big, 62, by);
+  // direction row under the number: coloured triangle + the dollar change
+  const ty = by + 30;
+  g.fillStyle = col; g.beginPath();
+  if (D.win) { g.moveTo(72, ty + 22); g.lineTo(85, ty); g.lineTo(98, ty + 22); } else { g.moveTo(72, ty); g.lineTo(98, ty); g.lineTo(85, ty + 22); }
+  g.closePath(); g.fill();
+  g.font = '700 28px Inter'; g.fillText(D.pctTxt ? D.usdTxt : (D.win ? 'in profit' : 'down bad'), 112, ty + 22);
+  // stat strip with hairlines
+  const sy = CH - 196, colW = (CW - 144) / 3;
+  g.fillStyle = LINE; g.fillRect(72, sy, CW - 144, 1);
+  D.stats.forEach((s, i) => {
+    const x = 72 + i * colW;
+    if (i) { g.fillStyle = LINE; g.fillRect(x, sy + 22, 1, 70); }
+    g.fillStyle = MUTED; g.font = `500 14px ${MONO}`; g.fillText(s[0], x + (i ? 28 : 0), sy + 44);
+    g.fillStyle = s[0] === 'PnL' ? col : INK; g.font = '700 30px Inter'; g.fillText(s[1], x + (i ? 28 : 0), sy + 84);
+  });
+  g.fillStyle = LINE; g.fillRect(72, CH - 84, CW - 144, 1);
+  g.fillStyle = INK; g.font = '600 18px Inter'; g.fillText(D.user, 72, CH - 44);
+  g.fillStyle = MUTED; g.font = `500 15px ${MONO}`; g.textAlign = 'right'; g.fillText('rookery.stinkypenguin.xyz', CW - 72, CH - 45); g.textAlign = 'left';
+  return c;
+}
+
+/* 3 · Neon: synthwave grid, glowing numbers, laser frame, colour-tinted penguin */
+async function drawNeon(o) {
+  const [c, g] = newCanvas(), D = cardData(o);
+  const NEON = D.win ? '#39ff88' : '#ff3d6e', ALT = '#2de2ff', MAG = '#c84bff';
+  g.fillStyle = '#05030b'; g.fillRect(0, 0, CW, CH);
+  // horizon glow + perspective grid
+  const hz = 430;
+  const sky = g.createLinearGradient(0, 0, 0, hz); sky.addColorStop(0, '#05030b'); sky.addColorStop(1, D.win ? '#0b2a1d' : '#2a0b18');
+  g.fillStyle = sky; g.fillRect(0, 0, CW, hz);
+  g.save(); g.strokeStyle = D.win ? 'rgba(57,255,136,.35)' : 'rgba(255,61,110,.35)'; g.lineWidth = 1.2; g.shadowColor = NEON; g.shadowBlur = 8;
+  for (let i = -16; i <= 16; i++) { g.beginPath(); g.moveTo(CW / 2 + i * 22, hz); g.lineTo(CW / 2 + i * 150, CH); g.stroke(); }
+  for (let k = 0; k < 9; k++) { const yy = hz + Math.pow(k / 8, 2) * (CH - hz); g.globalAlpha = .25 + k / 12; g.beginPath(); g.moveTo(0, yy); g.lineTo(CW, yy); g.stroke(); }
+  g.restore();
+  g.fillStyle = 'rgba(255,255,255,.9)'; g.fillRect(0, hz, CW, 1);
+  // penguin, tinted with the neon colour
+  const art = await loadImg(D.win ? '/assets/penguin/pnl-win.webp' : '/assets/penguin/pnl-loss.webp');
+  if (art) {
+    const ah = CH - 40, aw = art.width * ah / art.height, ax = CW - aw + 10, ay = 20;
+    const t = document.createElement('canvas'); t.width = aw; t.height = ah; const tg = t.getContext('2d');
+    tg.drawImage(art, 0, 0, aw, ah);
+    tg.globalCompositeOperation = 'color'; tg.fillStyle = D.win ? '#1fd877' : '#ff2d6a'; tg.fillRect(0, 0, aw, ah);
+    tg.globalCompositeOperation = 'destination-in'; const m = tg.createLinearGradient(0, 0, aw * .55, 0); m.addColorStop(0, 'rgba(0,0,0,0)'); m.addColorStop(1, 'rgba(0,0,0,1)'); tg.fillStyle = m; tg.fillRect(0, 0, aw, ah);
+    g.drawImage(t, ax, ay);
+  }
+  // keep the text column readable over the grid
+  const back = g.createLinearGradient(0, 0, 760, 0); back.addColorStop(0, 'rgba(5,3,11,.92)'); back.addColorStop(.75, 'rgba(5,3,11,.6)'); back.addColorStop(1, 'rgba(5,3,11,0)');
+  g.fillStyle = back; g.fillRect(0, 0, 760, CH);
+  // scanlines
+  g.fillStyle = 'rgba(255,255,255,.025)'; for (let y = 0; y < CH; y += 4) g.fillRect(0, y, CW, 1);
+  // header
+  await brand(g, 64, 56);
+  g.save(); g.fillStyle = ALT; g.shadowColor = ALT; g.shadowBlur = 14; g.font = `600 14px ${MONO}`; g.fillText('● LIVE ON ROOKERY', 64, 136); g.restore();
+  // title
+  g.save(); g.fillStyle = '#fff'; g.shadowColor = MAG; g.shadowBlur = 18; g.font = '800 44px Inter'; g.fillText(D.title, 64, 196); g.restore();
+  g.fillStyle = 'rgba(255,255,255,.55)'; g.font = '500 18px Inter'; g.fillText(D.sub, 66, 226);
+  // glowing number: three passes for a tube-light look
+  const fs = fitFont(g, D.big, 900, 160, 640, 70);
+  const by = 262 + fs * .82;
+  g.save(); g.fillStyle = NEON; g.shadowColor = NEON;
+  g.shadowBlur = 60; g.fillText(D.big, 58, by); g.shadowBlur = 24; g.fillText(D.big, 58, by); g.restore();
+  g.save(); g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 2; g.strokeText(D.big, 58, by); g.restore();
+  let y = by + 58;
+  if (D.pctTxt) { g.save(); g.fillStyle = '#fff'; g.shadowColor = NEON; g.shadowBlur = 20; g.font = '800 38px Inter'; g.fillText(D.usdTxt, 64, y); g.restore(); y += 46; }
+  g.fillStyle = ALT; g.font = `600 19px ${MONO}`; g.fillText(D.stats.slice(0, 2).map(s => `${s[0]} ${s[1]}`).join('   //   '), 66, y + 4);
+  footer(g, D, 64, CH - 46, '#fff', 'rgba(255,255,255,.6)', 32);
+  // laser frame
+  g.save(); const fr = g.createLinearGradient(0, 0, CW, CH); fr.addColorStop(0, ALT); fr.addColorStop(.5, NEON); fr.addColorStop(1, MAG);
+  g.strokeStyle = fr; g.lineWidth = 4; g.shadowColor = NEON; g.shadowBlur = 26;
+  g.beginPath(); g.roundRect(14, 14, CW - 28, CH - 28, 26); g.stroke(); g.lineWidth = 1.5; g.shadowBlur = 0; g.strokeStyle = 'rgba(255,255,255,.7)'; g.stroke(); g.restore();
+  return c;
+}
+
+/* 4 · Ranking: every token in the wallet, best to worst, with PnL bars */
+async function drawRanking(o) {
+  const [c, g] = newCanvas(), D = cardData(o);
+  const UP = '#3DDC97', DN = '#FF5C5C';
+  g.fillStyle = '#070708'; g.fillRect(0, 0, CW, CH);
+  g.strokeStyle = 'rgba(255,255,255,.03)'; g.lineWidth = 1;
+  for (let x = -CH; x < CW; x += 18) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x + CH, CH); g.stroke(); }
+  await brand(g, 64, 50);
+  const rows = (o.rank || []).filter(r => isFinite(r.pnlUsd)).sort((a, b) => b.pnlUsd - a.pnlUsd);
+  const total = o.totalUsd ?? rows.reduce((a, r) => a + r.pnlUsd, 0), tw = total >= 0;
+  // header: title left, total right
+  g.fillStyle = '#fff'; g.font = '800 40px Inter'; g.fillText('My bags, ranked', 64, 156);
+  g.fillStyle = '#8b8b93'; g.font = `500 16px ${MONO}`; g.fillText(`${rows.length} TOKEN${rows.length === 1 ? '' : 'S'} · ${D.date}`, 66, 186);
+  g.textAlign = 'right'; g.fillStyle = '#8b8b93'; g.font = `500 15px ${MONO}`; g.fillText('TOTAL PnL', CW - 64, 112);
+  g.fillStyle = tw ? UP : DN; g.shadowColor = tw ? 'rgba(61,220,151,.35)' : 'rgba(255,92,92,.3)'; g.shadowBlur = 30;
+  const tt = `${tw ? '+' : '−'}${usd2(Math.abs(total))}`; fitFont(g, tt, 800, 60, 420, 34); g.fillText(tt, CW - 64, 168); g.shadowBlur = 0;
+  if (o.totalPct != null && isFinite(o.totalPct)) { g.font = '700 22px Inter'; g.fillText(`${o.totalPct >= 0 ? '+' : '−'}${Math.abs(o.totalPct).toFixed(1)}%`, CW - 64, 198); }
+  g.textAlign = 'left';
+  // rows
+  const top = 228, bottom = CH - 98, max = Math.min(rows.length, 7), rh = max ? Math.min(54, (bottom - top) / max) : 54;
+  const maxAbs = Math.max(1e-9, ...rows.slice(0, max).map(r => Math.abs(r.pnlUsd)));
+  const barX = 520, barW = 330;
+  if (!rows.length) { g.fillStyle = '#8b8b93'; g.font = '500 22px Inter'; g.fillText('No open bags yet.', 64, top + 60); }
+  for (let i = 0; i < max; i++) {
+    const r = rows[i], y = top + i * rh, mid = y + rh / 2, up = r.pnlUsd >= 0, hi = o.kind === 'token' && r.id === o.id;
+    if (hi || i % 2 === 0) { g.fillStyle = hi ? 'rgba(61,220,151,.09)' : 'rgba(255,255,255,.025)'; g.beginPath(); g.roundRect(48, y + 3, CW - 96, rh - 6, 12); g.fill(); }
+    if (hi) { g.strokeStyle = 'rgba(61,220,151,.5)'; g.lineWidth = 1.5; g.stroke(); }
+    g.fillStyle = i === 0 ? '#fff' : '#6f6f77'; g.font = `700 18px ${MONO}`; g.fillText(String(i + 1).padStart(2, '0'), 66, mid + 7);
+    await tokenBadge(g, r, 112, mid - 17, 17);
+    g.fillStyle = '#fff'; g.font = '700 22px Inter'; g.fillText('$' + String(r.symbol).slice(0, 12), 160, mid + 8);
+    g.fillStyle = '#8b8b93'; g.font = `500 15px ${MONO}`; g.fillText(usd2(r.valueUsd || 0), 360, mid + 7);
+    // bar centred on a zero line: gains to the right, losses to the left
+    const z = barX + barW * .35, len = (Math.abs(r.pnlUsd) / maxAbs) * (up ? barW * .65 : barW * .35);
+    g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(z, mid - 14, 1, 28);
+    g.fillStyle = up ? UP : DN; g.beginPath(); g.roundRect(up ? z + 2 : z - len - 1, mid - 7, Math.max(3, len), 14, 7); g.fill();
+    g.textAlign = 'right';
+    g.fillStyle = up ? UP : DN; g.font = '800 22px Inter'; g.fillText(`${up ? '+' : '−'}${usd2(Math.abs(r.pnlUsd))}`, CW - 180, mid + 8);
+    g.font = '600 17px Inter'; g.fillText(r.pnlPct == null || !isFinite(r.pnlPct) ? '—' : `${r.pnlPct >= 0 ? '+' : '−'}${Math.abs(r.pnlPct).toFixed(1)}%`, CW - 66, mid + 7);
+    g.textAlign = 'left';
+  }
+  if (rows.length > max) { g.fillStyle = '#6f6f77'; g.font = `500 15px ${MONO}`; g.fillText(`+ ${rows.length - max} more`, 66, bottom + 6); }
+  g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(64, CH - 78, CW - 128, 1);
+  g.fillStyle = '#fff'; g.font = '600 20px Inter'; g.fillText(D.user, 64, CH - 40);
+  g.fillStyle = '#8b8b93'; g.font = `500 16px ${MONO}`; g.textAlign = 'right'; g.fillText('rookery.stinkypenguin.xyz', CW - 64, CH - 41); g.textAlign = 'left';
+  return c;
+}
+const CARD_DRAW = { classic: drawClassic, minimal: drawMinimal, neon: drawNeon, ranking: drawRanking };
+async function drawCard(tpl, o) {
+  await withTimeout(document.fonts?.ready || Promise.resolve(), 1500);
+  return (CARD_DRAW[tpl] || drawClassic)(o);
+}
+const toBlob = (c) => withTimeout(new Promise(r => c.toBlob(r, 'image/png')), 5000);
+// the ranking needs the whole wallet: fetch it once if the caller didn't pass it
+async function ensureRank(o) {
+  if (o.rank) return;
+  try {
+    const me = await api('/me?pnl=1');
+    o.rank = me.holdings.filter(x => x.pnlUsd !== undefined).map(x => ({ id: x.id, symbol: x.symbol, image: x.image, pnlUsd: x.pnlUsd, pnlPct: x.pnlPct, valueUsd: x.valueUsd }));
+    if (me.pnl) { o.totalUsd = me.pnl.totalUsd; o.totalPct = me.pnl.pct; }
+  } catch { o.rank = []; }
+}
+
+async function openShare(o) {
+  if (S.sharing) return; S.sharing = true;
+  toast('Building your card…');
+  try { await openShareInner(o); } catch (e) { console.error(e); toast('Could not build the card: ' + esc(e.message || String(e)), 'bad'); }
+  finally { S.sharing = false; }
+}
+async function openShareInner(o) {
+  await ensureRank(o);
+  let tpl = CARD_DRAW[localStorage.getItem('pl_card_tpl')] ? localStorage.getItem('pl_card_tpl') : 'classic';
+  let blob = null, url = null, file = null;
+  const pct = o.pnlPct !== null && o.pnlPct !== undefined && isFinite(o.pnlPct) ? `${o.pnlPct >= 0 ? '+' : '-'}${Math.abs(o.pnlPct).toFixed(1)}%` : `${o.pnlUsd >= 0 ? '+' : '-'}${fmtUsd(Math.abs(o.pnlUsd))}`;
+  const textFor = (t) => t === 'ranking'
+    ? `My bags on Rookery, ranked 🐧\nPre-mainnet tokens, migrating 1:1 at launch.`
+    : o.kind === 'token' ? `${pct} on $${o.symbol} 🐧\nTrading pre-mainnet tokens on Rookery, the Stinky Penguin launchpad.` : `${pct} portfolio PnL on Rookery 🐧\nPre-mainnet tokens, migrating 1:1 at launch.`;
+  const link = location.origin + (o.id ? `/#/t/${o.id}` : '/');
+  const md = h(`<div class="modal-bg"><div class="modal share-m">
+    <div class="share-stage"><img alt="PnL card" class="share-img" id="shImg"><div class="share-busy" id="shBusy">Rendering…</div></div>
+    <div class="tpl-h"><span class="mono mu">Card style</span><span class="mu" style="font-size:12px">Pick one, it's remembered for next time</span></div>
+    <div class="tpl-pick" id="tplPick">${CARD_TEMPLATES.map(t => `<button class="tpl" data-tpl="${t.id}"><span class="tpl-th"><i class="skel"></i></span><b>${t.label}</b></button>`).join('')}</div>
+    <div class="share-a">
+      <button class="btn" id="shX">Post on 𝕏</button>
+      ${navigator.canShare && navigator.canShare({ files: [new File([new Blob(['x'])], 'x.png', { type: 'image/png' })] }) ? '<button class="btn ghost" id="shN">Share…</button>' : ''}
+      <button class="btn ghost" id="shC">Copy image</button>
+      <a class="btn ghost" id="shD" download="rookery-pnl.png">Download</a>
+      <button class="btn ghost" id="shQ" style="margin-left:auto">Close</button>
+    </div>
+    <p class="mu" style="font-size:12px;margin-top:10px">𝕏 doesn't take images from links: the card is copied to your clipboard, just paste it into the post.</p>
+  </div></div>`);
+  document.body.append(md);
+  const render = async (t) => {
+    tpl = t; localStorage.setItem('pl_card_tpl', t);
+    $$('#tplPick .tpl').forEach(b => b.classList.toggle('on', b.dataset.tpl === t));
+    $('#shBusy').classList.add('on');
+    const c = await drawCard(t, o);
+    const b = await toBlob(c); if (!b) throw new Error('image export timed out');
+    if (url) URL.revokeObjectURL(url);
+    blob = b; url = URL.createObjectURL(b);
+    file = new File([b], `rookery-${t}-${o.symbol || 'portfolio'}.png`, { type: 'image/png' });
+    $('#shImg').src = url; $('#shD').href = url; $('#shD').download = file.name;
+    $('#shBusy').classList.remove('on');
+  };
+  await render(tpl);
+  // live previews of every template as thumbnails
+  (async () => { for (const t of CARD_TEMPLATES) { try { const c = await drawCard(t.id, o); const th = md.querySelector(`[data-tpl="${t.id}"] .tpl-th`); if (th) th.innerHTML = `<img src="${c.toDataURL('image/jpeg', .7)}" alt="">`; } catch { /* keep the placeholder */ } } })();
+  $$('#tplPick .tpl').forEach(b => b.onclick = () => { if (b.dataset.tpl !== tpl) render(b.dataset.tpl).catch(e => toast(esc(e.message), 'bad')); });
+  const close = () => { md.remove(); if (url) URL.revokeObjectURL(url); };
+  md.onclick = (e) => { if (e.target === md) close(); };
+  $('#shQ').onclick = close;
+  const copy = async () => { try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); return true; } catch { return false; } };
+  $('#shC').onclick = async () => toast((await copy()) ? 'Card copied. Paste it anywhere.' : 'Copy is blocked here, use Download.');
+  $('#shX').onclick = async () => {
+    const ok = await copy();
+    if (!ok) $('#shD').click();
+    toast(ok ? 'Card copied: paste it into your post (Ctrl/⌘+V)' : 'Card downloaded: attach it to your post');
+    window.open(`https://x.com/intent/post?text=${encodeURIComponent(textFor(tpl))}&url=${encodeURIComponent(link)}`, '_blank', 'noopener');
+  };
+  const sn = $('#shN'); if (sn) sn.onclick = async () => { try { await navigator.share({ files: [file], text: textFor(tpl), url: link }); } catch { /* cancelled */ } };
+}
+// big call-to-action with an animated laser frame
+const laserBtn = (attrs, label = 'Share your PnL') => `<button class="laser-btn" ${attrs} onclick="event.stopPropagation()"><span>${label} <b>↗</b></span></button>`;
+const shareBtn = (attrs) => `<button class="share-b" ${attrs} title="Share this PnL" onclick="event.stopPropagation()">Share ↗</button>`;
+
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+// header + home numbers that come with every push
+function liveStats(st) {
+  if (!S.stats) return;
+  Object.assign(S.stats, st);
+  liveNum($('#burnPx'), st.burnReserveUsd, fmtUsd);
+  liveNum($('#sVol'), st.volumeUsd, fmtUsd); liveNum($('#sTok'), st.markets, fmtInt); liveNum($('#sTr'), st.traders, fmtInt);
+  liveNum($('#sBurn'), st.burnReserveUsd, fmtUsd); liveNum($('#sBurn2'), st.burnReserveUsd, fmtUsd);
+}
+const fmtInt = (v) => Math.round(v).toLocaleString('en-US');
+// Smooth number change: tween from the old value to the new one and flash the cell up/down.
+function liveNum(el, value, fmt, flash = true) {
+  if (!el || value === undefined || value === null || !isFinite(value)) return;
+  const old = el._v; el._v = value;
+  if (old === undefined || old === value || !isFinite(old)) { el.textContent = fmt(value); return; }
+  cancelAnimationFrame(el._raf);
+  const t0 = performance.now(), D = 520;
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / D), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(k < 1 ? old + (value - old) * e : value);
+    if (k < 1) el._raf = requestAnimationFrame(step);
+  };
+  el._raf = requestAnimationFrame(step);
+  if (flash) { el.classList.remove('flash-up', 'flash-dn'); void el.offsetWidth; el.classList.add(value > old ? 'flash-up' : 'flash-dn'); }
+}
+// set text/html only when it changed (no needless repaint), optional flash
+function liveText(el, html, flash = false) {
+  if (!el || el._h === html) return;
+  const first = el._h === undefined; el._h = html; el.innerHTML = html;
+  if (flash && !first) { el.classList.remove('flash-up', 'flash-dn'); void el.offsetWidth; el.classList.add('flash-up'); }
+}
+// browsers throttle timers to ~1/minute in hidden tabs; refresh the moment the tab is visible again
+const refreshNow = () => { try { S.tick?.(); } catch (e) { /* view already gone */ } };
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshNow(); });
+window.addEventListener('focus', refreshNow);
+const needLogin = () => { toast('Log in or create an account first', 'bad'); location.hash = '#/login'; };
+
+/* ═══════════ EXPLORE ═══════════ */
+async function viewExplore() {
+  document.title = 'Rookery — the Stinky Penguin launchpad';
+  const st = S.stats || {};
+  const nets = st.networks || {};
+  const nt = st.netTokens || {};
+  app.innerHTML = `
+  <section class="wrap hero">
+    <div class="hero-grid">
+      <div>
+        <span class="kicker"><img src="/assets/penguin/mark.webp" alt="" style="width:12px;height:17px;filter:invert(1)">The Stinky Penguin launchpad · trade with ZRO, ETH or XLM</span>
+        <h1>Hatch before<br><span>the chain does.</span></h1>
+        <p class="lead">Create and trade tokens on a bonding curve. Zero and GIWA tokens migrate 1:1 the day mainnet opens; Stellar tokens graduate on-chain into Aquarius at ${gradK()} with the LP burned.</p>
+        <div class="hero-cta"><a class="btn lg" href="#/create">Create a token</a><a class="btn lg ghost" href="#/docs">How it works</a></div>
+      </div>
+      <div class="nets">
+        <div class="net-card"><span class="net-ico">Ø</span><div><h4>Zero</h4><span class="mu" style="font-size:12.5px">by LayerZero · mainnet 30.11</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.zero || 0}</b> tokens</span></div>
+          <div class="cd"><b id="cdZero">${countdown(nets.zero?.launchAt)}</b><span class="mono mu">${esc(nets.zero?.status || '')}</span></div></div>
+        <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
+          <div class="cd"><b>TBA</b><span class="mono mu">${esc(nets.giwa?.status || '')}</span></div></div>
+        <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">XLM · on-chain</span></div></a>
+      </div>
+    </div>
+    <div class="stats">
+      <div><span class="mono mu">Volume</span><b id="sVol">${fmtUsd(st.volumeUsd)}</b></div>
+      <div><span class="mono mu">Tokens</span><b id="sTok">${st.markets ?? '—'}</b></div>
+      <div><span class="mono mu">Traders</span><b id="sTr">${st.traders ?? '—'}</b></div>
+      <div><span class="mono mu">ZRO price</span><b>$${(st.zroUsd || 0).toFixed(3)}</b></div>
+      <div class="burn"><span class="mono mu">$臭企鹅 burn reserve</span><b><img src="/assets/penguin/mark.webp" alt="" style="width:14px;height:20px;filter:invert(1)"><span id="sBurn">${fmtUsd(st.burnReserveUsd ?? st.plaunchBurnUsd)}</span></b></div>
+    </div>
+  </section>
+  <section class="wrap">
+    <div class="peng">
+      <img src="/assets/penguin/allin.webp" alt="Stinky Penguin going all-in">
+      <div class="peng-b">
+        <span class="mono mu">Powered by the penguin</span>
+        <h2>Every trade feeds<br><span>the penguin.</span></h2>
+        <p>Rookery is the launchpad of Stinky Penguin. <b style="color:var(--tx)">0.5% of every buy and sell</b> on any token here goes to buying and burning <b style="color:var(--tx)">$臭企鹅</b>. More launches, more volume, fewer penguins.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><a class="btn" href="https://stinkypenguin.xyz" target="_blank" rel="noopener">Meet the penguin</a><a class="btn ghost" href="#/docs">Burn mechanics</a></div>
+        <span class="mono mu">Burn reserve now · <b style="color:var(--tx)" id="sBurn2">${fmtUsd(st.burnReserveUsd ?? st.plaunchBurnUsd)}</b></span>
+      </div>
+    </div>
+  </section>
+  <section class="wrap" style="padding-bottom:40px">
+    <div id="hatchStrip"></div>
+    <div class="seg netseg" id="netseg" style="margin-bottom:12px">
+      <button data-n="" class="${S.net ? '' : 'on'}">All networks</button>
+      <button data-n="zero" class="${S.net === 'zero' ? 'on' : ''}">Zero</button>
+      <button data-n="giwa" class="${S.net === 'giwa' ? 'on' : ''}">GIWA</button>
+      <button data-n="stellar" class="${S.net === 'stellar' ? 'on' : ''}">Stellar</button>
+    </div>
+    <div class="bar-row">
+      <div class="seg" id="sort">
+        <button data-s="trending" class="on">Trending</button><button data-s="new">New</button>
+        <button data-s="mcap">Market cap</button><button data-s="bond">About to bond</button>
+      </div>
+      <label class="search"><span class="mu">⌕</span><input id="q" placeholder="Search name or ticker"></label>
+    </div>
+    <div id="koth"></div>
+    <div class="grid" id="grid"><div class="skel" style="height:116px"></div><div class="skel" style="height:116px"></div><div class="skel" style="height:116px"></div></div>
+  </section>`;
+
+  let sort = 'trending', q = '', markets = [];
+  const paint = () => {
+    let list = markets.filter(m => !q || (m.name + ' ' + m.symbol).toLowerCase().includes(q));
+    const by = { trending: (a, b) => (b.lastTrade || b.created) - (a.lastTrade || a.created), new: (a, b) => b.created - a.created, mcap: (a, b) => b.mcapUsd - a.mcapUsd, bond: (a, b) => b.progress - a.progress };
+    list.sort(by[sort]);
+    const king = [...markets].filter(m => !m.graduated).sort((a, b) => b.progress - a.progress)[0];
+    const kKey = king ? `${king.id}|${king.progress.toFixed(1)}|${king.holders}|${Math.round(king.mcapUsd)}|${king.change24h.toFixed(1)}` : '';
+    if ($('#koth')._k !== kKey) { $('#koth')._k = kKey;
+    $('#koth').innerHTML = king && king.progress > 0 ? `
+      <a class="koth" href="#/t/${king.id}">
+        ${timg(king)}
+        <div><span class="mono mu">King of the hill · ${netName(king.network)}</span>
+          <h3>${esc(king.name)} <span class="mu" style="font-size:16px">$${esc(king.symbol)}</span></h3>
+          <div class="prog big" style="margin:12px 0 8px;max-width:520px"><i style="width:${king.progress}%"></i></div>
+          <span class="mu" style="font-size:12.5px">${king.progress.toFixed(1)}% ${king.network === 'stellar' ? 'to ' + gradK(king.stellar?.gradUsd || 46000) : 'bonded'} · ${king.holders} holders</span></div>
+        <div style="text-align:right"><span class="mono mu">Market cap</span><div class="price-xl">${fmtUsd(king.mcapUsd)}</div>${fmtPct(king.change24h)}</div>
+      </a>` : ''; }
+    paintGrid($('#grid'), list,
+      `<div class="empty" style="grid-column:1/-1"><img src="/assets/penguin/stay.webp" alt="">The rookery is quiet${S.net ? ' on this network' : ''}. <a href="#/create" style="text-decoration:underline;color:var(--tx)">Hatch the first token</a>.</div>`);
+  };
+  $$('#sort button').forEach(b => b.onclick = () => { sort = b.dataset.s; $$('#sort button').forEach(x => x.classList.toggle('on', x === b)); paint(); });
+  $$('#netseg button').forEach(b => b.onclick = () => { window.plSetNet(b.dataset.n); route(); });
+  $('#q').oninput = (e) => { q = e.target.value.toLowerCase().trim(); paint(); };
+  const load = async () => { markets = (await api('/markets' + (S.net ? `?network=${S.net}` : ''))).markets; paint(); };
+  await load();
+  paintHatches();
+  liveSub(['all'], (msg) => {
+    const nm = msg.market; if (S.net && nm.network !== S.net) return;
+    const i = markets.findIndex(x => x.id === nm.id);
+    if (i >= 0) markets[i] = nm; else markets.unshift(nm);
+    paint();
+  });
+  setTimer(() => { load(); loadHatches(); const cd = $('#cdZero'); if (cd) cd.textContent = countdown(S.stats?.networks?.zero?.launchAt); }, 4000, true);
+}
+
+/* ═══════════ TRADING TERMINAL ═══════════ */
+async function viewTrading() {
+  document.title = 'Trading — Rookery';
+  app.innerHTML = `
+  <section class="wrap trade-layout">
+    <div class="panel">
+      <div class="panel-h"><h3>Markets</h3><div class="seg" id="tsort">
+        <button data-s="vol" class="on">Volume</button><button data-s="ch">24h</button><button data-s="mcap">MC</button><button data-s="new">New</button></div></div>
+      <div style="overflow:auto"><table class="tbl" id="mt"><thead><tr>
+        <th>Token</th><th>Network</th><th class="r">Price</th><th class="r">5m</th><th class="r">1h</th><th class="r">24h</th>
+        <th class="r">Market cap</th><th class="r">Volume</th><th class="r">Holders</th><th class="r">Bonded</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="panel"><div class="panel-h"><h3>Live trades</h3><span class="dot live"></span></div><div class="feed" id="feed"></div></div>
+  </section>`;
+  let sort = 'vol', seen = new Set(), first = true;
+  const by = { vol: (a, b) => b.volumeUsd - a.volumeUsd, ch: (a, b) => b.change24h - a.change24h, mcap: (a, b) => b.mcapUsd - a.mcapUsd, new: (a, b) => b.created - a.created };
+  $$('#tsort button').forEach(b => b.onclick = () => { sort = b.dataset.s; $$('#tsort button').forEach(x => x.classList.toggle('on', x === b)); load(); });
+  const load = async () => {
+    const [{ markets }, { trades }] = await Promise.all([api('/markets' + (S.net ? `?network=${S.net}` : '')), api('/feed')]);
+    markets.sort(by[sort]);
+    $('#mt tbody').innerHTML = markets.length ? markets.map(m => `
+      <tr class="click" data-id="${m.id}">
+        <td><div class="tok-cell">${timg(m)}<div><b>${esc(m.symbol)}</b><div class="mu" style="font-size:11.5px">${esc(m.name)}</div></div></div></td>
+        <td>${netTag(m.network)}</td><td class="r">${fmtUsd(m.priceUsd)}</td>
+        <td class="r">${fmtPct(m.change5m)}</td><td class="r">${fmtPct(m.change1h)}</td><td class="r">${fmtPct(m.change24h)}</td>
+        <td class="r">${fmtUsd(m.mcapUsd)}</td><td class="r">${fmtUsd(m.volumeUsd)}</td><td class="r">${m.holders}</td>
+        <td class="r"><div style="display:flex;align-items:center;gap:8px;justify-content:flex-end"><div class="prog" style="width:60px"><i style="width:${m.progress}%"></i></div>${m.progress.toFixed(0)}%</div></td>
+      </tr>`).join('') : `<tr><td colspan="10"><div class="empty" style="border:0">No markets yet.</div></td></tr>`;
+    $$('#mt tr.click').forEach(r => r.onclick = () => (location.hash = `#/t/${r.dataset.id}`));
+    $('#feed').innerHTML = trades.length ? trades.map(t => {
+      const key = `${t.ts}${t.market}${t.zro}`; const isNew = !first && !seen.has(key); seen.add(key);
+      return `<a class="fi ${isNew ? 'new' : ''}" href="#/t/${t.market}"><span class="side ${t.side === 'buy' ? 'up' : 'dn'}">${t.side.toUpperCase()}</span>
+        <span><b>${fmtUsd(zNum(t.zro) * t.usd)}</b> <span class="mu">${esc(t.symbol)}</span></span><span class="mu">${esc(t.username || '')}</span><span class="tm">${ago(t.ts)}</span></a>`;
+    }).join('') : '<div class="empty" style="border:0;margin:14px">No trades yet.</div>';
+    first = false;
+  };
+  await load();
+  liveSub(['all'], debounce(load, 250));
+  setTimer(load, 4000, true);
+}
+
+/* ═══════════ TOKEN PAGE ═══════════ */
+async function viewToken(id) {
+  let d;
+  try { d = await api('/market/' + id); } catch (e) { app.innerHTML = `<div class="wrap page"><div class="empty">${esc(e.message)}</div></div>`; return; }
+  let m = d.market;
+  document.title = `${m.symbol} ${fmtUsd(m.priceUsd)} — Rookery`;
+  let side = 'buy', ival = 60, tab = 'trades';
+  const Q = m.quote || 'ZRO', QA = qaOf(Q);                                 // the market's own currency
+  let pay = localStorage.getItem('pl_pay_' + QA) || QA;                  // what the user pays / receives in
+  if (!ASSET[pay] || QA === 'xlm' || pay === 'xlm') pay = QA;          // Stellar tokens trade only in XLM
+  S.quickEth = S.quickEth || localStorage.getItem('pl_quick_eth') || '0.005';
+
+  app.innerHTML = `
+  <section class="wrap token">
+    <div class="tmain">
+      <div class="th">
+        ${timg(m)}
+        <div>
+          <h1>${esc(m.name)} <span class="mu" style="font-size:18px;font-weight:600">$${esc(m.symbol)}</span></h1>
+          <div class="th-sub">${netTag(m.network)}${m.network === 'stellar' ? (m.migrated
+            ? '<span class="tag onchain">ON-CHAIN · AQUARIUS</span>'
+            : m.stellar?.job ? '<span class="tag pm">GRADUATING TO AQUARIUS…</span>'
+            : m.stellar?.issuer ? `<span class="tag onchain">ON STELLAR · LP AT ${fmtUsd(m.stellar?.gradUsd || 46000)}</span>`
+            : `<span class="tag pm">ISSUING ON STELLAR…</span>`) : ''}<span>Pair: <b>${esc(m.symbol)}/${m.quote || 'ZRO'}</b></span><span class="mu">·</span>
+            <span>by <a href="#/u/${encodeURIComponent(m.creator)}" style="text-decoration:underline">${esc(m.creator)}</a></span><span class="mu">· ${ago(m.created)} ago</span></div>
+        </div>
+        <div class="socials">
+          ${m.x ? `<a href="${esc(m.x)}" target="_blank" rel="noopener">𝕏</a>` : ''}
+          ${m.tg ? `<a href="${esc(m.tg)}" target="_blank" rel="noopener">Telegram</a>` : ''}
+          ${m.web ? `<a href="${esc(m.web)}" target="_blank" rel="noopener">Website</a>` : ''}
+        </div>
+      </div>
+      <div class="kpis" id="kpis"></div>
+      <div class="panel tchart">
+        <div class="chart-top">
+          <div><span class="mono mu">Price · USD</span><div style="display:flex;align-items:baseline;gap:10px"><span class="price-xl" id="px"></span><span id="pxch"></span></div></div>
+          <div class="ivals" id="ivals"><button data-i="60" class="on">1m</button><button data-i="300">5m</button><button data-i="900">15m</button><button data-i="3600">1h</button></div>
+        </div>
+        <div class="chart-wrap"><div id="chart"></div></div>
+      </div>
+      <div class="panel ttabs" style="margin-top:14px">
+        <div class="tabs-h" id="tabs">
+          <button data-t="trades" class="on">Trades<span class="cnt" id="cTrades"></span></button>
+          <button data-t="holders">Holders<span class="cnt" id="cHolders"></span></button>
+          <button data-t="comments">Comments<span class="cnt" id="cCom"></span></button>
+          <button data-t="about">About</button>
+        </div>
+        <div id="tabBody"></div>
+      </div>
+    </div>
+
+    <aside class="tb">
+      ${m.network === 'stellar' && !m.migrated && !m.stellar?.job && m.stellar?.issuer ? `<div class="panel pb">
+        <span class="mono mu">On Stellar since launch</span>
+        <div class="st-asset" style="margin-top:10px">
+          <div class="kv"><span>Asset code</span><b>${esc(m.stellar.code)}</b><button class="mini" data-copy="${esc(m.stellar.code)}">Copy</button></div>
+          <div class="kv"><span>Issuer</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(m.stellar.issuer)}</b><button class="mini" data-copy="${esc(m.stellar.issuer)}">Copy</button></div>
+        </div>
+        <p class="mu" style="font-size:11.5px;line-height:1.55;margin:0">The token exists on Stellar from launch and the issuer stays open until graduation. Add the trustline now — 0.5 XLM reserve — so you can withdraw the moment the Aquarius pool opens at ${fmtUsd(m.stellar?.gradUsd || 46000)}.</p>
+      </div>` : ''}
+      ${m.network === 'stellar' && (m.migrated || m.stellar?.job) ? `<div class="panel pb st-grad">
+        <span class="net-ico st" style="width:40px;height:40px"><img src="/assets/chains/stellar.svg" alt=""></span>
+        <h3 style="font-size:16px;margin:12px 0 6px">${m.migrated ? 'Trading on Aquarius' : 'Graduating to Aquarius…'}</h3>
+        <p class="mu" style="font-size:13px;line-height:1.55;margin-bottom:14px">${m.migrated
+          ? `$${esc(m.symbol)} reached ${fmtUsd(m.stellar?.gradUsd || 46000)}. Its liquidity sits in an Aquarius pool on Stellar and the LP is burned forever. Withdraw your tokens to a Stellar wallet (add a trustline for <b>${esc(m.stellar?.code || '')}</b> first) and trade them anywhere on Stellar.`
+          : 'The curve is full. Rookery is issuing the token on Stellar, opening the Aquarius pool and burning the LP. This takes about a minute.'}</p>
+        ${m.migrated ? `<div class="st-asset">
+          <div class="kv"><span>Asset code</span><b>${esc(m.stellar?.code || '')}</b><button class="mini" data-copy="${esc(m.stellar?.code || '')}">Copy</button></div>
+          <div class="kv"><span>Issuer</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(m.stellar?.issuer || '')}</b><button class="mini" data-copy="${esc(m.stellar?.issuer || '')}">Copy</button></div>
+          <p class="mu" style="font-size:11.5px;line-height:1.55;margin:8px 0 12px">Add this asset in your Stellar wallet (Freighter: Assets → Add asset; Lobstr: Add asset) before withdrawing. A trustline locks 0.5 XLM as a reserve — you get it back if you remove it.</p>
+        </div>
+        <a class="btn lg wide" target="_blank" rel="noopener" href="https://aqua.network/pools/${esc(m.stellar?.pool || '')}/">Trade on Aquarius ↗</a>
+        <a class="btn lg wide ghost" style="margin-top:8px" href="#/wallet">Withdraw to my Stellar wallet</a>` : '<div class="prog big"><i style="width:70%"></i></div>'}
+      </div>` : ''}
+      <div class="panel pb" ${m.network === 'stellar' && (m.migrated || m.stellar?.job) ? 'style="display:none"' : ''}>
+        <div class="tb-tabs"><button class="buy on" data-side="buy">Buy</button><button class="sell" data-side="sell">Sell</button></div>
+        <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button></div>
+        <div class="amt"><input id="amt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="unit"></span></div>
+        <div class="quick" id="quick"></div>
+        <div class="est" id="est"></div>
+        <button class="btn lg wide up" id="go">${S.me ? 'Buy' : 'Log in to trade'}</button>
+        ${m.network === 'stellar' && !m.migrated ? `<button class="btn lg wide ghost" id="stBuy" style="margin-top:8px;gap:8px"><span style="font-size:15px">✶</span>Buy from wallet</button>
+        <button class="btn lg wide ghost" id="wcBuy" style="margin-top:6px;gap:8px"><span style="font-size:14px">▲</span>Buy with Lobstr</button>` : ''}
+        <div class="qb" id="qbRow"><span class="mono mu">Quick buy</span><input id="qbAmt" value=""><span class="mu" style="font-size:12px" id="qbUnit">ZRO</span>
+          <button class="btn sm up" id="qbGo" style="margin-left:auto">⚡ Buy</button></div>
+        <div class="kv" style="margin-top:12px"><span id="myPayLbl">Your ZRO</span><b id="myZro">—</b></div>
+        <div class="kv"><span>Your ${esc(m.symbol)}</span><b id="myTok">—</b></div>
+        <div class="kv"><span>Your PnL</span><b id="myPnl">—</b></div>
+        <div id="pnlShareBox"></div>
+      </div>
+
+      <div class="panel pb side-card">
+        <div style="display:flex;justify-content:space-between;align-items:baseline"><span class="mono mu" id="bondLbl">Bonding curve</span><b id="bondPct"></b></div>
+        <div class="prog big" style="margin:10px 0"><i id="bondBar"></i></div>
+        <p class="mu" style="font-size:12.5px;line-height:1.55" id="bondTxt"></p>
+      </div>
+
+      <div class="panel pb side-card">
+        <span class="mono mu">${m.network === 'stellar' ? (m.migrated ? 'Taxes on the curve · ended at graduation' : 'Taxes on every curve trade') : 'Taxes on every trade'}</span>
+        <div style="margin-top:8px">
+          <div class="tax-row"><span class="tax-dot" style="background:#fff"></span>$臭企鹅 buy &amp; burn (Stinky Penguin)<b>0.5%</b></div>
+          <div class="tax-row"><span class="tax-dot" style="background:#9b9ba3"></span>Marketing (creator)<b>${m.taxes.marketing}%</b></div>
+          <div class="tax-row"><span class="tax-dot" style="background:#5c5c64"></span>Burn ${esc(m.symbol)}<b>${m.taxes.burn}%</b></div>
+          <div class="tax-row"><span class="tax-dot" style="background:var(--up)"></span>${m.quote || 'ZRO'} rewards to holders<b>${m.taxes.rewards}%</b></div>
+        </div>
+        ${Number(m.taxes.marketing) > 0 ? `<p class="mu" style="font-size:11.5px;line-height:1.6;margin-top:10px">Marketing fees are paid to the creator automatically on every trade. Nothing to claim.</p>` : ''}
+        ${m.network === 'stellar' ? `<p class="mu" style="font-size:11.5px;line-height:1.6;margin-top:8px;border-left:2px solid var(--line2);padding-left:9px">${m.migrated
+          ? 'This token now trades on Aquarius. A Stellar asset cannot charge a fee on transfers, so trades there carry no marketing, rewards or burn tax. Rewards earned before graduation stay claimable.'
+          : 'These taxes apply to every trade on the curve. After graduation the token trades on Aquarius, where a Stellar asset cannot charge a transfer fee, so trading there is tax-free.'}</p>` : ''}
+        <div id="rewBox"></div>
+      </div>
+
+      <div class="panel pb side-card">
+        <span class="mono mu">Telegram buybot</span>
+        <p style="font-size:13px;line-height:1.6;color:var(--tx2);margin:8px 0 10px">Post every buy of $${esc(m.symbol)} in your Telegram group.</p>
+        ${S.stats.tgBot ? `
+        <div class="kv"><span>1. Add to your group</span><b><a href="https://t.me/${esc(S.stats.tgBot)}?startgroup=track" target="_blank" rel="noopener" style="text-decoration:underline">@${esc(S.stats.tgBot)}</a></b></div>
+        <div class="kv"><span>2. Send in the group</span><b class="mono" style="letter-spacing:0;font-size:11.5px;text-transform:none">/track ${esc(m.id)}</b></div>
+        <button class="btn sm ghost wide" id="copyTrack" style="margin-top:8px">Copy command</button>
+        <p class="mu" style="font-size:11.5px;line-height:1.6;margin-top:10px">Customize in the group: reply to a GIF with <b class="mono" style="letter-spacing:0;text-transform:none">/setmedia</b>, add buttons with <b class="mono" style="letter-spacing:0;text-transform:none">/socials x=… tg=… web=…</b>, set <b class="mono" style="letter-spacing:0;text-transform:none">/emoji 🐧</b>, check with <b class="mono" style="letter-spacing:0;text-transform:none">/preview</b>.</p>`
+        : '<p class="mu" style="font-size:12.5px">Buybot is being set up. Coming online shortly.</p>'}
+      </div>
+    </aside>
+  </section>`;
+
+  /* chart */
+  const LW = window.LightweightCharts;
+  const chartEl = $('#chart');
+  let series = null;
+  if (LW) {
+    S.chart = LW.createChart(chartEl, {
+      autoSize: true, layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#76767E', fontFamily: 'JetBrains Mono', fontSize: 10 },
+      grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.035)' } },
+      rightPriceScale: { borderColor: '#1E1E23', scaleMargins: { top: 0.15, bottom: 0.1 } }, timeScale: { borderColor: '#1E1E23', timeVisible: true, secondsVisible: false, barSpacing: 9, minBarSpacing: 3, rightOffset: 6 },
+      crosshair: { mode: 0 },
+    });
+    series = S.chart.addCandlestickSeries({
+      upColor: '#3DDC97', downColor: '#FF5C5C', borderVisible: false, wickUpColor: '#3DDC97', wickDownColor: '#FF5C5C',
+      priceFormat: { type: 'custom', formatter: axisUsd, minMove: 1e-12 },
+    });
+  }
+  const startUsd = () => (Number((m.vQuote ? B(m.vQuote) : B(S.stats.curve.vZro) * WEI) * WEI / (B(S.stats.curve.vTok) * WEI)) / 1e18) * (m.quoteUsd || d.zroUsd);
+  function candles() {
+    const map = new Map();
+    let prev = startUsd();
+    for (const t of d.trades) {
+      const p = (Number(B(t.price)) / 1e18) * (t.usd || d.zroUsd);
+      const b = Math.floor(t.ts / 1000 / ival) * ival;
+      const c = map.get(b);
+      if (!c) map.set(b, { time: b, open: prev, high: Math.max(prev, p), low: Math.min(prev, p), close: p });
+      else { c.high = Math.max(c.high, p); c.low = Math.min(c.low, p); c.close = p; }
+      prev = p;
+    }
+    // continuous timeline: flat candles where nothing traded (pump-style)
+    const nowB = Math.floor(Date.now() / 1000 / ival) * ival;
+    let t0 = Math.floor(m.created / 1000 / ival) * ival;
+    t0 = Math.max(t0, nowB - 400 * ival);
+    const out = []; let last = startUsd();
+    for (const t of d.trades) { if (Math.floor(t.ts / 1000 / ival) * ival < t0) last = (Number(B(t.price)) / 1e18) * (t.usd || d.zroUsd); }
+    for (let b = t0; b <= nowB; b += ival) {
+      const c = map.get(b);
+      if (c) { out.push(c); last = c.close; } else out.push({ time: b, open: last, high: last, low: last, close: last });
+    }
+    return out;
+  }
+  const paintChart = () => { if (series) { series.setData(candles()); } };
+  $$('#ivals button').forEach(b => b.onclick = () => { ival = +b.dataset.i; $$('#ivals button').forEach(x => x.classList.toggle('on', x === b)); paintChart(); S.chart?.timeScale().scrollToRealTime(); });
+
+  /* static-ish parts */
+  function paintTop() {
+    liveNum($('#px'), m.priceUsd, fmtUsd);
+    liveText($('#pxch'), fmtPct(m.change24h));
+    if (!$('#kMc')) $('#kpis').innerHTML = `
+      <div><span class="mono mu">Market cap</span><b id="kMc"></b></div>
+      ${Number(m.taxes.marketing) > 0 ? `<div><span class="mono mu">Creator fees earned</span><b style="color:var(--up)" id="kFee"></b><span class="mu" style="font-size:11.5px" id="kFeeU"></span></div>` : ''}
+      <div><span class="mono mu">Liquidity</span><b id="kLiq"></b></div>
+      <div><span class="mono mu">Volume</span><b id="kVol"></b></div>
+      <div><span class="mono mu">Holders</span><b id="kHold"></b></div>
+      <div><span class="mono mu">Burned</span><b id="kBurn"></b></div>`;
+    liveNum($('#kMc'), m.mcapUsd, fmtUsd); liveNum($('#kLiq'), m.liquidityUsd, fmtUsd);
+    liveNum($('#kVol'), m.volumeUsd, fmtUsd); liveNum($('#kHold'), m.holders, fmtInt);
+    liveText($('#kBurn'), fmtT(m.burned), true);
+    liveText($('#kFee'), `${fmtZ(m.mktPaid, m.quote === 'ETH' ? 5 : 2)} ${m.quote || 'ZRO'}`, true);
+    liveText($('#kFeeU'), `${fmtUsd(m.mktPaidUsd)} · ${m.taxes.marketing}% tax`);
+    liveNum($('#bondPct'), m.progress, (v) => v.toFixed(2) + '%', false);
+    if ($('#bondLbl')) $('#bondLbl').textContent = m.network === 'stellar' ? `Progress to ${gradK(m.stellar?.gradUsd || 46000)} · Aquarius` : 'Bonding curve';
+    $('#bondBar').style.width = Math.max(2.5, m.progress) + '%';
+    const left = zNum(B(m.curveTokens) * WEI - B(m.sold));
+    $('#bondTxt').innerHTML = m.graduated
+      ? (m.network === 'stellar'
+        ? (m.migrated
+          ? `<b style="color:var(--tx)">Graduated to Aquarius.</b> The pool lives on Stellar with its LP burned forever. Trade it on <a href="https://aqua.network/pools/${esc(m.stellar?.pool || '')}/" target="_blank" rel="noopener" style="text-decoration:underline">Aquarius</a> or withdraw your tokens to a Stellar wallet.`
+          : `<b style="color:var(--tx)">Bonded.</b> Trading continues on the Rookery pool. At ${fmtUsd(m.stellar?.gradUsd || 46000)} market cap it graduates on-chain into an Aquarius pool and the LP is burned forever.`)
+        : `<b style="color:var(--tx)">Bonded.</b> Trading continues on the Rookery pool with no market-cap limit (${fmtUsd(m.liquidityUsd)} liquidity). On ${netName(m.network)} mainnet this pool moves 1:1 to a DEX at the same price.`)
+      : `${m.network === 'stellar' ? `<b style="color:var(--tx)">${fmtUsd(m.mcapUsd)}</b> of ${fmtUsd(m.stellar?.gradUsd || 46000)} market cap. ` : ''}${(left / 1e6).toFixed(1)}M ${esc(m.symbol)} left on the curve. ${m.network === 'stellar' ? `At ${fmtUsd(m.stellar?.gradUsd || 46000)} market cap the liquidity moves on-chain into an Aquarius pool on Stellar and the LP is burned.` : `the reserve (${fmtUsd(m.liquidityUsd)} now) becomes the first ${netName(m.network)} pool.`}`;
+    liveNum($('#cTrades'), m.trades, fmtInt, false); liveNum($('#cHolders'), m.holders, fmtInt, false); liveNum($('#cCom'), d.comments.length, fmtInt, false);
+    if (d.me) {
+      $('#myZro').textContent = fmtA(d.me[pay] || '0', pay);
+      $('#myTok').textContent = fmtT(d.me.tokens);
+      const pn = d.me.pnl;
+      try {
+      if (pn && pn.trades > 0) {
+        const v = pn.pnlZro, pct = pn.pnlPct;
+        const col = v > 0 ? 'var(--up)' : v < 0 ? 'var(--dn)' : 'var(--tx)';
+        const sign = v > 0 ? '+' : v < 0 ? '-' : '';
+        $('#myPnl').innerHTML = `<span style="color:${col}">${sign}${fmtZ(Math.abs(v), QA === 'eth' ? 6 : 4)} ${Q}</span>` +
+          (pct === null ? '' : ` <span style="color:${col};font-weight:600">${sign}${Math.abs(pct).toFixed(1)}%</span>`) +
+          `<span class="mu" style="font-weight:500;font-size:11.5px"> · in ${fmtZ(pn.costZro, QA === 'eth' ? 5 : 2)} ${Q}</span>`;
+        if (!$('#pnlShare')) $('#pnlShareBox').innerHTML = laserBtn('id="pnlShare" style="width:100%;margin-top:10px"', `Share your $${esc(m.symbol)} PnL`);
+        const qu = m.quoteUsd || d.zroUsd;
+        $('#pnlShare').onclick = (e) => { e.stopPropagation(); openShare({ kind: 'token', id: m.id, symbol: m.symbol, name: m.name, image: m.image, user: S.me?.username,
+          pnlUsd: v * qu, pnlPct: pct, costUsd: pn.costZro * qu, valueUsd: pn.valueZro * qu }); };
+      } else { $('#myPnl').innerHTML = '<span class="mu">—</span>'; $('#pnlShareBox').innerHTML = ''; }
+      } catch (e) { $('#myPnl').innerHTML = '<span class="mu">—</span>'; console.warn('pnl', e); }
+      const pend = B(d.me.pendingRewards);
+      $('#rewBox').innerHTML = m.taxes.rewards > 0 ? `<hr class="sep"><div class="kv"><span>Your pending ${Q} rewards</span><b>${fmtA(pend, QA)}</b></div>
+        <button class="btn sm ghost wide" id="claim" ${pend > 0n ? '' : 'disabled'} style="margin-top:6px">Claim to balance</button>` : '';
+      const cl = $('#claim'); if (cl) cl.onclick = async () => { try { const r = await api('/rewards/claim', { market: id }); toast(`Claimed ${fmtA(r.claimed, QA)}`); refresh(); } catch (e) { toast(esc(e.message), 'bad'); } };
+    }
+    const maxw = m.maxBuyBps > 0 && Date.now() < m.maxBuyUntil;
+    if (maxw && !$('#maxw')) $('#est').insertAdjacentHTML('beforebegin', `<div id="maxw" class="warn" style="margin:12px 0 0">Launch protection: max ${(m.maxBuyBps / 100).toFixed(2)}% of supply per wallet for ${Math.ceil((m.maxBuyUntil - Date.now()) / 60000)} more min.</div>`);
+  }
+
+  /* trade box */
+  const amt = $('#amt'), go = $('#go');
+  if ($('#wcBuy')) $('#wcBuy').onclick = async () => {
+    const b = $('#wcBuy'), was = b.innerHTML;
+    const xlm = Number(amt.value || 0) || 10;
+    if (!(xlm >= 1)) return toast('Minimum is 1 XLM', 'bad');
+    b.disabled = true; b.innerHTML = 'Waiting for Lobstr…';
+    try { await STW.buyWc(m.id, xlm); }
+    catch (e) { toast(esc(e.message || e), 'bad'); WC.hideQr(); }
+    finally { b.disabled = false; b.innerHTML = was; }
+  };
+  if ($('#stBuy')) $('#stBuy').onclick = async () => {
+    const b = $('#stBuy'), old = b.innerHTML;
+    const xlm = Number(amt.value || 0) || 10;
+    if (!(xlm >= 1)) return toast('Minimum is 1 XLM', 'bad');
+    b.disabled = true; b.innerHTML = 'Waiting for your wallet…';
+    try { await STW.buy(m.id, xlm); }
+    catch (e) { toast(esc(e.message || e), 'bad'); }
+    finally { b.disabled = false; b.innerHTML = old; }
+  };
+  function paintPay() {
+    $$('#paySel button').forEach(b => b.classList.toggle('on', b.dataset.a === pay));
+    $('#payLbl').textContent = side === 'buy' ? 'Pay with' : 'Receive in';
+    $('#unit').innerHTML = side === 'buy' ? `<span class="zro-ico">${ASSET[pay].ico}</span>${ASSET[pay].label}` : esc(m.symbol);
+    $('#qbUnit').textContent = ASSET[pay].label;
+    $('#qbAmt').value = pay === 'eth' ? (S.quickEth || '0.005') : S.quick;
+    $('#myPayLbl').textContent = 'Your ' + ASSET[pay].label;
+    if (d.me) $('#myZro').textContent = fmtA(d.me[pay] || '0', pay);
+  }
+  $$('#paySel button').forEach(b => b.onclick = () => { pay = b.dataset.a; localStorage.setItem('pl_pay_' + QA, pay); amt.value = ''; paintPay(); paintQuick(); paintEst(); });
+  function paintQuick() {
+    $('#quick').innerHTML = side === 'buy'
+      ? ASSET[pay].quick.map(v => `<button data-v="${v}">${v} ${ASSET[pay].label}</button>`).join('')
+      : ['25', '50', '75', '100'].map(v => `<button data-p="${v}">${v}%</button>`).join('');
+    $$('#quick button').forEach(b => b.onclick = () => {
+      if (b.dataset.v) amt.value = b.dataset.v;
+      else if (d.me) amt.value = weiToStr((B(d.me.tokens) * BigInt(b.dataset.p)) / 100n, 4);
+      paintEst();
+    });
+  }
+  function paintEst() {
+    const v = toWei(amt.value);
+    if (side === 'buy') {
+      const qIn = v > 0n ? convert(v, pay, QA) : 0n;
+      const e = qIn > 0n ? estBuy(m, qIn) : null;
+      $('#est').innerHTML = `
+        <div class="kv"><span>You pay</span><b>${v > 0n ? `${fmtA(v, pay)} · ${fmtUsd(zNum(v) * assetUsd(pay))}` : '—'}</b></div>
+        ${pay !== QA && v > 0n ? `<div class="kv"><span>Converted to</span><b>≈ ${fmtA(qIn, QA)} <span class="mu" style="font-weight:500">· 0.5% conversion</span></b></div>` : ''}
+        <div class="kv"><span>You receive</span><b>${e ? `${fmtT(e.tokens)} ${esc(m.symbol)}` : '—'}</b></div>
+        <div class="kv"><span>Price impact</span><b>${e ? `${e.impact.toFixed(2)}%` : '—'}</b></div>
+        <div class="kv"><span>Fees</span><b>${(0.5 + m.taxes.marketing + m.taxes.rewards).toFixed(1)}% + ${m.taxes.burn}% burn</b></div>`;
+      go.textContent = S.me ? 'Buy' : 'Log in to trade';
+    } else {
+      const e = v > 0n ? estSell(m, v) : null;
+      const outW = e ? convert(e.zro, QA, pay) : 0n;
+      $('#est').innerHTML = `
+        <div class="kv"><span>You sell</span><b>${v > 0n ? `${fmtT(v)} ${esc(m.symbol)}` : '—'}</b></div>
+        <div class="kv"><span>You receive</span><b>${e ? `${pay !== QA ? '≈ ' : ''}${fmtA(outW, pay)} · ${fmtUsd(zNum(outW) * assetUsd(pay))}` : '—'}</b></div>
+        ${pay !== QA && e ? `<div class="kv"><span>Conversion</span><b class="mu" style="font-weight:500">${Q} → ${ASSET[pay].label} · 0.5%</b></div>` : ''}
+        <div class="kv"><span>Fees</span><b>${(0.5 + m.taxes.marketing + m.taxes.rewards).toFixed(1)}% + ${m.taxes.burn}% burn</b></div>`;
+      go.textContent = S.me ? 'Sell' : 'Log in to trade';
+    }
+  }
+  $$('.tb-tabs button').forEach(b => b.onclick = () => {
+    side = b.dataset.side;
+    $$('.tb-tabs button').forEach(x => x.classList.toggle('on', x === b));
+    paintPay();
+    go.className = `btn lg wide ${side === 'buy' ? 'up' : 'dn'}`;
+    $('#qbRow').style.display = side === 'buy' ? '' : 'none';
+    amt.value = ''; paintQuick(); paintEst();
+  });
+  amt.oninput = paintEst;
+  async function doTrade(sideX, wei) {
+    if (!S.me) return needLogin();
+    if (wei <= 0n) return toast('Enter an amount', 'bad');
+    go.disabled = true;
+    try {
+      const r = await api('/trade', { market: id, side: sideX, amount: wei.toString(), ...(pay !== QA ? { pay } : {}) });
+      const gotQ = r.received ? fmtA(r.received.amount, r.received.asset) : fmtA(r.zro, QA);
+      toast(sideX === 'buy' ? `Bought <b>${fmtT(r.tokens)} ${esc(m.symbol)}</b> for ${r.paid ? fmtA(r.paid.amount, r.paid.asset) : fmtA(r.zro, QA)}` : `Sold for <b>${gotQ}</b>`);
+      amt.value = ''; await refresh(); loadMe();
+    } catch (e) { toast(esc(e.message), 'bad'); }
+    finally { go.disabled = false; }
+  }
+  go.onclick = () => doTrade(side, toWei(amt.value));
+  $('#qbAmt').onchange = (e) => { if (pay === 'eth') { S.quickEth = e.target.value; localStorage.setItem('pl_quick_eth', S.quickEth); } else { S.quick = e.target.value; localStorage.setItem('pl_quick', S.quick); } };
+  $('#qbGo').onclick = () => doTrade('buy', toWei($('#qbAmt').value));
+
+  /* tabs */
+  function paintTab() {
+    const body = $('#tabBody');
+    if (tab === 'trades') {
+      body.innerHTML = `<div class="row trade mono mu" style="font-size:9.5px"><span>Side</span><span>Trader</span><span class="r">USD</span><span class="r hide-s">${esc(m.symbol)}</span><span class="r">Age</span></div>
+        <div class="list">${d.trades.length ? [...d.trades].reverse().slice(0, 100).map(t => `
+          <div class="row trade"><b class="${t.side === 'buy' ? 'up' : 'dn'}">${t.side.toUpperCase()}</b>
+            <span class="who"><a href="#/u/${encodeURIComponent(t.username || '')}">${esc(t.username || 'anon')}</a>${badgeHTML(t.badges)}</span>
+            <span style="text-align:right">${fmtUsd(zNum(t.zro) * (t.usd || d.zroUsd))}</span><span style="text-align:right" class="hide-s">${fmtT(t.tokens)}</span>
+            <span style="text-align:right" class="mu">${ago(t.ts)}</span></div>`).join('') : '<div class="empty" style="border:0;margin:10px">No trades yet. Be first.</div>'}</div>`;
+    } else if (tab === 'holders') {
+      const burnedPct = Number((B(m.burned) * 1000000n) / (B(m.supply) * WEI)) / 10000;
+      const curveLeft = B(m.curveTokens) * WEI - B(m.sold);
+      const curvePct = Number((curveLeft * 1000000n) / (B(m.supply) * WEI)) / 10000;
+      body.innerHTML = `<div class="list">
+        ${m.graduated
+          ? `<div class="row holder"><span class="mu">—</span><span class="who"><b>Rookery pool</b><span class="tag">MOVES 1:1 AT MAINNET</span></span><span style="text-align:right">${fmtT(m.poolTok)}</span><span style="text-align:right">${(Number((B(m.poolTok) * 1000000n) / (B(m.supply) * WEI)) / 10000).toFixed(2)}%</span></div>`
+          : `<div class="row holder"><span class="mu">—</span><span class="who"><b>Bonding curve</b></span><span style="text-align:right">${fmtT(curveLeft)}</span><span style="text-align:right">${curvePct.toFixed(2)}%</span></div>
+        <div class="row holder"><span class="mu">—</span><span class="who"><b>Pool reserve (after bonding)</b></span><span style="text-align:right">200M</span><span style="text-align:right">20.00%</span></div>`}
+        ${burnedPct > 0 ? `<div class="row holder"><span class="mu">—</span><span class="who"><b>Burned</b></span><span style="text-align:right">${fmtT(m.burned)}</span><span style="text-align:right">${burnedPct.toFixed(2)}%</span></div>` : ''}
+        ${d.holders.map((x, i) => `<div class="row holder"><span class="mu">${i + 1}</span>
+          <span class="who"><a href="#/u/${encodeURIComponent(x.username)}">${esc(x.username)}</a>${badgeHTML(x.badges)}${x.creator ? '<span class="tag">DEV</span>' : ''}</span>
+          <span style="text-align:right">${fmtT(x.amount)}</span><span style="text-align:right">${x.pct.toFixed(2)}%<div class="pct-bar"><i style="width:${Math.min(100, x.pct * 5)}%"></i></div></span></div>`).join('')}
+      </div>`;
+    } else if (tab === 'comments') {
+      body.innerHTML = `${S.me ? `<div class="cmt-form"><textarea id="cBody" placeholder="Say something about ${esc(m.symbol)}…" maxlength="500"></textarea><button class="btn" id="cGo">Post</button></div>`
+        : `<div class="cmt-form mu" style="font-size:13px"><a href="#/login" style="text-decoration:underline;color:var(--tx)">Log in</a>&nbsp;to comment.</div>`}
+        <div class="list">${d.comments.length ? d.comments.map(c => `<div class="cmt">${avatar(c.username, c.avatar)}<div>
+          <a href="#/u/${encodeURIComponent(c.username)}"><b>${esc(c.username)}</b></a>${badgeHTML(c.badges)} <span class="mu" style="font-size:11.5px">${ago(c.ts)} ago</span>
+          <p>${esc(c.body)}</p></div></div>`).join('') : '<div class="empty" style="border:0;margin:10px">No comments yet.</div>'}</div>`;
+      const cg = $('#cGo');
+      if (cg) cg.onclick = async () => {
+        try { await api('/comment', { market: id, body: $('#cBody').value }); toast('Comment posted'); await refresh(); }
+        catch (e) { toast(esc(e.message), 'bad'); }
+      };
+    } else {
+      body.innerHTML = `<div class="pb">
+        <p style="font-size:14px;line-height:1.7;color:var(--tx2);white-space:pre-wrap">${esc(m.description || 'No description.')}</p>
+        <hr class="sep">
+        <div class="kv"><span>Network</span><b>${m.network === 'giwa' ? 'GIWA (Upbit) · pre-mainnet' : m.network === 'stellar' ? `Stellar · ${m.migrated ? 'on Aquarius' : 'graduates at ' + fmtUsd(m.stellar?.gradUsd || 46000)}` : 'Zero (LayerZero) · pre-mainnet'}</b></div>
+        ${m.stellar?.issuer ? `<div class="kv"><span>Stellar asset</span><b><a class="mono" style="letter-spacing:0" target="_blank" rel="noopener" href="${m.stellar.explorer}/asset/${esc(m.stellar.code)}-${esc(m.stellar.issuer)}">${esc(m.stellar.code)} · ${short(m.stellar.issuer)} ↗</a></b></div>
+        <div class="kv"><span>Aquarius pool</span><b><a class="mono" style="letter-spacing:0" target="_blank" rel="noopener" href="${m.stellar.explorer}/contract/${esc(m.stellar.pool)}">${short(m.stellar.pool)} ↗</a> · LP burned</b></div>` : ''}
+        <div class="kv"><span>Pair</span><b>${esc(m.symbol)} / ${esc(Q)}</b></div>
+        <div class="kv"><span>Total supply</span><b>1,000,000,000</b></div>
+        <div class="kv"><span>On the bonding curve</span><b>800,000,000 (80%)</b></div>
+        <div class="kv"><span>Reserved for mainnet pool</span><b>200,000,000 (20%)</b></div>
+        <div class="kv"><span>${esc(Q)} rewards paid to holders</span><b>${fmtUsd(m.rewardsPaidUsd)}</b></div>
+        <div class="kv"><span>Contract</span><b>Minted at mainnet</b></div>
+      </div>`;
+    }
+  }
+  const ct = $('#copyTrack'); if (ct) ct.onclick = () => { navigator.clipboard.writeText(`/track ${id}`); toast('Command copied. Paste it in your Telegram group.'); };
+  $$('#tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; $$('#tabs button').forEach(x => x.classList.toggle('on', x === b)); paintTab(); });
+
+  async function refresh() {
+    try { d = await api('/market/' + id); m = d.market; } catch { return; }
+    paintTop(); paintChart();
+    if (!(tab === 'comments' && document.activeElement?.id === 'cBody')) paintTab();
+    paintEst();
+  }
+
+  paintPay(); paintQuick(); paintTop(); paintChart(); S.chart?.timeScale().scrollToRealTime(); paintTab(); paintEst();
+  // live: the pushed market view updates price/KPIs instantly; trades, holders and your position follow a moment later
+  const soon = debounce(refresh, 180);
+  liveSub(['m:' + id], (msg) => {
+    if (msg.market.id !== id) return;
+    m = { ...m, ...msg.market }; d.market = m;
+    paintTop(); paintEst(); soon();
+  });
+  setTimer(refresh, 4000, true);
+}
+
+/* ═══════════ CREATE ═══════════ */
+function readImage(file, size = 256, maxBytes = 190_000) {
+  return new Promise((res, rej) => {
+    if (!file.type.startsWith('image/')) return rej(new Error('Pick an image file'));
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = c.height = size;
+      const ctx = c.getContext('2d');
+      const s = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, size, size);
+      let q = 0.9, url = c.toDataURL('image/webp', q);
+      while (url.length > maxBytes && q > 0.4) { q -= 0.1; url = c.toDataURL('image/webp', q); }
+      if (!url.startsWith('data:image/webp')) url = c.toDataURL('image/jpeg', 0.85);
+      url.length > maxBytes ? rej(new Error('Image too large')) : res(url);
+    };
+    img.onerror = () => rej(new Error('Could not read the image'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+async function viewCreate(hatchId) {
+  document.title = 'Create a token — Rookery';
+  let hatch = null;
+  if (hatchId) { try { hatch = (await api('/hatch/' + hatchId)).hatch; } catch { /* already launched */ } }
+  const F = { name: hatch?.name || '', symbol: hatch?.symbol || '', description: hatch?.description || '', image: '',
+    network: hatch?.network || S.net || 'zero', x: '', tg: '', web: '',
+    maxBuyPct: 1, maxBuyMinutes: 30, taxMarketing: 1, taxBurn: 0.5, taxRewards: 1, devBuy: '', hatchId: hatch?.id || '' };
+  app.innerHTML = `
+  <section class="wrap page">
+    <div id="hatchNote"></div>
+    <div class="page-h"><div><h1>Create a token</h1><p>Hatch a token for a network before its mainnet. Free to create. Zero tokens trade in ZRO and migrate 1:1 at mainnet, GIWA tokens in ETH, Stellar tokens in XLM and graduate on-chain into Aquarius. 0.5% of every trade burns $臭企鹅.</p></div></div>
+    <div class="create">
+      <div>
+        <div class="fs"><h3>Token</h3><p class="hint">Name, ticker, picture and story. You can't change these later.</p>
+          <label class="upl" id="upl">${timg({ symbol: '?' }).replace('class="timg ', 'id="imgPrev" class="timg ')}
+            <div><b>Upload image</b><div class="mu" style="font-size:12.5px;margin-top:4px">PNG, JPG or WEBP from your computer. Square works best.</div></div>
+            <input type="file" id="file" accept="image/*" hidden></label>
+          <div class="f2" style="margin-top:14px">
+            <div class="f"><label>Name</label><input class="inp" data-k="name" maxlength="32" placeholder="Stinky Penguin"></div>
+            <div class="f"><label>Ticker</label><input class="inp" data-k="symbol" maxlength="12" placeholder="PENGU"></div>
+          </div>
+          <div class="f"><label>Description</label><textarea class="inp" data-k="description" maxlength="600" placeholder="What is it, why now, why this chain…"></textarea></div>
+        </div>
+
+        <div class="fs"><h3>Network & pair</h3><p class="hint">Where the token lands at mainnet, and what it trades against.</p>
+          <div class="choice" id="netPick">
+            <button class="opt" data-n="zero"><span class="net-ico">Ø</span><div><b>Zero</b><small>LayerZero · mainnet 30.11</small></div></button>
+            <button class="opt" data-n="giwa"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><b>GIWA</b><small>Upbit L2 · mainnet TBA</small></div></button>
+            <button class="opt" data-n="stellar"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><b>Stellar</b><small>Live · graduates to Aquarius</small></div></button>
+          </div>
+          <div class="choice" style="margin-top:10px" id="pairBox"></div>
+        </div>
+
+        <div class="fs"><h3>Socials</h3><p class="hint">Optional, shown on the token page.</p>
+          <div class="f3">
+            <div class="f"><label>X / Twitter</label><input class="inp" data-k="x" placeholder="x.com/yourtoken"></div>
+            <div class="f"><label>Telegram</label><input class="inp" data-k="tg" placeholder="t.me/yourtoken"></div>
+            <div class="f"><label>Website</label><input class="inp" data-k="web" placeholder="yourtoken.xyz"></div>
+          </div>
+        </div>
+
+        <div class="fs"><h3>Launch protection</h3><p class="hint">Limit how much one wallet can hold right after launch, so snipers can't take the supply.</p>
+          <div class="slider"><span class="l">Max per wallet<small>% of supply</small></span><input type="range" min="0" max="5" step="0.25" data-k="maxBuyPct" value="1"><span class="v" id="v_maxBuyPct"></span></div>
+          <div class="slider"><span class="l">For the first<small>minutes</small></span><input type="range" min="0" max="240" step="5" data-k="maxBuyMinutes" value="30"><span class="v" id="v_maxBuyMinutes"></span></div>
+        </div>
+
+        <div class="fs"><h3>Taxes</h3><p class="hint">Applied to every buy and sell on top of Rookery's 0.5% $臭企鹅 burn. Max 5% each, 10% total.</p>
+          <p class="hint" id="taxNote" style="display:none;border-left:2px solid var(--line2);padding-left:9px">Stellar tokens: these taxes apply on the Rookery curve. After graduation the token trades on Aquarius, where a Stellar asset cannot charge a transfer fee, so trading there is tax-free.</p>
+          <div class="slider"><span class="l">Marketing<small><span class="qcur">ZRO</span> to you</small></span><input type="range" min="0" max="5" step="0.25" data-k="taxMarketing" value="1"><span class="v" id="v_taxMarketing"></span></div>
+          <div class="slider"><span class="l">Burn<small>of the token</small></span><input type="range" min="0" max="5" step="0.25" data-k="taxBurn" value="0.5"><span class="v" id="v_taxBurn"></span></div>
+          <div class="slider"><span class="l">Rewards<small><span class="qcur">ZRO</span> to holders</small></span><input type="range" min="0" max="5" step="0.25" data-k="taxRewards" value="1"><span class="v" id="v_taxRewards"></span></div>
+          <div class="split" id="split"></div><div class="mu" style="font-size:12px" id="splitTxt"></div>
+        </div>
+
+        <div class="fs"><h3>Dev buy</h3><p class="hint">Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.</p>
+          <div class="f" style="max-width:280px"><label id="devLbl">Amount · ZRO</label><input class="inp" data-k="devBuy" inputmode="decimal" placeholder="0"></div>
+          <div class="mu" style="font-size:12.5px" id="devTxt"></div>
+        </div>
+      </div>
+
+      <aside class="preview">
+        <div class="mono mu" style="margin-bottom:10px">Preview</div>
+        <div id="prev"></div>
+        <div class="panel pb" style="margin-top:14px">
+          <div class="kv"><span>Creation fee</span><b>Free</b></div>
+          <div class="kv"><span>Supply</span><b>1,000,000,000</b></div>
+          <div class="kv"><span>Starting market cap</span><b id="startMc"></b></div>
+          <div class="kv"><span>Bonds at</span><b id="bondMc"></b></div>
+          <div class="err" id="cErr"></div>
+          <button class="btn lg wide" id="createGo">${S.me ? 'Create token' : 'Log in to create'}</button>
+        </div>
+      </aside>
+    </div>
+  </section>`;
+
+  const paint = () => {
+    $$('#netPick .opt').forEach(b => b.classList.toggle('on', b.dataset.n === F.network));
+    ['maxBuyPct', 'taxMarketing', 'taxBurn', 'taxRewards'].forEach(k => $('#v_' + k).textContent = (+F[k]).toFixed(2) + '%');
+    $('#v_maxBuyMinutes').textContent = (+F.maxBuyPct ? F.maxBuyMinutes : 0) + 'm';
+    const t = +F.taxMarketing + +F.taxBurn + +F.taxRewards;
+    $('#split').innerHTML = `<i style="width:${0.5 * 8}%;background:#fff"></i><i style="width:${F.taxMarketing * 8}%;background:#9b9ba3"></i><i style="width:${F.taxBurn * 8}%;background:#5c5c64"></i><i style="width:${F.taxRewards * 8}%;background:var(--up)"></i>`;
+    $('#splitTxt').innerHTML = `Total per trade <b class="${t > 10 ? 'dn' : ''}" style="color:${t > 10 ? '' : 'var(--tx)'}">${(t + 0.5).toFixed(2)}%</b> · 0.5% $臭企鹅 burn · ${F.taxMarketing}% to you · ${F.taxBurn}% burned · ${F.taxRewards}% shared with holders`;
+    const zu = S.stats?.zroUsd || 1.5, c = S.stats?.curve;
+    const endMult = c ? (Number(c.vTok) * 1e9) / ((Number(c.vTok) - 8e8) ** 2) : 14.4;           // final mcap / virtual reserve
+    const startMc = F.network === 'stellar' ? (S.stats?.stellar?.gradUsd || 46000) / endMult * (c ? 1e9 / Number(c.vTok) : 0.93)
+      : c ? (Number(c.vZro) / Number(c.vTok)) * 1e9 * zu : 0;
+    $('#startMc').textContent = fmtUsd(startMc);
+    $('#bondMc').textContent = F.network === 'stellar' ? fmtUsd(S.stats?.stellar?.gradUsd || 46000) : c ? fmtUsd(Number(c.vZro) * endMult * zu) : '—';
+    const pq = F.network === 'giwa' ? 'eth' : F.network === 'stellar' ? 'xlm' : 'zro';
+    $$('.qcur').forEach(e => (e.textContent = ASSET[pq].label));
+    const tn = $('#taxNote'); if (tn) tn.style.display = F.network === 'stellar' ? 'block' : 'none';
+    $('#pairBox').innerHTML = pq === 'xlm'
+      ? `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">X</span><div><b>Pair: XLM</b><small>Stellar tokens trade in XLM</small></div></button>
+      <button class="opt" disabled><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt=""></span><div><b>Graduates to Aquarius</b><small>At ${fmtUsd(S.stats?.stellar?.gradUsd || 46000)} market cap · LP burned</small></div></button>`
+      : `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">${ASSET[pq].ico}</span><div><b>Pair: ${ASSET[pq].label}</b><small>${pq === 'eth' ? 'GIWA tokens trade in ETH' : 'Zero tokens trade in ZRO'}</small></div></button>
+      <button class="opt" disabled><span class="net-ico all">⇄</span><div><b>Buy with ${pq === 'eth' ? 'ZRO' : 'ETH'} too</b><small>One button, instant conversion</small></div></button>`;
+    $('#devLbl').textContent = 'Amount · ' + ASSET[pq].label;
+    $('#devTxt').textContent = F.devBuy && S.me ? `Balance: ${fmtA(S.me[pq] || '0', pq)}` : '';
+    $('#prev').innerHTML = cardHTML({
+      id: '', name: F.name || 'Your token', symbol: F.symbol || 'TICKER', description: F.description, image: F.image,
+      network: F.network, creator: S.me?.username || 'you', created: Date.now(), mcapUsd: startMc, change24h: 0, progress: 0,
+      holders: 0, trades: 0, graduated: false,
+    }).replace('<a class="card" href="#/t/">', '<div class="card" style="cursor:default">').replace(/<\/a>\s*$/, '</div>');
+  };
+  $$('[data-k]').forEach(el => el.oninput = () => { F[el.dataset.k] = el.value; paint(); });
+  $$('#netPick .opt').forEach(b => b.onclick = () => { F.network = b.dataset.n; paint(); });
+  $('#upl').onclick = (e) => { if (e.target.id !== 'file') $('#file').click(); };
+  $('#file').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { F.image = await readImage(f); $('#imgPrev').innerHTML = `<img src="${F.image}" alt="">`; paint(); }
+    catch (err) { toast(esc(err.message), 'bad'); }
+  };
+  $('#createGo').onclick = async () => {
+    if (!S.me) return needLogin();
+    $('#cErr').textContent = '';
+    try {
+      $('#createGo').disabled = true;
+      const r = await api('/markets', { ...F, devBuy: toWei(F.devBuy).toString() });
+      toast(`<b>$${esc(F.symbol)}</b> is live on Rookery`);
+      loadMe(); location.hash = `#/t/${r.id}`;
+    } catch (e) { $('#cErr').textContent = e.message; }
+    finally { $('#createGo').disabled = false; }
+  };
+  if (hatch) {
+    $$('[data-k]').forEach(el => { if (F[el.dataset.k]) el.value = F[el.dataset.k]; });
+    $('#hatchNote').innerHTML = `<div class="note-hatch"><b>🥚 You announced $${esc(hatch.symbol)}</b>
+      <span>${hatch.waiting} penguin${hatch.waiting === 1 ? '' : 's'} waiting · ${hatch.status === 'live' ? 'it is live, launch it now' : 'hatches in ' + cdText(hatch.launchAt - Date.now())}. Launching here replaces the countdown with the real token.</span></div>`;
+  }
+  paint();
+}
+
+/* ═══════════ POINTS & REFERRALS ═══════════ */
+async function viewPoints() {
+  document.title = 'Points — Rookery';
+  let d = { top: [], tiers: [], me: null };
+  try { d = await api('/points'); } catch (e) { /* still show the page */ }
+  const tiers = d.tiers && d.tiers.length ? d.tiers : [];
+  const me = d.me;
+  const nextOf = (t) => tiers.find(x => x.min > t) || null;
+  const pct = (t) => { const n = nextOf(t); if (!n) return 100; const cur = [...tiers].reverse().find(x => t >= x.min) || tiers[0]; return Math.max(4, Math.min(100, ((t - cur.min) / (nextOf(t).min - cur.min)) * 100)); };
+  const refLink = me ? `${location.origin}/?ref=${encodeURIComponent(me.ref.code)}#/signup` : '';
+  app.innerHTML = `
+  <section class="wrap page">
+    <div class="page-h"><div><h1>Points</h1>
+      <p>A counter for people who actually use the launchpad. Trade, hatch, bond, hold, bring friends. Nothing here is money — points buy priority at mainnet, nothing else.</p></div>
+      ${me ? `<div style="text-align:right"><span class="mono mu">Your points</span><div class="bal-xl">${me.total.toLocaleString('en-US')}</div>
+        <span class="mono mu">rank #${me.rank}</span></div>` : ''}
+    </div>
+
+    ${me ? `<div class="pts-grid">
+      <div class="panel pb pts-me">
+        <div class="pts-top"><div><span class="mono mu">Tier</span><b class="pts-tier">${esc(me.tier.label)}</b></div>
+          <div><span class="mono mu">Next tier</span><b>${nextOf(me.total) ? `${esc(nextOf(me.total).label)} · ${(nextOf(me.total).min - me.total).toLocaleString('en-US')} to go` : 'top tier'}</b></div></div>
+        <div class="prog big" style="margin:12px 0"><i style="width:${pct(me.total)}%"></i></div>
+        <p class="mu" style="font-size:12.5px">${esc(me.tier.perk)}${nextOf(me.total) ? ` · next: ${esc(nextOf(me.total).perk)}` : ''}</p>
+        <div class="pts-break">
+          <div><span class="mono mu">Trading</span><b>${me.trade.toLocaleString('en-US')}</b></div>
+          <div><span class="mono mu">Hatches</span><b>${me.hatch.toLocaleString('en-US')}</b></div>
+          <div><span class="mono mu">Bonding</span><b>${me.bond.toLocaleString('en-US')}</b></div>
+          <div><span class="mono mu">Holding</span><b>${me.hold.toLocaleString('en-US')}</b></div>
+          <div><span class="mono mu">Referrals</span><b>${me.referral.toLocaleString('en-US')}</b></div>
+        </div>
+      </div>
+      <div class="panel pb">
+        <span class="mono mu">Referrals</span>
+        <p style="font-size:13px;color:var(--tx2);margin:8px 0 12px">Share your link: they get a welcome bonus, and you keep <b style="color:var(--tx)">20% of the platform fee</b> from everything they trade. Paid to your balance, in the token's pair currency.</p>
+        <div class="addr"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(refLink)}</span><button class="btn sm ghost" id="copyRef">Copy</button></div>
+        <div class="pts-break" style="margin-top:12px">
+          <div><span class="mono mu">Invited</span><b>${me.ref.invited}</b></div>
+          <div><span class="mono mu">Earned</span><b>${fmtUsd(me.ref.earnedUsd)}</b></div>
+        </div>
+      </div>
+    </div>` : `<div class="panel pb" style="margin-bottom:18px"><b>Log in</b> to see your points and your referral link. <a href="#/login" style="text-decoration:underline;color:var(--tx)">Log in</a></div>`}
+
+    <div class="panel" style="margin-top:18px">
+      <div class="panel-h"><h3>How points are earned</h3></div>
+      <div class="pb"><table class="tbl"><tbody>
+        <tr><td>Every trade</td><td class="r mu">10 points per $1 of volume</td></tr>
+        <tr><td>Announcing a hatch</td><td class="r mu">250 points</td></tr>
+        <tr><td>Turning a hatch into a token</td><td class="r mu">500 points</td></tr>
+        <tr><td>Your token reaching 100%</td><td class="r mu">5,000 points</td></tr>
+        <tr><td>Holding bags, per day</td><td class="r mu">0.1 point per $1 held, max 500</td></tr>
+        <tr><td>Someone joining with your link</td><td class="r mu">500 points, and 10% of their trade points</td></tr>
+      </tbody></table></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <div class="panel-h"><h3>Tiers at mainnet</h3></div>
+      <div class="pb"><div class="tier-row">${tiers.map(t => `<div class="tier ${me && me.tier.id === t.id ? 'on' : ''}">
+        <span class="mono mu">${t.min === 0 ? 'from 0' : t.min.toLocaleString('en-US') + '+'}</span>
+        <b>${esc(t.label)}</b><span class="mu">${esc(t.perk)}</span></div>`).join('')}</div></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <div class="panel-h"><h3>Leaderboard</h3><span class="mu" style="font-size:12px">top 25</span></div>
+      ${d.top.length ? `<div style="overflow:auto"><table class="tbl"><thead><tr><th>#</th><th>Trader</th><th class="r">Points</th><th class="r hide-s">Trading</th><th class="r hide-s">Hatches</th><th class="r hide-s">Holding</th></tr></thead><tbody>
+        ${d.top.map((t, i) => `<tr class="click" onclick="location.hash='#/u/${encodeURIComponent(t.username)}'">
+          <td class="mu">${i + 1}</td><td><b>${esc(t.username)}</b>${badgeHTML(t.badges)}</td>
+          <td class="r"><b>${t.total.toLocaleString('en-US')}</b></td>
+          <td class="r hide-s mu">${t.trade.toLocaleString('en-US')}</td>
+          <td class="r hide-s mu">${t.hatch.toLocaleString('en-US')}</td>
+          <td class="r hide-s mu">${t.hold.toLocaleString('en-US')}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="empty" style="border:0;margin:14px">No points yet. Trade something and you are on the board.</div>'}
+    </div>
+
+    <p class="mu" style="font-size:12px;line-height:1.7;margin:18px 0 40px;max-width:820px">
+      Points are a loyalty counter, not a token, not a security and not a promise of money or profit. They are not transferable and carry no guaranteed value.
+      What they give you is standing inside Rookery: a place in the migration snapshot and priority in the day-one pools we seed. Referral rewards are paid out of the 0.5% platform fee, so on trades from referred users the buy &amp; burn reserve receives the remaining 0.4%.
+    </p>
+  </section>`;
+  const cp = $('#copyRef');
+  if (cp) cp.onclick = () => { navigator.clipboard.writeText(refLink); toast('Referral link copied'); };
+}
+
+/* ═══════════ WALLET ═══════════ */
+async function viewWallet() {
+  document.title = 'Wallet — Rookery';
+  if (!S.me) return needLogin();
+  let me = S.me, asset = ['eth', 'xlm'].includes(localStorage.getItem('pl_wallet_asset')) ? localStorage.getItem('pl_wallet_asset') : 'zro';
+  const stExp = S.stats.stellar?.explorer || 'https://stellar.expert/explorer/public';
+  const allChains = { ...S.stats.chains, stellar: { label: 'Stellar', explorer: stExp } }, ethChains = S.stats.ethChains || ['ethereum', 'base', 'arbitrum'];
+  const chainsOf = (a) => Object.fromEntries(Object.entries(allChains).filter(([k]) => (a === 'xlm' ? k === 'stellar' : k !== 'stellar' && (a === 'zro' || ethChains.includes(k)))));
+  const stToks = () => (me.holdings || []).filter(x => x.stellar?.withdrawable);
+  let wAsset = 'xlm';
+  let chain = 'base';
+  app.innerHTML = `
+  <section class="wrap page">
+    <div class="page-h"><div><h1>Wallet</h1><p>Deposit ZRO, ETH or XLM, trade any token, withdraw instantly.</p></div>
+      <div style="text-align:right"><span class="mono mu">Balances</span><div class="bal-xl" id="bal"></div></div></div>
+    <div id="pnlHero"></div>
+    <div class="pay-sel" id="assetSel" style="margin:0 0 14px"><span class="mu">Currency</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button><button data-a="xlm">XLM</button></div>
+    <div class="wallet">
+      <div class="panel pb">
+        <h3 style="font-size:16px;margin-bottom:4px" id="dTitle"></h3><p class="mu" style="font-size:13px;margin-bottom:16px" id="dSub"></p>
+        <div class="chains" id="dChains"></div>
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <div class="qr" id="qr"></div>
+          <div style="flex:1;min-width:0">
+            <div class="addr"><span style="flex:1" id="dAddr"></span><button class="btn sm ghost" id="copy">Copy</button></div>
+            <div class="addr st-memo" id="dMemoBox" style="display:none;margin-top:8px"><span class="mono mu" style="letter-spacing:.1em">MEMO</span><b id="dMemo" style="flex:1;font-size:18px"></b><button class="btn sm ghost" id="copyMemo">Copy</button></div>
+            <div class="warn"><span>⚠</span><span id="dWarn"></span></div>
+            <button class="btn ghost wide" id="chk" style="margin-top:12px">Check for deposits</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel pb">
+        <h3 style="font-size:16px;margin-bottom:4px" id="wTitle"></h3><p class="mu" style="font-size:13px;margin-bottom:16px" id="wSub"></p>
+        <div class="f"><label>Network</label><select class="inp" id="wChain"></select></div>
+        <div class="f" id="wAssetF" style="display:none"><label>What to withdraw</label><select class="inp" id="wAsset"></select></div>
+        <div class="f"><label>Destination address</label><input class="inp" id="wTo" placeholder="0x…" autocomplete="off"></div>
+        <div class="f" id="wMemoF" style="display:none"><label>Memo <em class="mu" style="font-style:normal;text-transform:none;letter-spacing:0">needed when withdrawing to an exchange</em></label><input class="inp" id="wMemo" maxlength="28" placeholder="optional" autocomplete="off"></div>
+        <div class="f"><label id="wAmtLbl">Amount</label><div class="amt" style="height:50px"><input id="wAmt" inputmode="decimal" placeholder="0.0"><button class="btn sm ghost" id="wMax">MAX</button></div>
+          <span class="mu" style="font-size:12px" id="wUsd"></span></div>
+        <div class="est" id="wEst" style="margin:4px 0 12px"></div>
+        <div class="err" id="wErr"></div>
+        <button class="btn lg wide" id="wGo">Withdraw</button>
+        <p class="mu" style="font-size:11.5px;margin-top:10px">The network fee covers on-chain gas and is deducted from the amount.</p>
+      </div>
+    </div>
+    <div class="panel pb" style="margin-top:18px;display:flex;align-items:center;gap:16px;flex-wrap:wrap" id="linkBox"></div>
+    <div class="panel" style="margin-top:18px">
+      <div class="panel-h"><h3>Holdings</h3><div class="pnl-sum" id="pnlSum"></div></div><div id="hold"></div>
+    </div>
+    <div class="panel" style="margin-top:18px">
+      <div class="panel-h"><h3>History</h3></div><div style="overflow:auto"><table class="tbl" id="hist"><thead><tr><th>Type</th><th>Network</th><th class="r">Amount</th><th>Status</th><th>Tx</th><th class="r">When</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>`;
+  const addrOf = () => (asset === 'eth' ? me.ethDepositAddress : asset === 'xlm' ? me.stellarDeposit?.address : me.depositAddress) || '';
+  const paintQR = () => {
+    if (!window.qrcode || !addrOf()) return;
+    const q = window.qrcode(0, 'M'); q.addData(addrOf()); q.make();
+    $('#qr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 0 });
+  };
+  let fees = {}, ethFees = {};
+  const feeOf = (c) => (asset === 'eth' ? ethFees[c] : asset === 'xlm' ? { ok: true, xlm: wAsset === 'xlm' ? 0.05 : 0, usd: (wAsset === 'xlm' ? 0.05 : 0) * assetUsd('xlm') } : fees[c]);
+  const paintAsset = () => {
+    const A = ASSET[asset].label, ch = chainsOf(asset);
+    if (!ch[chain]) chain = Object.keys(ch)[0];
+    $$('#assetSel button').forEach(b => b.classList.toggle('on', b.dataset.a === asset));
+    $('#dTitle').textContent = 'Deposit ' + A;
+    $('#dSub').textContent = asset === 'eth' ? 'Your personal ETH address. Same address on Ethereum, Base and Arbitrum.' : asset === 'xlm' ? 'Send XLM to the Rookery Stellar address with your personal memo.' : 'Your personal deposit address. Same address on every network below.';
+    $('#dMemoBox').style.display = asset === 'xlm' ? '' : 'none';
+    $('#dMemo').textContent = me.stellarDeposit?.memo || '—';
+    $('#wMemoF').style.display = asset === 'xlm' ? '' : 'none';
+    $('#wAssetF').style.display = asset === 'xlm' && stToks().length ? '' : 'none';
+    $('#wAsset').innerHTML = `<option value="xlm">XLM</option>` + stToks().map(x => `<option value="t:${x.id}">$${esc(x.symbol)} · ${fmtT(x.amount)} (Stellar ${esc(x.stellar.code)})</option>`).join('');
+    $('#wAsset').value = wAsset;
+    $('#wTo').placeholder = asset === 'xlm' ? 'G…' : '0x…';
+    $('#dChains').innerHTML = Object.entries(ch).map(([k, v]) => `<button data-c="${k}" class="${k === chain ? 'on' : ''}">${esc(v.label)}</button>`).join('');
+    $$('#dChains button').forEach(b => b.onclick = () => { chain = b.dataset.c; $$('#dChains button').forEach(x => x.classList.toggle('on', x === b)); $('#cName').textContent = allChains[chain].label; });
+    $('#dAddr').textContent = addrOf();
+    $('#dWarn').innerHTML = asset === 'xlm'
+      ? `${me.stellarDeposit?.net === 'testnet' ? '<span style="display:block;margin-bottom:8px;padding:8px 10px;border:1px solid var(--dn);color:var(--dn);border-radius:6px;font-weight:600">TESTNET ONLY — this is a test site. Do NOT send real XLM here, it will not be credited. Use rookery.stinkypenguin.xyz.</span>' : ''}Always add memo <b>${esc(me.stellarDeposit?.memo || '')}</b> (memo type ID). Without it the deposit cannot be credited automatically. Send only native <b>XLM</b> on Stellar${me.stellarDeposit?.net === 'testnet' ? ' <b>testnet</b>' : ''}. Credited within about a minute.`
+      : asset === 'eth'
+      ? `Send only native <b>ETH</b> on <b id="cName">${esc(allChains[chain].label)}</b>. Do not send ZRO or other tokens to this address. Deposits appear after the transfer confirms.`
+      : `Send only <b>ZRO</b> (<span class="mono" style="font-size:10px;letter-spacing:0">${short(S.stats.zroToken)}</span>) on <b id="cName">${esc(allChains[chain].label)}</b>. Other tokens sent here are lost. Deposits appear after the transfer confirms.`;
+    $('#wTitle').textContent = 'Withdraw ' + A;
+    $('#wSub').textContent = `Sent instantly on the network you pick. A small network fee in ${A} covers gas.`;
+    $('#wAmtLbl').textContent = 'Amount · ' + A;
+    $('#wChain').innerHTML = Object.entries(ch).map(([k, v]) => { const f = feeOf(k); return `<option value="${k}">${esc(v.label)}${f && f.ok === false ? ' (unavailable)' : ''}</option>`; }).join('');
+    const cur = feeOf($('#wChain').value);
+    if (cur && cur.ok === false) { const good = [...$('#wChain').options].find(o => feeOf(o.value)?.ok); if (good) $('#wChain').value = good.value; }
+    $('#wAmt').value = ''; paintQR(); paintFee();
+  };
+  const paint = () => {
+    $('#bal').innerHTML = [['zro', fmtZ(me.zro, 4), me.zroUsd], ['eth', fmtZ(me.eth || '0', 6), me.ethUsd || 0], ['xlm', fmtZ(me.xlm || '0', 4), me.xlmUsd || 0]]
+      .map(([a, v, u]) => `<div class="brow"><b>${v}</b><small>${ASSET[a].label} · ${fmtUsd(u)}</small></div>`).join('');
+    $('#linkBox').innerHTML = me.wallet
+      ? `<span style="font-size:20px">◈</span><div><b>Linked wallet</b><div class="mono" style="letter-spacing:0;font-size:12px;color:var(--tx2);margin-top:3px">${esc(me.wallet)}</div></div>
+         <span class="mu" style="font-size:12.5px">You can log in with this wallet${me.email ? ' or with ' + esc(me.email) : ''}.</span>
+         <button class="btn sm ghost" id="wToMine" style="margin-left:auto">Withdraw to this wallet</button>`
+      : `<span style="font-size:20px">◈</span><div><b>Link a wallet</b><div class="mu" style="font-size:12.5px;margin-top:3px">Log in with MetaMask or Rabby next time, and withdraw to it in one click.</div></div>
+         <button class="btn sm" id="linkW" style="margin-left:auto">Link wallet</button>`;
+    const lw = $('#linkW'); if (lw) lw.onclick = async () => { if (await walletSignIn(true)) { me = S.me; paint(); } };
+    const wm = $('#wToMine'); if (wm) wm.onclick = () => { $('#wTo').value = me.wallet; $('#wAmt').focus(); };
+    const paintHold = () => {
+    $('#hold').innerHTML = me.holdings.length ? `<table class="tbl"><thead><tr>${thSort('Token', 'token', false)}${thSort('Amount', 'amount')}${thSort('Price', 'price')}${thSort('Value', 'value')}${me.pnl ? thSort('PnL', 'pnl') : ''}${thSort('Rewards', 'rewards')}</tr></thead><tbody>
+      ${sortHoldings(me.holdings).map(x => `<tr class="click" onclick="location.hash='#/t/${x.id}'"><td><div class="tok-cell">${timg(x)}<b>${esc(x.symbol)}</b></div></td>
+        <td class="r">${fmtT(x.amount)}</td><td class="r">${fmtUsd(x.priceUsd)}</td><td class="r">${fmtUsd(x.valueUsd)}</td>${me.pnl ? `<td class="r">${x.pnlUsd === undefined ? '<span class="mu">—</span>' : sUsd(x.pnlUsd) + `<div style="font-size:11px;display:flex;gap:8px;justify-content:flex-end;align-items:center">${x.pnlPct != null ? fmtPct(x.pnlPct) : ''}${shareBtn(`data-share="${x.id}"`)}</div>`}</td>` : ''}<td class="r">${fmtZ(x.pendingRewards, x.quote === 'ETH' ? 6 : 4)} ${esc(x.quote || 'ZRO')}</td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty" style="border:0;margin:14px">No tokens yet.</div>';
+    bindSort($('#hold'), paintHold);
+    const P = me.pnl;
+    $('#pnlSum').innerHTML = P && P.positions ? `<div><span class="mono mu">Total PnL</span><b>${sUsd(P.totalUsd)}${P.pct != null ? ' ' + fmtPct(P.pct) : ''}</b></div>
+      <div><span class="mono mu">Open</span><b>${sUsd(P.openUsd)}</b></div><div><span class="mono mu">Closed</span><b>${sUsd(P.closedUsd)}</b></div>
+      <div class="hide-xs"><span class="mono mu">Bought</span><b>${fmtUsd(P.boughtUsd)}</b></div>` : '';
+    const best = P && me.holdings.filter(x => x.pnlUsd !== undefined).sort((a, b) => b.pnlUsd - a.pnlUsd)[0];
+    $('#pnlHero').innerHTML = P && P.positions ? `<div class="pnl-hero ${P.totalUsd >= 0 ? 'win' : 'loss'}">
+      <div class="ph-k"><span class="mono mu">Your PnL</span><b>${sUsd(P.totalUsd)}</b>${P.pct != null ? `<span class="ph-p">${fmtPct(P.pct)}</span>` : ''}</div>
+      ${best ? `<div class="ph-k hide-xs"><span class="mono mu">Best bag</span><b>$${esc(best.symbol)} ${sUsd(best.pnlUsd)}</b></div>` : ''}
+      <div class="ph-a">${laserBtn('data-share="__all"')}${best ? laserBtn(`data-share="${best.id}"`, `Share $${esc(best.symbol)}`) : ''}</div>
+    </div>` : '';
+    $$('[data-share]').forEach(b => b.onclick = (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const id = b.dataset.share;
+      const rank = me.holdings.filter(y => y.pnlUsd !== undefined).map(y => ({ id: y.id, symbol: y.symbol, image: y.image, pnlUsd: y.pnlUsd, pnlPct: y.pnlPct, valueUsd: y.valueUsd }));
+      const common = { user: me.username, rank, totalUsd: P.totalUsd, totalPct: P.pct };
+      if (id === '__all') return openShare({ kind: 'total', ...common, pnlUsd: P.totalUsd, pnlPct: P.pct, boughtUsd: P.boughtUsd, openUsd: P.openUsd, positions: P.positions });
+      const x = me.holdings.find(y => y.id === id); if (!x) return;
+      openShare({ kind: 'token', ...common, id: x.id, symbol: x.symbol, name: x.name, image: x.image, pnlUsd: x.pnlUsd, pnlPct: x.pnlPct, costUsd: x.costUsd, valueUsd: x.valueUsd });
+    });
+    };
+    paintHold();
+    $('#hist tbody').innerHTML = me.transfers.length ? me.transfers.map(t => { const a = ['eth', 'xlm'].includes(t.asset) ? t.asset : 'zro'; const isTok = String(t.asset || '').startsWith('t:'); return `<tr>
+      <td>${t.kind === 'deposit' ? 'Deposit' : 'Withdrawal'}</td><td>${esc(allChains[t.chain]?.label || t.chain)}</td>
+      <td class="r">${t.kind === 'deposit' ? '+' : '−'}${isTok ? fmtT(t.amount) + ' tokens' : fmtA(t.amount, a)}</td><td><span class="st-tag ${esc(t.status)}">${esc(t.status)}</span></td>
+      <td>${t.txid ? `<a href="${allChains[t.chain]?.explorer}/${t.chain === 'stellar' && t.kind === 'deposit' ? 'op' : 'tx'}/${esc(t.txid)}" target="_blank" rel="noopener" class="mono" style="letter-spacing:0">${short(t.txid)} ↗</a>` : `<span class="mu" style="font-size:12px">${esc(t.note || '')}</span>`}</td>
+      <td class="r mu">${ago(t.ts)}</td></tr>`; }).join('') : `<tr><td colspan="6"><div class="empty" style="border:0">No transfers yet.</div></td></tr>`;
+  };
+  $$('#assetSel button').forEach(b => b.onclick = () => { asset = b.dataset.a; localStorage.setItem('pl_wallet_asset', asset); paintAsset(); });
+  $('#copy').onclick = () => { navigator.clipboard.writeText(addrOf()); toast('Address copied'); };
+  $('#copyMemo').onclick = () => { navigator.clipboard.writeText(me.stellarDeposit?.memo || ''); toast('Memo copied'); };
+  $('#wAsset').onchange = () => { wAsset = $('#wAsset').value; $('#wAmt').value = ''; paintFee(); };
+  const check = async (manual) => {
+    try {
+      const r = await api('/wallet/check', {});
+      if (r.found?.length) { r.found.forEach(f => toast(`Deposit received: <b>${fmtA(f.amount, f.asset === 'eth' ? 'eth' : 'zro')}</b> on ${esc(allChains[f.chain]?.label || f.chain)}`)); }
+      else if (manual) toast('No new deposits yet. Deposits are detected automatically within about a minute.');
+      me = S.me = await api('/me?pnl=1'); paint(); paintAcct();
+    } catch (e) { if (manual) toast(esc(e.message), 'bad'); }
+  };
+  $('#chk').onclick = () => check(true);
+  function paintFee() {
+    const A = ASSET[asset].label, f = feeOf($('#wChain').value), v = toWei($('#wAmt').value);
+    const feeAmt = f ? (asset === 'eth' ? f.eth : asset === 'xlm' ? f.xlm : f.zro) : 0, feeW = f ? toWei(String(feeAmt)) : 0n;
+    $('#wUsd').textContent = v > 0n ? '≈ ' + fmtUsd(zNum(v) * assetUsd(asset)) : '';
+    const lim = f && f.maxOut !== undefined ? f.maxOut + Number(feeAmt) : null;
+    // the network with the most room right now, suggested when the picked one can't pay
+    const best = (() => { let b = null; for (const k of Object.keys(chainsOf(asset))) { const g = feeOf(k); if (g && g.ok !== false && g.maxOut !== undefined && (!b || g.maxOut > b.m)) b = { k, m: g.maxOut }; } return b; })();
+    const alt = best && best.k !== $('#wChain').value && v > 0n && zNum(v) <= best.m ? ` <a href="#" id="wAlt" style="text-decoration:underline;color:var(--tx)">Use ${esc(allChains[best.k].label)}</a>` : '';
+    const warn = f && f.ok === false ? `<div class="kv" style="color:var(--dn)"><span>${esc(allChains[$('#wChain').value].label)} payouts are temporarily unavailable.${alt}</span></div>`
+      : (lim !== null && v > 0n && zNum(v) > lim ? `<div class="kv" style="color:var(--dn)"><span>Max on ${esc(allChains[$('#wChain').value].label)} right now: ${lim.toLocaleString('en-US', { maximumFractionDigits: asset === 'eth' ? 5 : 2 })} ${A}.${alt || ' Split it or use another network.'}</span></div>` : '');
+    $('#wGo').disabled = asset !== 'xlm' && !!warn;
+    $('#wEst').innerHTML = f ? `<div class="kv"><span>Network fee</span><b>${Number(feeAmt).toLocaleString('en-US', { maximumFractionDigits: asset === 'eth' ? 6 : 2 })} ${A} · ${fmtUsd(f.usd)}</b></div>
+      <div class="kv"><span>You receive</span><b>${v > feeW ? fmtA((v - feeW).toString(), asset) : '—'}</b></div>${warn}` : '<div class="kv"><span>Network fee</span><b>…</b></div>';
+    const wa = $('#wAlt'); if (wa) wa.onclick = (e) => { e.preventDefault(); $('#wChain').value = best.k; paintFee(); };
+  }
+  api('/wallet/fees').then(r => { fees = r.fees || {}; ethFees = r.eth || {}; paintAsset(); }).catch(() => {});
+  $('#wChain').onchange = paintFee;
+  $('#wAmt').oninput = paintFee;
+  $('#wMax').onclick = () => {
+    const tok = asset === 'xlm' && wAsset !== 'xlm' ? stToks().find(x => 't:' + x.id === wAsset) : null;
+    $('#wAmt').value = weiToStr(tok ? tok.amount : (me[asset] || '0'), 6); $('#wAmt').oninput();
+  };
+  $('#wGo').onclick = async () => {
+    $('#wErr').textContent = '';
+    try {
+      $('#wGo').disabled = true; $('#wGo').textContent = 'Sending…';
+      const st = asset === 'xlm';
+      const r = await api('/wallet/withdraw', { asset: st ? wAsset : asset, chain: $('#wChain').value, to: $('#wTo').value.trim(), amount: toWei($('#wAmt').value).toString(), memo: st ? $('#wMemo').value.trim() : undefined });
+      toast(r.pending ? 'Sent, waiting for confirmation' : st ? `Sent <b>${esc(r.sent)} ${wAsset === 'xlm' ? 'XLM' : 'tokens'}</b> · <a href="${r.explorer}" target="_blank" rel="noopener" style="text-decoration:underline">view tx</a>`
+        : `Sent <b>${fmtA(r.sent, asset)}</b> (fee ${fmtZ(r.fee, asset === 'eth' ? 6 : 2)}) · <a href="${r.explorer}" target="_blank" rel="noopener" style="text-decoration:underline">view tx</a>`);
+      $('#wAmt').value = ''; me = S.me = await api('/me?pnl=1'); paint(); paintAcct();
+    } catch (e) { $('#wErr').textContent = e.message; }
+    finally { $('#wGo').disabled = false; $('#wGo').textContent = 'Withdraw'; }
+  };
+  paintAsset(); paint(); if (me.wallet && !$('#wTo').value) $('#wTo').value = me.wallet; check(false);
+  const reMe = debounce(async () => { try { me = S.me = await api('/me?pnl=1'); paint(); paintAcct(); } catch { /* next tick */ } }, 600);
+  liveSub(['all'], (msg) => { if (me.holdings.some(x => x.id === msg.market.id)) reMe(); });
+  setTimer(() => check(false), 20000);
+}
+
+/* ═══════════ PROFILE ═══════════ */
+async function viewProfile(name) {
+  let p;
+  try { p = await api('/u/' + encodeURIComponent(name)); } catch (e) { app.innerHTML = `<div class="wrap page"><div class="empty">${esc(e.message)}</div></div>`; return; }
+  document.title = `${p.username} — Rookery`;
+  let tab = 'holdings';
+  app.innerHTML = `
+  <section class="wrap page">
+    <div class="prof">
+      ${avatar(p.username, p.avatar)}
+      <div><h1>${esc(p.username)} ${badgeHTML(p.badges, true)}</h1><p class="tx2" style="margin-top:6px;max-width:520px;font-size:14px;line-height:1.6">${esc(p.bio || 'No bio yet.')}</p>
+        <span class="mono mu" style="display:block;margin-top:10px">Joined ${new Date(p.joined).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })}</span>
+        ${p.isMe ? '<button class="btn sm ghost" id="edit" style="margin-top:12px">Edit profile</button>' : ''}</div>
+      <div class="prof-stats">
+        <div><span class="mono mu">Portfolio</span><b id="pPort">${fmtUsd(p.portfolioUsd)}</b></div>
+        <div><span class="mono mu">Volume</span><b id="pVol">${fmtUsd(p.volumeUsd)}</b></div>
+        <div><span class="mono mu">Trades</span><b id="pTr">${p.trades}</b></div>
+        <div><span class="mono mu">Created</span><b>${p.created.length}</b></div>
+        ${p.created.some(m => m.taxes.marketing > 0) ? `<div><span class="mono mu">Creator fees</span><b id="pFee">${fmtUsd(p.creatorEarned?.usd || 0)}</b></div>` : ''}
+      </div>
+    </div>
+    ${p.isMe && p.ref ? `<div class="panel pb ref-card">
+      <div class="rc-main"><span class="mono mu">Your referral link</span>
+        <div class="addr"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="rcLink">${esc(location.origin)}/?ref=${encodeURIComponent(p.username)}</span><button class="btn sm ghost" id="rcCopy">Copy</button></div>
+        <p class="mu" style="font-size:12px;margin-top:8px">They get a welcome bonus, you keep <b style="color:var(--tx)">20% of the platform fee</b> from everything they trade.</p></div>
+      <div class="rc-stats"><div><span class="mono mu">Invited</span><b>${p.ref.invited}</b></div>
+        <div><span class="mono mu">Earned</span><b>${fmtUsd(p.ref.earnedUsd)}</b></div></div>
+    </div>` : ''}
+    <div class="panel"><div class="tabs-h" id="ptabs"><button data-t="holdings" class="on">Holdings</button><button data-t="created">Created</button><button data-t="trades">Trades</button></div><div id="pbody"></div></div>
+  </section>`;
+  const paint = () => {
+    const b = $('#pbody');
+    if (tab === 'holdings') {
+      const hasPrice = p.holdings.some(x => x.priceUsd !== undefined);
+      b.innerHTML = p.holdings.length ? `<table class="tbl"><thead><tr>${thSort('Token', 'token', false)}${thSort('Amount', 'amount')}${hasPrice ? thSort('Price', 'price') : ''}${thSort('Value', 'value')}</tr></thead><tbody>${sortHoldings(p.holdings).map(x => `<tr class="click" onclick="location.hash='#/t/${x.id}'">
+      <td><div class="tok-cell">${timg(x)}<div><b>${esc(x.symbol)}</b><div class="mu" style="font-size:11.5px">${esc(x.name)}</div></div></div></td><td class="r">${fmtT(x.amount)}</td>${hasPrice ? `<td class="r">${fmtUsd(x.priceUsd)}</td>` : ''}<td class="r"><b>${fmtUsd(x.valueUsd)}</b></td></tr>`).join('')}</tbody></table>`
+      : '<div class="empty" style="border:0;margin:14px">No holdings.</div>';
+      bindSort(b, paint);
+    }
+    else if (tab === 'created') {
+      const E = p.creatorEarned || { usd: 0, zro: 0, eth: 0 };
+      const earnTxt = [E.zro ? fmtZ(E.zro, 2) + ' ZRO' : '', E.eth ? fmtZ(E.eth, 5) + ' ETH' : ''].filter(Boolean).join(' + ');
+      const hasMkt = p.created.some(m => m.taxes.marketing > 0);
+      const holdersUsd = p.created.reduce((a, m) => a + (m.rewardsPaidUsd || 0), 0);
+      const hasRew = p.created.some(m => m.taxes.rewards > 0);
+      const rows = [...p.created].sort((a, c) => (c.mktPaidUsd || 0) - (a.mktPaidUsd || 0) || (c.rewardsPaidUsd || 0) - (a.rewardsPaidUsd || 0));
+      b.innerHTML = p.created.length ? `<div class="pb" style="padding-bottom:0">
+        <div class="earn-h">
+          <div class="earn-k">${hasMkt
+            ? `<div><span class="mono mu">Earned from creator taxes</span><b>${fmtUsd(E.usd)}</b>${earnTxt ? `<span class="mu" style="font-size:12.5px">${earnTxt}</span>` : ''}</div>`
+            : `<div><span class="mono mu">Creator taxes</span><b class="tx2" style="font-size:17px">No marketing tax on ${p.isMe ? 'your' : 'these'} tokens</b><span class="mu" style="font-size:12.5px">${p.isMe ? 'Set one at launch to earn on every buy and sell.' : 'This creator earns nothing from trading fees.'}</span></div>`}
+            ${hasRew ? `<div><span class="mono mu">Paid to holders</span><b>${fmtUsd(holdersUsd)}</b><span class="mu" style="font-size:12.5px">from rewards taxes</span></div>` : ''}
+          </div>
+          <p class="mu" style="font-size:12.5px;max-width:420px">The marketing tax a creator sets at launch is paid to them on every buy and sell, in the token's pair currency. A rewards tax is shared by all holders instead.</p></div>
+        <div style="overflow:auto"><table class="tbl"><thead><tr><th>Token</th><th class="r">Taxes</th><th class="r hide-s">Volume</th>${hasRew ? '<th class="r hide-s">Paid to holders</th>' : ''}<th class="r">Creator earned</th></tr></thead><tbody>
+        ${rows.map(m => `<tr class="click" onclick="location.hash='#/t/${m.id}'"><td><div class="tok-cell">${timg(m)}<div><b>${esc(m.symbol)}</b><div class="mu" style="font-size:11.5px">${esc(m.name)}</div></div></div></td>
+          <td class="r"><span title="marketing / burn / rewards">${m.taxes.marketing}% <span class="mu">mkt</span>${m.taxes.burn ? ` · ${m.taxes.burn}% <span class="mu">burn</span>` : ''}${m.taxes.rewards ? ` · ${m.taxes.rewards}% <span class="mu">rew</span>` : ''}</span></td>
+          <td class="r hide-s">${fmtUsd(m.volumeUsd)}</td>${hasRew ? `<td class="r hide-s">${m.taxes.rewards ? fmtUsd(m.rewardsPaidUsd || 0) : '<span class="mu">—</span>'}</td>` : ''}
+          <td class="r">${m.taxes.marketing > 0 ? `<b>${fmtUsd(m.mktPaidUsd || 0)}</b><div class="mu" style="font-size:11px">${fmtZ(zNum(m.mktPaid || '0'), m.quote === 'ETH' ? 6 : 2)} ${esc(m.quote)}</div>` : '<span class="mu">no tax</span>'}</td></tr>`).join('')}
+        </tbody></table></div></div>
+        <div class="grid pb">${p.created.map(cardHTML).join('')}</div>` : '<div class="empty" style="border:0;margin:14px">No tokens created.</div>';
+    }
+    else b.innerHTML = p.recent.length ? `<table class="tbl"><tbody>${p.recent.map(t => `<tr class="click" onclick="location.hash='#/t/${t.market}'">
+      <td><b class="${t.side === 'buy' ? 'up' : 'dn'}">${t.side.toUpperCase()}</b></td><td>${esc(t.symbol)}</td><td class="r">${fmtT(t.tokens)}</td><td class="r">${fmtUsd(zNum(t.zro) * t.usd)}</td><td class="r mu">${ago(t.ts)}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="empty" style="border:0;margin:14px">No trades yet.</div>';
+  };
+  $$('#ptabs button').forEach(x => x.onclick = () => { tab = x.dataset.t; $$('#ptabs button').forEach(y => y.classList.toggle('on', y === x)); paint(); });
+  paint();
+  const rc = $('#rcCopy');
+  if (rc) rc.onclick = () => { navigator.clipboard.writeText(`${location.origin}/?ref=${encodeURIComponent(p.username)}`); toast('Referral link copied'); };
+  // live: when one of this trader's tokens trades, refresh the numbers in place
+  const mine = () => new Set([...p.holdings.map(x => x.id), ...p.created.map(x => x.id)]);
+  const reP = debounce(async () => {
+    try { p = await api('/u/' + encodeURIComponent(name)); } catch { return; }
+    liveNum($('#pPort'), p.portfolioUsd, fmtUsd); liveNum($('#pVol'), p.volumeUsd, fmtUsd); liveNum($('#pTr'), p.trades, fmtInt);
+    liveNum($('#pFee'), p.creatorEarned?.usd || 0, fmtUsd);
+    if (tab !== 'created') paint(); else if (!document.querySelector('#pbody .card:hover')) paint();
+  }, 700);
+  liveSub(['all'], (msg) => { if (mine().has(msg.market.id)) reP(); });
+  setTimer(reP, 30000, true);
+  const ed = $('#edit');
+  if (ed) ed.onclick = () => {
+    let av = null;
+    const md = h(`<div class="modal-bg"><div class="modal">
+      <h3 style="font-size:20px;letter-spacing:-.03em;margin-bottom:16px">Edit profile</h3>
+      <label class="upl" id="aUp">${avatar(p.username, p.avatar).replace('class="av"', 'id="aPrev" class="av" style="width:64px;height:64px"')}<div><b>Change avatar</b><div class="mu" style="font-size:12px">From your computer</div></div><input type="file" id="aFile" accept="image/*" hidden></label>
+      <div class="f" style="margin-top:14px"><label>Username</label><input class="inp" id="eU" value="${esc(p.username)}"></div>
+      <div class="f"><label>Bio</label><textarea class="inp" id="eB" maxlength="280">${esc(p.bio)}</textarea></div>
+      <div class="err" id="eErr"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn ghost" id="eX">Cancel</button><button class="btn" id="eS">Save</button></div></div></div>`);
+    document.body.appendChild(md);
+    $('#aUp', md).onclick = (e) => { if (e.target.id !== 'aFile') $('#aFile', md).click(); };
+    $('#aFile', md).onchange = async (e) => { try { av = await readImage(e.target.files[0], 192, 140_000); $('#aPrev', md).innerHTML = `<img src="${av}">`; } catch (er) { toast(esc(er.message), 'bad'); } };
+    $('#eX', md).onclick = () => md.remove();
+    md.onclick = (e) => { if (e.target === md) md.remove(); };
+    $('#eS', md).onclick = async () => {
+      try {
+        const body = { username: $('#eU', md).value.trim(), bio: $('#eB', md).value };
+        if (av) body.avatar = av;
+        await api('/me', body); md.remove(); await loadMe(); toast('Profile saved');
+        location.hash = `#/u/${encodeURIComponent(body.username)}`; route();
+      } catch (er) { $('#eErr', md).textContent = er.message; }
+    };
+  };
+}
+
+
+/* ───────── wallet sign-in (SIWE) ───────── */
+async function walletSignIn(link = false) {
+  const eth = window.ethereum;
+  if (!eth) { toast('No wallet found. Install MetaMask or Rabby, or open Rookery in your wallet app browser.', 'bad'); return false; }
+  try {
+    const [address] = await eth.request({ method: 'eth_requestAccounts' });
+    const { message, nonce } = await api('/auth/wallet/nonce', { address });
+    const signature = await eth.request({ method: 'personal_sign', params: [message, address] });
+    const r = await api('/auth/wallet/verify', { nonce, signature, link });
+    await loadMe();
+    if (link) toast(`Wallet <b>${short(r.linked)}</b> linked. You can now log in with it.`);
+    else toast(r.created ? `Welcome to the rookery, <b>${esc(r.username)}</b>. Deposit ZRO to start trading.` : `Welcome back, <b>${esc(r.username)}</b>`);
+    return r;
+  } catch (e) {
+    if (e?.code === 4001) toast('Signature cancelled', 'bad'); else toast(esc(e.message || 'Wallet sign-in failed'), 'bad');
+    return false;
+  }
+}
+
+/* ═══════════ AUTH ═══════════ */
+function viewAuth(mode) {
+  document.title = (mode === 'signup' ? 'Sign up' : 'Log in') + ' — Rookery';
+  if (S.me) { location.hash = '#/wallet'; return; }
+  app.innerHTML = `
+  <section class="wrap"><div class="auth">
+    <img class="logo" src="/assets/logo-256.png" alt="">
+    <h1>${mode === 'signup' ? 'Join the rookery' : 'Welcome back'}</h1>
+    <p>${mode === 'signup' ? 'Use your wallet or email. You get a personal ZRO deposit address on 5 chains.' : 'Log in with your wallet or email.'}</p>
+    <button class="btn lg wide ghost" id="wGoAuth" type="button" style="gap:10px"><span style="font-size:17px">◈</span>Continue with wallet</button>
+    <button class="btn lg wide ghost" id="stGoAuth" type="button" style="gap:10px;margin-top:8px"><span style="font-size:17px">✶</span>Continue with a Stellar wallet</button>
+    <button class="btn lg wide ghost" id="wcGoAuth" type="button" style="gap:10px;margin-top:8px"><span style="font-size:17px">▲</span>Lobstr · WalletConnect</button>
+    <p class="mu" style="font-size:11.5px;margin:8px 0 0;text-align:center">MetaMask, Rabby, Coinbase Wallet or any EVM wallet. Free signature, no transaction.</p>
+    <div style="display:flex;align-items:center;gap:12px;margin:20px 0"><hr class="sep" style="flex:1;margin:0"><span class="mono mu">or with email</span><hr class="sep" style="flex:1;margin:0"></div>
+    <form id="af">
+      ${mode === 'signup' ? '<div class="f"><label>Username</label><input class="inp" name="username" placeholder="satoshi" autocomplete="username" required></div>' : ''}
+      <div class="f"><label>Email</label><input class="inp" name="email" type="email" placeholder="you@email.com" autocomplete="email" required></div>
+      <div class="f"><label>Password</label><input class="inp" name="password" type="password" placeholder="${mode === 'signup' ? 'At least 8 characters' : '••••••••'}" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" required></div>
+      <div class="err" id="aErr"></div>
+      <button class="btn lg wide" type="submit">${mode === 'signup' ? 'Create account' : 'Log in'}</button>
+    </form>
+    <p style="margin:18px 0 0;text-align:center;font-size:13.5px">${mode === 'signup' ? 'Already have an account? <a href="#/login" style="text-decoration:underline;color:var(--tx)">Log in</a>' : 'New here? <a href="#/signup" style="text-decoration:underline;color:var(--tx)">Create an account</a>'}</p>
+  </div></section>`;
+  $('#wGoAuth').onclick = async () => { const r = await walletSignIn(false); if (r) location.hash = r.created ? '#/wallet' : '#/'; };
+  if ($('#wcGoAuth')) $('#wcGoAuth').onclick = async () => {
+    const b = $('#wcGoAuth'); const was = b.innerHTML; b.disabled = true; b.innerHTML = 'Waiting for Lobstr…';
+    try { await STW.loginWc(); } catch (e) { toast(esc(e.message || e), 'bad'); WC.hideQr(); }
+    finally { b.disabled = false; b.innerHTML = was; }
+  };
+  if ($('#stGoAuth')) $('#stGoAuth').onclick = async () => {
+    const b = $('#stGoAuth'); const old = b.innerHTML; b.disabled = true; b.innerHTML = 'Waiting for your wallet…';
+    try { await STW.login(); location.hash = '#/'; route(); }
+    catch (e) { toast(esc(e.message || e), 'bad'); }
+    finally { b.disabled = false; b.innerHTML = old; }
+  };
+  $('#af').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target));
+    $('#aErr').textContent = '';
+    try {
+      const refNow = (() => { try { return new URLSearchParams(location.search).get('ref') || localStorage.getItem('pl_ref') || ''; } catch { return ''; } })();
+      const body = mode === 'signup' ? { ...fd, ref: refNow } : fd;
+      await api(mode === 'signup' ? '/auth/signup' : '/auth/login', body);
+      if (mode === 'signup') localStorage.removeItem('pl_ref');
+      await loadMe();
+      toast(mode === 'signup' ? 'Account created. Deposit ZRO to start trading.' : `Welcome back, <b>${esc(S.me?.username)}</b>`);
+      location.hash = mode === 'signup' ? '#/wallet' : '#/';
+    } catch (er) { $('#aErr').textContent = er.message; }
+  };
+}
+
+/* ═══════════ DOCS ═══════════ */
+function drawCurve(cv, usd) {
+  const dpr = devicePixelRatio || 1, w = cv.clientWidth, hh = cv.clientHeight;
+  cv.width = w * dpr; cv.height = hh * dpr;
+  const c = cv.getContext('2d'); c.scale(dpr, dpr);
+  const C = S.stats.curve, vz = Number(C.vZro), vt = Number(C.vTok);
+  const pts = []; for (let i = 0; i <= 100; i++) { const sold = 8e8 * i / 100; const t = vt - sold; const z = vz * vt / t; pts.push((z / t) * 1e9 * usd); }
+  const max = Math.max(...pts), pad = 34;
+  c.strokeStyle = 'rgba(255,255,255,.06)'; c.fillStyle = '#76767E'; c.font = '10px JetBrains Mono';
+  for (let i = 0; i <= 4; i++) { const y = pad / 2 + (hh - pad) * i / 4; c.beginPath(); c.moveTo(pad + 20, y); c.lineTo(w - 8, y); c.stroke(); c.fillText(fmtUsd(max * (1 - i / 4)), 0, y + 3); }
+  for (let i = 0; i <= 4; i++) { const x = pad + 20 + (w - pad - 28) * i / 4; c.fillText(`${i * 25}%`, x - 8, hh - 2); }
+  c.beginPath();
+  pts.forEach((p, i) => { const x = pad + 20 + (w - pad - 28) * i / 100, y = pad / 2 + (hh - pad) * (1 - p / max); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+  c.strokeStyle = '#fff'; c.lineWidth = 2.2; c.stroke();
+  c.lineTo(w - 8, hh - pad / 2); c.lineTo(pad + 20, hh - pad / 2); c.closePath(); c.fillStyle = 'rgba(255,255,255,.05)'; c.fill();
+}
+function viewDocs() {
+  document.title = 'Docs — Rookery';
+  const C = S.stats.curve, usd = S.stats.zroUsd;
+  const vz = Number(C.vZro), vt = Number(C.vTok);
+  const startMc = (vz / vt) * 1e9 * usd, tEnd = vt - 8e8, zEnd = vz * vt / tEnd, bondMc = (zEnd / tEnd) * 1e9 * usd, raised = (zEnd - vz) * usd;
+  app.innerHTML = `
+  <section class="wrap docs">
+    <nav class="toc">
+      <a href="#/docs" data-s="overview">Overview</a><a href="#/docs" data-s="networks">Networks</a><a href="#/docs" data-s="account">Account & wallet</a>
+      <a href="#/docs" data-s="curve">Bonding curve</a><a href="#/docs" data-s="fees">Fees & taxes</a><a href="#/docs" data-s="rewards">Holder rewards</a>
+      <a href="#/docs" data-s="protect">Launch protection</a><a href="#/docs" data-s="migration">Mainnet migration</a><a href="#/docs" data-s="stellar">Stellar</a><a href="#/docs" data-s="plaunch">$臭企鹅 burn</a>
+      <a href="#/docs" data-s="safety">Safety & proofs</a><a href="#/docs" data-s="risks">Risks</a>
+    </nav>
+    <article class="doc">
+      <span class="mono mu">Documentation</span>
+      <h1 id="overview">How Rookery works</h1>
+      <p>Rookery is the Stinky Penguin launchpad. In a rookery penguins hatch; here tokens hatch before their chain exists. Create a token for a network that is announced but not live yet, and the day it launches every balance is minted 1:1 on-chain with the bonding-curve reserve becoming the first liquidity pool. Stellar is the exception: it is live today, so a Stellar token trades for real from the start and graduates on-chain into an Aquarius pool.</p>
+      <div class="flow" style="margin-top:22px">
+        <div><span class="n">01</span><b>Deposit ZRO, ETH or XLM</b><span>ZRO from Ethereum, Base, Arbitrum, BNB Chain or Optimism; ETH from Ethereum, Base or Arbitrum; XLM on Stellar with your memo.</span></div>
+        <div><span class="n">02</span><b>Create or trade</b><span>Tokens trade instantly on a bonding curve, paid with ZRO or ETH and shown in USD.</span></div>
+        <div><span class="n">03</span><b>Bond or graduate</b><span>At 800M sold the curve becomes a Rookery pool. Stellar tokens graduate into an Aquarius pool at ${gradK()}.</span></div>
+        <div><span class="n">04</span><b>Mainnet</b><span>Balances mint 1:1 on the target chain, the reserve seeds the first pool.</span></div>
+      </div>
+
+      <h2 id="networks">Supported networks</h2>
+      <p>Rookery lists networks that are not on mainnet yet, plus Stellar, which is already live. Pick one when you create a token; it decides where the token ends up.</p>
+      <ul>
+        <li><b>Zero</b> by LayerZero: a high-throughput chain with the ATLAS exchange engine. Mainnet is scheduled for <b>30 November 2026</b>.</li>
+        <li><b>GIWA</b> by Upbit (Dunamu): an Ethereum layer 2, currently on testnet. Mainnet date has not been announced.</li>
+        <li><b>Stellar</b> by the Stellar Development Foundation: live since 2015, so a Stellar token trades for real from day one and graduates on-chain into an Aquarius pool at <b>${fmtUsd(S.stats?.stellar?.gradUsd || 46000)}</b> market cap. See the <a href="#/docs" data-s="stellar" style="text-decoration:underline;color:var(--tx)">Stellar</a> section.</li>
+      </ul>
+      <div class="callout"><b>Zero tokens pair with ZRO, GIWA tokens pair with ETH, Stellar tokens pair with XLM.</b> Each network uses its natural quote asset: ZRO is the gas token of Zero, and GIWA is an Ethereum layer 2. You can still buy any token with either asset: pick <i>Pay with ZRO</i> or <i>Pay with ETH</i> and the conversion happens in one step at the live market rate (0.5% conversion fee). When you sell, pick <i>Receive in</i> ZRO or ETH the same way.</div>
+
+      <h2 id="account">Account & wallet</h2>
+      <p>Sign up with email or with your wallet. Your account gets two personal deposit addresses: a <b>ZRO address</b> (the same on Ethereum, Base, Arbitrum, BNB Chain and Optimism; send only ZRO, <code>${esc(S.stats.zroToken)}</code>) and a separate <b>ETH address</b> (the same on Ethereum, Base and Arbitrum; send only native ETH). Switch between them with the ZRO / ETH toggle on the wallet page.</p>
+      <ul>
+        <li><b>Deposits</b> are detected automatically while your wallet page is open, or when you press <i>Check for deposits</i>.</li>
+        <li><b>Withdrawals</b> are sent instantly on the network you choose. A small network fee in the asset you withdraw (ZRO or ETH), calculated from live gas prices, is deducted from the amount and shown before you confirm.</li>
+        <li>If a withdrawal can't be sent (for example low hot-wallet liquidity on one chain), it is cancelled and the funds go straight back to your balance.</li>
+      </ul>
+
+      <h2 id="curve">Bonding curve</h2>
+      <p>Every token has a fixed supply of <b>1,000,000,000</b>. <b>800M (80%)</b> are sold on a constant-product curve; <b>200M (20%)</b> are reserved for the mainnet pool. The curve uses virtual reserves of ${vz.toLocaleString()} ZRO and ${(vt / 1e6).toFixed(0)}M tokens:</p>
+      <p><code>price = (virtualZRO + raisedZRO) / (virtualTokens − soldTokens)</code> &nbsp;and&nbsp; <code>(virtualZRO + raised) × (virtualTokens − sold) = k</code></p>
+      <div class="fig"><canvas id="cv1"></canvas><div class="cap">Market cap (USD, at today's ZRO price) vs % of curve sold</div></div>
+      <ul>
+        <li>Starting market cap: <b>${fmtUsd(startMc)}</b></li>
+        <li>Market cap when bonded (100% sold): <b>${fmtUsd(bondMc)}</b>. After that there is no cap: the token keeps trading on its Rookery pool.</li>
+        <li>ZRO raised at bonding: <b>${Math.round(zEnd - vz).toLocaleString()} ZRO</b> (${fmtUsd(raised)})</li>
+      </ul>
+
+      <h2 id="fees">Fees & taxes</h2>
+      <p>Every buy and sell pays a fee in the token's pair currency (ZRO for Zero tokens, ETH for GIWA tokens, XLM for Stellar tokens). The platform fee is fixed; the rest is set by the creator at launch and can't be changed later.</p>
+      <div class="fig">
+        <div class="split" style="height:16px"><i style="width:5%;background:#fff"></i><i style="width:20%;background:#9b9ba3"></i><i style="width:10%;background:#5c5c64"></i><i style="width:20%;background:var(--up)"></i></div>
+        <div class="tax-row"><span class="tax-dot" style="background:#fff"></span>$臭企鹅 buy &amp; burn — platform, every trade<b>0.5%</b></div>
+        <div class="tax-row"><span class="tax-dot" style="background:#9b9ba3"></span>Marketing — paid to the creator<b>0–5%</b></div>
+        <div class="tax-row"><span class="tax-dot" style="background:#5c5c64"></span>Burn — that share of the token is destroyed<b>0–5%</b></div>
+        <div class="tax-row"><span class="tax-dot" style="background:var(--up)"></span>Rewards — paid to all holders, pro rata<b>0–5%</b></div>
+        <div class="cap">Creator taxes are capped at 10% in total. Example above: 0.5% + 2% + 1% + 2%.</div>
+      </div>
+      <p>Creating a token is free. There are no other hidden fees.</p>
+
+      <h2 id="rewards">Holder rewards</h2>
+      <p>When a token has a rewards tax, that tax (in ZRO or ETH, the token's pair) is shared across everyone holding the token at the moment of each trade, proportional to their balance. It is tracked with a reward-per-token accumulator, so it is exact and costs nothing to hold.</p>
+      <p>Rewards are credited automatically to your balance whenever you trade that token, and can be claimed at any time from the token page.</p>
+
+      <h2 id="protect">Launch protection</h2>
+      <p>Creators can cap how much of the supply a single account may hold during the first minutes after launch (for example 1% for 30 minutes). Buys that would push an account over the cap are rejected until the window ends.</p>
+
+      <h2 id="migration">Bonding and mainnet migration</h2>
+      <p><b>Bonding (before mainnet):</b> when 800M tokens are sold, the curve turns into a Rookery pool: the ZRO raised on the curve plus the 200M reserved tokens, priced with the same constant-product math as a DEX. The pool opens at exactly the curve's final price, so there is no jump; the small part of the raised ZRO that does not fit at that price buys and burns $臭企鹅. Buys and sells continue without any market-cap limit, so a token never freezes while it waits for its chain.</p>
+      <p>When the target network launches:</p>
+      <ol>
+        <li>Trading on Rookery is paused for that network and a final snapshot of every balance is published.</li>
+        <li>The token contract is deployed on the new chain with a fixed supply of 1,000,000,000.</li>
+        <li>Each holder receives exactly their Rookery balance, 1:1. Burned tokens stay burned.</li>
+        <li>The Rookery pool (or, for tokens that have not bonded yet, the curve's ZRO plus the unsold and reserved tokens) becomes the first DEX pool at exactly the last Rookery price. LP tokens are locked.</li>
+        <li>Holders can withdraw to their own wallets on the new chain.</li>
+      </ol>
+      <div class="callout"><b>Nothing to claim, nothing to connect.</b> Rookery will never ask you to sign anything on a third-party site for the migration.</div>
+
+      <h2 id="stellar">Stellar</h2>
+      <p>Stellar is the one network on Rookery that is already live. A Stellar token is not a pre-market bet: it trades for real from day one, and at <b>${fmtUsd(S.stats.stellar?.gradUsd || 46000)}</b> market cap it graduates on-chain into an Aquarius pool on Stellar mainnet. Everything below is specific to Stellar; the curve itself works exactly like the other networks.</p>
+
+      <h3>Deposits: XLM with your memo</h3>
+      <p>Open <a href="#/wallet" style="text-decoration:underline;color:var(--tx)">Wallet → XLM</a>. You get the Rookery Stellar address and a personal <b>memo</b>, which is your account id. Send XLM from any exchange or wallet <b>with that memo</b>.</p>
+      <ul>
+        <li>Deposits are credited within about a minute. The minimum is 1 XLM, the amount that activates a new Stellar account.</li>
+        <li>A deposit <b>without the memo</b> cannot be matched automatically. It is held and assigned manually. If the sending address is one you have already withdrawn to, Rookery recognises it as your wallet and credits you automatically.</li>
+        <li>Never copy addresses from your transaction history. Attackers send dust from look-alike addresses to get you to send to them instead.</li>
+      </ul>
+
+      <h3>Trading on the curve</h3>
+      <p>Stellar tokens pair with <b>XLM</b>. Buys and sells settle in the Rookery ledger at the curve price, and the full tax set applies on every trade: 0.5% platform to the $臭企鹅 burn reserve, plus the creator's marketing, burn and rewards taxes, all paid in XLM. Rewards accrue to holders pro rata and can be claimed at any time.</p>
+
+      <h3>The token exists on Stellar from launch</h3>
+      <p>The moment a Stellar token is created, Rookery issues it on-chain: a real Stellar asset with a fixed supply of 1,000,000,000, its own contract, and a home domain. It shows up on stellar.expert straight away and you can add the trustline immediately. The issuer stays open during the curve so burned tokens can be destroyed on-chain too; it is closed for good at graduation.</p>
+      <p>What does <b>not</b> happen at launch is liquidity. There is no Aquarius pool until the token graduates, so the only place to trade it is the Rookery curve.</p>
+
+      <h3>Graduation to Aquarius</h3>
+      <p>When a Stellar token reaches <b>${fmtUsd(S.stats.stellar?.gradUsd || 46000)}</b> market cap, Rookery graduates it on-chain automatically, in about a minute:</p>
+      <ol>
+        <li>Burns on-chain everything the curve burned, then locks the issuer account, so nobody can ever mint more.</li>
+        <li>Creates the token's Stellar Asset Contract and opens an <b>Aquarius</b> pool against XLM.</li>
+        <li>Deposits the XLM raised on the curve plus the 200M reserved tokens into the pool.</li>
+        <li>Locks the account that holds the pool shares, so the <b>LP is burned forever</b>: liquidity can never be pulled.</li>
+        <li>Holders can then withdraw their tokens to their own Stellar wallet and trade on Aquarius.</li>
+      </ol>
+      <div class="callout"><b>Who pays for graduation.</b> Nobody adds funds. The on-chain set-up is paid out of the XLM raised on the curve: 300,000 AQUA for the Aquarius pool (bought automatically, roughly 500 XLM at today's prices), plus 11 XLM of Stellar account reserves and network fees. That is about 1.2% of the raised XLM. The rest goes into the pool with the 200M tokens. The creator pays nothing and Rookery takes no cut of it.</div>
+
+      <h3>After graduation: taxes stop</h3>
+      <p>If the curve fills before the target is reached, the token keeps trading on a Rookery pool and graduates later, when it gets there.</p>
+      <p>Once the token is on Aquarius it is a normal Stellar asset, and Stellar assets cannot charge a fee on transfers. Trading on Aquarius therefore carries <b>no marketing, rewards or burn tax</b>, and Rookery no longer sees those trades. Taxes apply only on the Rookery curve. Burned tokens stay burned: they are never issued on Stellar, so the on-chain supply is 1,000,000,000 minus the burned amount. Rewards earned before graduation stay claimable on the token page.</p>
+      <div class="callout">A token that charges a fee on every transfer cannot be listed on Aquarius at all: the pool assumes it receives exactly the amount sent, so a transfer fee breaks its accounting and can cost liquidity providers money. That is why Stellar tokens here are plain assets and the taxes live on the curve.</div>
+
+      <h3>Withdrawing tokens: trustlines</h3>
+      <p>To receive a Stellar token in your own wallet you first add a <b>trustline</b> for it. Stellar lets anyone issue a token, so a wallet only accepts tokens it has explicitly been told to trust, identified by the pair <b>asset code + issuer</b>.</p>
+      <ul>
+        <li>Find the code and issuer on the token page after graduation, both with a copy button.</li>
+        <li>In Freighter: Assets → Add asset. In Lobstr: Add asset. Enter the code and the issuer address.</li>
+        <li>A trustline locks <b>0.5 XLM</b> as a reserve on your account. It is not a fee: you get it back when you remove the trustline.</li>
+        <li>XLM itself needs no trustline.</li>
+        <li>Rookery checks the trustline before sending. Without it the withdrawal is not sent, nothing is lost, and you get the code and issuer to add.</li>
+      </ul>
+
+      <h2 id="plaunch">$臭企鹅 buy &amp; burn</h2>
+      <div class="fig" style="display:grid;grid-template-columns:160px 1fr;gap:18px;align-items:center">
+        <img src="/assets/penguin/sticky.webp" alt="" style="border-radius:12px;filter:grayscale(1)">
+        <p style="margin:0"><b style="color:var(--tx)">Stinky Penguin ($臭企鹅)</b> is the mascot and the token behind Rookery. It lives on Robinhood Chain as a LayerZero OFT, with a 1:1 bridge to Zero at mainnet. <a href="https://stinkypenguin.xyz" target="_blank" rel="noopener" style="text-decoration:underline;color:var(--tx)">stinkypenguin.xyz</a></p>
+      </div>
+      <p>The 0.5% platform fee from every trade on Rookery, on every token and every network, is collected in the token's pair currency (ZRO or ETH) into the <b>$臭企鹅 burn reserve</b> (live in the header, now <b>${fmtUsd(S.stats.burnReserveUsd ?? S.stats.plaunchBurnUsd)}</b>).</p>
+      <ol>
+        <li>The reserve accumulates in ZRO from every buy and sell.</li>
+        <li>On a fixed schedule it is used to market-buy $臭企鹅 on Robinhood Chain.</li>
+        <li>Every bought $臭企鹅 is sent to the dead address and permanently burned. Each burn transaction is published on the Proofs page.</li>
+      </ol>
+      <p>Until $臭企鹅 trading opens, the reserve simply grows. More launches and more volume on Rookery means more penguins burned.</p>
+      <div class="peng-strip"><img src="/assets/penguin/allin.webp" alt=""><img src="/assets/penguin/atlas.webp" alt=""><img src="/assets/penguin/t17.webp" alt=""><img src="/assets/penguin/stay.webp" alt=""></div>
+
+      <h2 id="safety">Safety & proofs</h2>
+      <ul>
+        <li>All trades settle on a single serialized ledger: each trade either fully applies or not at all.</li>
+        <li>The total ZRO owed to users, the hot-wallet address and a Merkle root of all balances are published on the <a href="#/proofs" style="text-decoration:underline;color:var(--tx)">Proofs</a> page.</li>
+        <li>Withdrawals have per-transaction and daily limits and can be paused in an emergency.</li>
+      </ul>
+
+      <h2 id="risks">Risks</h2>
+      <p>Pre-mainnet tokens are extremely speculative. A network's launch can be delayed or changed. Rookery holds deposits in custody until you withdraw. Only use money you can afford to lose. Rookery and Stinky Penguin are not affiliated with LayerZero Labs, the LayerZero Foundation, Bryan Pellegrino, Upbit, Dunamu or Robinhood.</p>
+    </article>
+  </section>`;
+  $$('.toc a').forEach(a => a.onclick = (e) => { e.preventDefault(); document.getElementById(a.dataset.s)?.scrollIntoView({ behavior: 'smooth' }); });
+  requestAnimationFrame(() => drawCurve($('#cv1'), usd));
+}
+
+/* ═══════════ PROOFS ═══════════ */
+async function viewProofs(tab) {
+  document.title = 'Proofs — Rookery';
+  tab = tab === 'burns' ? 'burns' : 'reserves';
+  const [p, bn] = await Promise.all([api('/proofs'), api('/burns')]);
+  const ch = S.stats.chains;
+  const STEP = { queued: 'Reserve moving', transferred: 'In burn wallet', bridging: 'Bridging to Robinhood', bridged: 'Buying $臭企鹅', burned: 'Burned', failed: 'Failed' };
+  const txl = (base, h, label) => h ? `<a class="mono" style="letter-spacing:0;text-decoration:underline" target="_blank" rel="noopener" href="${base}/tx/${esc(h)}">${label} ↗</a>` : '<span class="mu">—</span>';
+  const statusTxt = !bn.token
+    ? `<b style="color:var(--tx)">Waiting for the $臭企鹅 listing on Robinhood Chain.</b> The reserve keeps growing; the first burn spends all of it the moment the pool is live.`
+    : bn.auto
+      ? `<b style="color:var(--tx)">Auto-burn is on.</b> Every ${bn.intervalH}h, when the reserve is at least ${bn.minZro} ZRO, up to ${bn.maxZro.toLocaleString()} ZRO is burned.${bn.nextAutoAt ? ` Next window: ${new Date(Math.max(bn.nextAutoAt, Date.now())).toUTCString().slice(5, 22)} UTC.` : ''}`
+      : '<b style="color:var(--tx)">Auto-burn is paused.</b> Burns are triggered manually by the team.';
+
+  app.innerHTML = `
+  <section class="wrap page">
+    <div class="page-h"><div><h1>Proofs</h1><p>What Rookery owes its users, where the ZRO sits, and every $臭企鹅 burn.</p></div></div>
+    <div class="panel" style="margin-bottom:18px"><div class="tabs-h">
+      <a href="#/proofs" class="${tab === 'reserves' ? 'on' : ''}" style="padding:9px 13px;border-radius:9px;font-weight:600;font-size:13px;${tab === 'reserves' ? 'background:var(--panel2)' : 'color:var(--tx2)'}">Reserves</a>
+      <a href="#/proofs/burns" class="${tab === 'burns' ? 'on' : ''}" style="padding:9px 13px;border-radius:9px;font-weight:600;font-size:13px;${tab === 'burns' ? 'background:var(--panel2)' : 'color:var(--tx2)'}">Burns <span class="cnt">${bn.jobs.filter(j => j.status === 'burned').length}</span></a>
+    </div></div>
+    <div id="pv"></div>
+  </section>`;
+
+  if (tab === 'reserves') {
+    $('#pv').innerHTML = `
+    <div class="stats" style="grid-template-columns:repeat(3,1fr);margin:0 0 18px">
+      <div><span class="mono mu">ZRO owed (balances + curves)</span><b>${(Number(p.owedTotal) || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b><span class="mu" style="font-size:12px">balances ${fmtZ(p.liabilities)} · curves ${(Number(p.curveZro) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}</span></div>
+      <div><span class="mono mu">$臭企鹅 burn reserve (pending)</span><b>${fmtZ(bn.pendingZro)} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(bn.pendingUsd)}</span></div>
+      <div><span class="mono mu">Latest Merkle root</span><b style="font-size:13px;font-family:var(--mono);word-break:break-all">${p.root ? esc(p.root.slice(0, 24)) + '…' : 'Not published yet'}</b></div>
+    </div>
+    ${(() => {
+      const tr = p.treasury; if (!tr || !tr.chains) return '';
+      const owed = Number(p.owedTotal || 0), curve = Number(p.curveZro || 0);
+      const cover = owed > 0 ? (tr.totals.held / owed) * 100 : 0;
+      const rows = Object.entries(tr.chains).map(([k, c]) => c.error
+        ? `<tr><td>${esc(c.label)}</td><td colspan="3" class="mu">unavailable right now</td><td class="mu hide-s">—</td></tr>`
+        : `<tr><td><b>${esc(c.label)}</b>${c.gasOk ? '' : ' <span class="tag" style="color:var(--dn);border-color:var(--dn)">NO GAS</span>'}</td>
+            <td class="r mono">${c.hotZro.toLocaleString('en-US', { maximumFractionDigits: 2 })}</td>
+            <td class="r mono hide-s">${c.depZro.toLocaleString('en-US', { maximumFractionDigits: 2 })}</td>
+            <td class="r mono"><b>${c.total.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></td>
+            <td class="r hide-s"><a class="btn sm ghost" target="_blank" rel="noopener" href="${c.explorer}/token/${p.zroToken}?a=${p.hotWallet}">${esc(c.label)} ↗</a></td></tr>`).join('');
+      return `<div class="panel" style="margin-bottom:18px"><div class="panel-h"><h3>Where the ZRO is</h3><span class="mu mono" style="font-size:12px">LIVE FROM CHAIN</span></div>
+      <div class="stats" style="grid-template-columns:repeat(4,1fr);margin:0 0 14px">
+        <div><span class="mono mu">Total held on-chain</span><b>${tr.totals.held.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b></div>
+        <div><span class="mono mu">ZRO balances</span><b>${fmtZ(p.liabilities)} ZRO</b></div>
+        <div><span class="mono mu">ZRO in curves & pools</span><b>${curve.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b></div>
+        <div><span class="mono mu">Coverage</span><b style="color:${cover >= 100 ? 'var(--up)' : 'var(--dn)'}">${cover.toFixed(0)}%</b></div>
+      </div>
+      <p class="mu" style="font-size:12.5px;margin:0 0 12px">Coverage compares everything held on-chain with everything we owe: ZRO balances plus the ZRO locked in every bonding curve and pool, which is what holders get if they sell.</p>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>Network</th><th class="r">Hot wallet</th><th class="r hide-s">Deposits</th><th class="r">Total ZRO</th><th class="r hide-s">Explorer</th></tr></thead><tbody>${rows}
+      <tr><td><b>All networks</b></td><td class="r mono">${tr.totals.hot.toLocaleString('en-US', { maximumFractionDigits: 2 })}</td><td class="r mono hide-s">${tr.totals.dep.toLocaleString('en-US', { maximumFractionDigits: 2 })}</td><td class="r mono"><b>${tr.totals.held.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></td><td class="hide-s"></td></tr></tbody></table></div>
+      <p class="mu" style="font-size:12.5px;margin-top:10px">Balances read directly from each chain. Deposit addresses are per user and are not listed here.</p></div>`;
+    })()}
+    ${(() => {
+      const te = p.treasury?.eth, e = p.eth; if (!te || !e) return '';
+      const cover = e.owed > 0 ? (te.held / e.owed) * 100 : null;
+      const n = (v, d = 5) => Number(v || 0).toLocaleString('en-US', { maximumFractionDigits: d });
+      const rows = Object.entries(te.chains).map(([k, c]) => c.error ? `<tr><td>${esc(c.label)}</td><td colspan="2" class="mu">unavailable right now</td></tr>`
+        : `<tr><td><b>${esc(c.label)}</b></td><td class="r mono">${n(c.hotEth)}</td><td class="r mono"><b>${n(c.total)}</b></td></tr>`).join('');
+      return `<div class="panel" style="margin-bottom:18px"><div class="panel-h"><h3>Where the ETH is</h3><span class="mu mono" style="font-size:12px">LIVE FROM CHAIN</span></div>
+      <div class="stats" style="grid-template-columns:repeat(4,1fr);margin:0 0 14px">
+        <div><span class="mono mu">ETH held on-chain</span><b>${n(te.held)} ETH</b></div>
+        <div><span class="mono mu">ETH balances</span><b>${n(e.balances)} ETH</b></div>
+        <div><span class="mono mu">ETH in curves & pools</span><b>${n(e.curves)} ETH</b></div>
+        <div><span class="mono mu">Coverage</span><b style="color:${cover === null || cover >= 100 ? 'var(--up)' : 'var(--dn)'}">${cover === null ? '—' : cover.toFixed(0) + '%'}</b></div>
+      </div>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>Network</th><th class="r">Hot wallet</th><th class="r">Total ETH</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="mu" style="font-size:12.5px;margin-top:10px">The hot wallet's ETH also pays network gas for every chain operation. Instant ETH⇄ZRO conversions: ${fmtUsd(p.desk?.volumeUsd || 0)} so far; open exposure ${n(Math.abs(p.desk?.eth || 0))} ETH.</p></div>`;
+    })()}
+    ${(() => {
+      const s = p.stellar;
+      if (!s) return '';
+      if (s.error) return `<div class="panel" style="margin-bottom:18px"><div class="panel-h"><h3>Where the XLM is</h3><span class="mu mono" style="font-size:12px">STELLAR</span></div><p class="mu" style="font-size:13px">Stellar balance unavailable right now: ${esc(s.error)}</p></div>`;
+      const n = (v, d = 2) => Number(v || 0).toLocaleString('en-US', { maximumFractionDigits: d });
+      const cover = s.owed > 0 ? (s.onchain / s.owed) * 100 : null;
+      return `<div class="panel" style="margin-bottom:18px"><div class="panel-h"><h3>Where the XLM is</h3><span class="mu mono" style="font-size:12px">LIVE FROM STELLAR ${s.net === 'mainnet' ? 'MAINNET' : 'TESTNET'}</span></div>
+      <div class="stats" style="grid-template-columns:repeat(4,1fr);margin:0 0 14px">
+        <div><span class="mono mu">XLM held on-chain</span><b>${n(s.onchain)} XLM</b><span class="mu" style="font-size:12px">${fmtUsd(s.onchain * (s.usd || 0))}</span></div>
+        <div><span class="mono mu">XLM balances</span><b>${n(s.balances)} XLM</b></div>
+        <div><span class="mono mu">XLM in curves &amp; pools</span><b>${n(s.curves)} XLM</b></div>
+        <div><span class="mono mu">Coverage</span><b style="color:${cover === null || cover >= 100 ? 'var(--up)' : 'var(--dn)'}">${cover === null ? '—' : cover.toFixed(0) + '%'}</b></div>
+      </div>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>Item</th><th class="r">XLM</th></tr></thead><tbody>
+        <tr><td><b>Hot wallet</b></td><td class="r mono">${n(s.onchain)}</td></tr>
+        <tr><td>Owed to users (balances)</td><td class="r mono">${n(s.balances)}</td></tr>
+        <tr><td>Locked in bonding curves and Rookery pools</td><td class="r mono">${n(s.curves)}</td></tr>
+        <tr><td>Moved into Aquarius pools at graduation</td><td class="r mono">${n(s.graduatedOut)}</td></tr>
+        <tr><td><b>Total owed</b></td><td class="r mono"><b>${n(s.owed)}</b></td></tr>
+      </tbody></table></div>
+      <p class="mu" style="font-size:12.5px;margin-top:10px">XLM that graduates into an Aquarius pool leaves custody: the liquidity now sits in the pool with its LP burned, and holders withdraw their tokens from Rookery to their own Stellar wallet. Stellar deposits are credited by memo, so the hot wallet also holds a small operating reserve.</p>
+      <div class="addr" style="margin-top:12px">${esc(s.hot)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><a class="btn sm ghost" target="_blank" rel="noopener" href="${s.explorer}/account/${esc(s.hot)}">Stellar explorer ↗</a></div></div>`;
+    })()}
+    ${(() => {
+      const pr = p.platform; if (!pr) return '';
+      const rows = [
+        ['Trades · 0.5% of every buy and sell', pr.tradingZro, pr.tradingUsd],
+        ['Withdrawals · network fee', pr.withdrawalZro, pr.withdrawalUsd],
+        ['Already spent buying & burning $臭企鹅', -pr.burnedZro, -pr.burnedUsd],
+      ];
+      return `<div class="panel" style="margin-bottom:18px"><div class="panel-h"><h3>Platform revenue</h3><span class="mu mono" style="font-size:12px">ALL TIME</span></div>
+      <div class="stats" style="grid-template-columns:repeat(3,1fr);margin:0 0 14px">
+        <div><span class="mono mu">Total earned</span><b>${pr.totalZro.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(pr.totalUsd)}</span></div>
+        <div><span class="mono mu">Spent on burns</span><b>${pr.burnedZro.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(pr.burnedUsd)}</span></div>
+        <div><span class="mono mu">Waiting in the burn reserve</span><b>${pr.reserveZro.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(pr.reserveUsd)}</span></div>
+      </div>
+      <table class="tbl"><tbody>${rows.map(([l, z, u]) => `<tr><td>${esc(l)}</td><td class="r mono">${z.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</td><td class="r mu">${fmtUsd(u)}</td></tr>`).join('')}</tbody></table>
+      <p class="mu" style="font-size:12.5px;margin-top:10px">The platform fee is 0.5% of every trade, charged in ZRO on both buys and sells. Creator marketing and rewards taxes go to the creator and the holders, not here.</p></div>`;
+    })()}
+    <div class="panel pb">
+      <h3 style="font-size:16px;margin-bottom:6px">Hot wallet</h3>
+      <p class="mu" style="font-size:13px;margin-bottom:12px">Pays withdrawals and funds the burns. Rule: its ZRO must cover everything owed to users plus the pending burn reserve.</p>
+      <div class="addr">${esc(p.hotWallet || 'Not configured')}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">${p.hotWallet ? Object.values(ch).map(c => `<a class="btn sm ghost" target="_blank" rel="noopener" href="${c.explorer}/token/${p.zroToken}?a=${p.hotWallet}">${esc(c.label)} ↗</a>`).join('') : ''}</div>
+      ${p.stellar && !p.stellar.error ? `<h3 style="font-size:16px;margin:22px 0 6px">Stellar hot wallet</h3>
+      <p class="mu" style="font-size:13px;margin-bottom:12px">Receives XLM deposits (each one carries the user's memo) and pays XLM and token withdrawals. Its XLM must cover every user balance plus every curve.</p>
+      <div class="addr">${esc(p.stellar.hot)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><a class="btn sm ghost" target="_blank" rel="noopener" href="${p.stellar.explorer}/account/${esc(p.stellar.hot)}">Stellar explorer ↗</a></div>` : ''}
+    </div>`;
+    return;
+  }
+
+  $('#pv').innerHTML = `
+    <div class="stats" style="grid-template-columns:repeat(4,1fr);margin:0 0 18px">
+      <div><span class="mono mu">Pending reserve</span><b>${fmtZ(bn.pendingZro)} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(bn.pendingUsd)}</span></div>
+      <div><span class="mono mu">ZRO spent on burns</span><b>${fmtZ(bn.totalZroBurned)} ZRO</b></div>
+      <div><span class="mono mu">$臭企鹅 burned</span><b>${fmtT(bn.totalTokensBurned)}</b></div>
+      <div><span class="mono mu">Burns</span><b>${bn.jobs.filter(j => j.status === 'burned').length}</b></div>
+    </div>
+    <div class="peng" style="margin:0 0 18px;grid-template-columns:280px 1fr">
+      <img src="/assets/penguin/sticky.webp" alt="">
+      <div class="peng-b" style="padding:24px">
+        <span class="mono mu">How a burn works</span>
+        <div class="flow" style="grid-template-columns:repeat(4,1fr)">
+          <div><span class="n">01</span><b>Reserve</b><span>0.5% of every trade, in ZRO.</span></div>
+          <div><span class="n">02</span><b>Burn wallet</b><span>ZRO moves from the hot wallet on ${esc(bn.sourceLabel || 'Arbitrum')}.</span></div>
+          <div><span class="n">03</span><b>Bridge</b><span>Relay swaps ZRO into ETH on Robinhood Chain.</span></div>
+          <div><span class="n">04</span><b>Buy & burn</b><span>Uniswap buys $臭企鹅 straight into the dead address.</span></div>
+        </div>
+        <p style="font-size:13.5px">${statusTxt}</p>
+      </div>
+    </div>
+    <div class="wallet" style="margin-bottom:18px">
+      <div class="panel pb"><span class="mono mu">Burn wallet</span><div class="addr" style="margin-top:10px">${esc(bn.burnWallet || 'Not configured')}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${bn.burnWallet ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="${bn.explorers.source}/address/${bn.burnWallet}">${esc(bn.sourceLabel)} ↗</a><a class="btn sm ghost" target="_blank" rel="noopener" href="${bn.explorers.robinhood}/address/${bn.burnWallet}">Robinhood Chain ↗</a>` : ''}</div></div>
+      <div class="panel pb"><span class="mono mu">$臭企鹅 on Robinhood Chain</span><div class="addr" style="margin-top:10px">${bn.token ? esc(bn.token) : 'Not listed yet'}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${bn.token ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="${bn.explorers.robinhood}/token/${bn.token}">Token ↗</a><a class="btn sm ghost" target="_blank" rel="noopener" href="${bn.explorers.robinhood}/token/${bn.token}?a=${bn.dead}">Burned at dEaD ↗</a>` : ''}</div></div>
+    </div>
+    <div class="panel"><div class="panel-h"><h3>Burn history</h3></div>
+      <div style="overflow:auto"><table class="tbl"><thead><tr><th>#</th><th>Status</th><th class="r">ZRO</th><th class="r">ETH used</th><th class="r">$臭企鹅 burned</th><th>Reserve move</th><th>Bridge</th><th>Burn tx</th><th class="r">When</th></tr></thead><tbody>
+      ${bn.jobs.length ? bn.jobs.map(j => `<tr>
+        <td class="mu">${j.id}</td>
+        <td><span class="st-tag ${j.status === 'burned' ? 'confirmed' : j.status === 'failed' ? 'failed' : ''}">${esc(STEP[j.status] || j.status)}</span>${j.note && j.status !== 'burned' ? `<div class="mu" style="font-size:11px;margin-top:4px;white-space:normal;max-width:240px">${esc(j.note)}</div>` : ''}</td>
+        <td class="r">${fmtZ(j.zro)}</td><td class="r">${B(j.ethIn) > 0n ? fmtZ(j.ethIn, 5) : '—'}</td><td class="r"><b>${B(j.tokensBurned) > 0n ? fmtT(j.tokensBurned) : '—'}</b></td>
+        <td>${txl(bn.explorers.source, j.txTransfer, 'transfer')}</td><td>${txl(bn.explorers.source, j.txBridge, 'relay')}</td><td>${txl(bn.explorers.robinhood, j.txBurn, 'burn')}</td>
+        <td class="r mu">${ago(j.updated)}</td></tr>`).join('')
+      : `<tr><td colspan="9"><div class="empty" style="border:0"><img src="/assets/penguin/t17.webp" alt="">No burns yet. The reserve is growing: <b style="color:var(--tx)">${fmtZ(bn.pendingZro)} ZRO</b> waiting for the first one.</div></td></tr>`}
+      </tbody></table></div>
+    </div>`;
+  if (bn.jobs.some(j => !['burned', 'failed'].includes(j.status))) setTimer(() => { if (location.hash.startsWith('#/proofs/burns')) viewProofs('burns'); }, 15000);
+}
+
+/* ═══════════ ROUTER ═══════════ */
+async function route() {
+  clearInterval(S.timer);
+  liveSub(['all'], null);
+  if (S.chart) { try { S.chart.remove(); } catch {} S.chart = null; }
+  const path = location.hash.replace(/^#/, '') || '/';
+  const [, a, b, c, d] = path.split('/');
+  $$('.nav a, .mnav a').forEach(x => x.classList.toggle('on',
+    (x.dataset.nav === 'explore' && (!a || a === 't')) || x.dataset.nav === a));
+  // on-chain launchpads: the UI takes the selected chain's colour
+  if (typeof ocTheme === 'function') {
+    ocTheme(a === 'chain' ? b : null);
+    if (a !== 'chain') $('#netLabel').textContent = S.net === 'zero' ? 'Zero · LayerZero' : S.net === 'giwa' ? 'GIWA · Upbit' : S.net === 'stellar' ? 'Stellar · on-chain' : 'All networks';
+    if (a === 'stellar') $('#netLabel').textContent = 'Stellar · on-chain';
+    document.documentElement.classList.toggle('st-page', a === 'stellar');
+  }
+  window.scrollTo(0, 0);
+  if (!S.stats) await loadStats();
+  try {
+    if (!a) await viewExplore();
+    else if (a === 'trading') await viewTrading();
+    else if (a === 't') await viewToken(b);
+    else if (a === 'create') await viewCreate(b);
+    else if (a === 'points') await viewPoints();
+    else if (a === 'wallet') await viewWallet();
+    else if (a === 'u') await viewProfile(decodeURIComponent(b || ''));
+    else if (a === 'login' || a === 'signup') viewAuth(a);
+    else if (a === 'docs') viewDocs();
+    else if (a === 'proofs') await viewProofs(b);
+    else if (a === 'chain' && typeof ocRoute === 'function') await ocRoute(b, c, d);
+    else if (a === 'stellar' && typeof stRoute === 'function') await stRoute(b, c);
+    else await viewExplore();
+  } catch (e) {
+    app.innerHTML = `<div class="wrap page"><div class="empty">Something went wrong: ${esc(e.message)}</div></div>`;
+  }
+}
+
+(async function boot() {
+  initNet();
+  fitHeader();
+  await Promise.all([loadStats(), loadMe()]);
+  // remember ?ref=… from a referral link until the person signs up
+  try { const r = new URLSearchParams(location.search).get('ref'); if (r) localStorage.setItem('pl_ref', r.slice(0, 20)); } catch { /* ignore */ }
+  liveConnect();
+  tickerInit();
+  loadHatches();
+  setInterval(loadStats, 30000);
+  setInterval(() => { const z = $('#zeroCd'); if (z) z.textContent = countdown(S.stats?.networks?.zero?.launchAt); }, 30000);
+  window.addEventListener('hashchange', route);
+  route();
+})();

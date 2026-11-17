@@ -1,0 +1,51 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: no key files
+        run: |
+          if git ls-files | grep -Ei '(^|/)\.(admin_key|master_mnemonic|master_xprv|dev\.vars)$|^\.staging/|\.testnet_burn$'; then
+            echo "::error::a secret file is tracked in git"; exit 1
+          fi
+
+  syntax:
+    name: syntax and audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: worker and site parse
+        run: |
+          node --check worker/index.js
+          node --check worker/stellar.js
+          node --check site/app.js
+      - name: no hardcoded keys in source
+        run: |
+          if grep -rIn --exclude-dir=node_modules -E '\bS[A-Z2-7]{55}\b|xprv[0-9A-Za-z]{50,}|github_pat_[A-Za-z0-9_]{20,}' worker site deploy.sh deploy-staging.sh 2>/dev/null; then
+            echo "::error::possible credential in source"; exit 1
+          fi
+      - name: dependency audit (informational)
+        continue-on-error: true
+        run: |
+          npm audit --audit-level=high || true
+          cd stellar && npm audit --audit-level=high || true

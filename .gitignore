@@ -1,0 +1,28 @@
+# secrets — never commit
+.admin_key
+.master_mnemonic
+.master_xprv
+.master_*
+.staging/
+.staging/.admin_key
+.staging/.xprv
+.dev.vars
+*.dev.vars
+.env
+.env.*
+.testnet_burn
+*.secret
+*.pem
+*.key
+
+# build / runtime
+node_modules/
+.wrangler/
+dist/
+build/
+*.log
+
+# local artifacts
+tools/*_result.json
+tools/fonts/*.zip
+.DS_Store

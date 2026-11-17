@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rookery — the Stinky Penguin launchpad</title>
+<meta name="description" content="Rookery is the Stinky Penguin launchpad for networks that are not live yet. Trade tokens for Zero (LayerZero) and GIWA today with ZRO or ETH, migrate 1:1 at mainnet. 0.5% of every trade buys and burns $臭企鹅.">
+<meta property="og:title" content="Rookery — where tokens hatch before their chain">
+<meta property="og:description" content="The Stinky Penguin launchpad. Trade tokens for Zero and GIWA before mainnet. 0.5% of every trade burns $臭企鹅.">
+<meta property="og:image" content="/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/assets/logo-64.png">
+<link rel="apple-touch-icon" href="/assets/logo-256.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=20261116xlm27">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#/"><img src="/assets/logo-64.png" alt="">Rookery<em>.</em><span class="by">by Stinky Penguin</span></a>
+    <nav class="nav">
+      <a href="#/" data-nav="explore">Explore</a>
+      <a href="#/trading" data-nav="trading">Trading</a>
+      <a href="#/create" data-nav="create">Create</a>
+      <a href="#/points" data-nav="points">Points</a>
+      <a href="#/docs" data-nav="docs">Docs</a>
+    </nav>
+    <div class="top-r">
+      <span class="pill hide-m num" id="zroPill"><span class="zro-ico" id="pxIco">Z</span><span id="pxLbl">ZRO</span><b id="zroPx">—</b><span id="zroCh" class="mono"></span></span>
+      <a class="pill hide-m num" id="burnPill" href="#/proofs/burns" title="0.5% of every trade buys &amp; burns $臭企鹅"><img src="/assets/penguin/mark.webp" alt="" style="width:14px;height:20px;filter:invert(1)"><span class="mono">$臭企鹅 BURN</span><b id="burnPx">—</b></a>
+      <a class="pill app-pill" id="appPill" href="#" title="Rookery for Android is coming soon"><svg class="and-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M17.6 9.48l1.84-3.18a.38.38 0 0 0-.66-.38l-1.86 3.22A11.4 11.4 0 0 0 12 8.2c-1.77 0-3.43.38-4.92.94L5.22 5.92a.38.38 0 0 0-.66.38L6.4 9.48A10.8 10.8 0 0 0 1 18h22a10.8 10.8 0 0 0-5.4-8.52zM7 15.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm10 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/></svg><span class="app-l">Android app</span><span class="soon">SOON</span></a>
+      <div class="sw">
+        <button class="pill sw-btn" id="netBtn"><span class="dot soon"></span><span id="netLabel">All networks</span><span class="mu">▾</span></button>
+        <div class="menu" id="netMenu">
+          <div class="menu-h">Networks</div>
+          <button class="mi" data-net=""><span class="net-ico all">∗</span><div><b>All networks</b></div><small>ALL</small></button>
+          <button class="mi" data-net="zero"><span class="net-ico">Ø</span><div><b>Zero</b><br><span class="mu" style="font-size:11.5px">by LayerZero</span></div><small id="zeroCd">30.11</small></button>
+          <button class="mi" data-net="giwa"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><b>GIWA</b><br><span class="mu" style="font-size:11.5px">by Upbit</span></div><small>TESTNET · TBA</small></button>
+          <button class="mi" data-net="stellar"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><b>Stellar</b><br><span class="mu" style="font-size:11.5px">by SDF · XLM</span></div><small>LIVE</small></button>
+          <div class="menu-h">Deposit</div>
+          <div style="padding:4px 11px 10px;font-size:12px;color:var(--tx2);line-height:1.6"><b style="color:var(--tx)">ZRO</b> · Ethereum · Base · Arbitrum · BNB Chain · Optimism<br><b style="color:var(--tx)">ETH</b> · Ethereum · Base · Arbitrum<br><b style="color:var(--tx)">XLM</b> · Stellar (with memo)</div>
+        </div>
+      </div>
+      <div id="acct"></div>
+    </div>
+  </div>
+  <div class="ticker" id="ticker" aria-label="Live trades">
+    <span class="tk-live"><i></i>LIVE</span>
+    <div class="tk-view"><div class="tk-track" id="tkTrack"></div></div>
+  </div>
+</header>
+
+<main id="app"></main>
+<nav class="mnav" aria-label="Main">
+  <a href="#/" data-nav="explore"><span>⌂</span>Explore</a>
+  <a href="#/trading" data-nav="trading"><span>⇅</span>Trading</a>
+  <a href="#/create" data-nav="create"><span>＋</span>Create</a>
+  <a href="#/points" data-nav="points"><span>★</span>Points</a>
+  <a href="#/wallet" data-nav="wallet"><span>◈</span>Wallet</a>
+  <a href="#/docs" data-nav="docs"><span>?</span>Docs</a>
+</nav>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div>
+      <a class="brand" href="#/"><img src="/assets/logo-64.png" alt="">Rookery<em>.</em><span class="by">by Stinky Penguin</span></a>
+      <p style="margin-top:14px">Rookery is the Stinky Penguin launchpad. Zero and GIWA tokens trade before their mainnet on Rookery's internal ledger in ZRO or ETH and migrate 1:1 on-chain at launch. Stellar tokens trade in XLM, exist on Stellar from launch and graduate into an Aquarius pool with the LP burned. 0.5% of every trade is used to buy and burn $臭企鹅, the Stinky Penguin token. Parody mascot, not affiliated with Bryan Pellegrino. Not affiliated with LayerZero Labs, Upbit/Dunamu, the Stellar Development Foundation or Aquarius. Tokens are highly speculative; nothing here is financial advice.</p>
+      <a class="app-foot" id="appFoot" href="#"><svg class="and-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M17.6 9.48l1.84-3.18a.38.38 0 0 0-.66-.38l-1.86 3.22A11.4 11.4 0 0 0 12 8.2c-1.77 0-3.43.38-4.92.94L5.22 5.92a.38.38 0 0 0-.66.38L6.4 9.48A10.8 10.8 0 0 0 1 18h22a10.8 10.8 0 0 0-5.4-8.52zM7 15.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm10 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/></svg><span>Android app · coming soon</span></a>
+    </div>
+    <nav><a href="#/docs">Docs</a><a href="#/proofs">Proofs</a><a href="#/proofs/burns">Burns</a><a href="https://stinkypenguin.xyz" target="_blank" rel="noopener">Stinky Penguin</a><a href="https://x.com/StinkyPenguinL0" target="_blank" rel="noopener">𝕏</a></nav>
+  </div>
+</footer>
+<div class="toast-wrap" id="toasts"></div>
+<script src="/app.js?v=20261116xlm27" defer></script>
+</body>
+</html>
