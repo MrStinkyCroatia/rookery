@@ -1,6 +1,7 @@
 // PreLaunch — launchpad for networks that are not live yet (Zero by LayerZero, GIWA).
 // Worker routes /api/* into one Durable Object (SQLite) => every trade is atomic.
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
+import { matchOrder, ORDER_TTL_MS } from './orders.js';
 import { HDNodeWallet, JsonRpcProvider, FallbackProvider, Network, FetchRequest, Wallet, Contract, Interface, Transaction, getAddress, isAddress, verifyMessage } from 'ethers';
 
 const WEI = 10n ** 18n;
@@ -305,6 +306,10 @@ export class Books {
     q(`CREATE TABLE IF NOT EXISTS st_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT, amount TEXT, status TEXT, txid TEXT DEFAULT '', created INTEGER, expires INTEGER)`);
     // sender addresses an admin has already resolved by hand: next deposit from the same address needs no memo
     q(`CREATE TABLE IF NOT EXISTS st_addr_users (addr TEXT PRIMARY KEY, user_id INTEGER, ts INTEGER)`);
+    // one-signature buys from a connected EVM wallet
+    q(`CREATE TABLE IF NOT EXISTS orders_evm (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT,
+       asset TEXT, amount TEXT, tagged TEXT, tag INTEGER, status TEXT, tokens TEXT DEFAULT '', txid TEXT DEFAULT '',
+       note TEXT DEFAULT '', created INTEGER, expires INTEGER)`);
     try { q(`ALTER TABLE markets ADD COLUMN st_issued INTEGER DEFAULT 0`); } catch { /* exists */ }
     q(`CREATE TABLE IF NOT EXISTS out_pending (id INTEGER PRIMARY KEY AUTOINCREMENT, transfer_id INTEGER, src_user INTEGER, chain TEXT, amount TEXT, txid TEXT, ts INTEGER)`);
     try { q(`ALTER TABLE out_pending ADD COLUMN raw TEXT`); } catch { /* exists */ }
@@ -1000,6 +1005,59 @@ export class Books {
     const owed = (this.bal(uid, 't:' + m.id) * B(m.acc_rew)) / ACC;
     const debt = row ? B(row.debt) : 0n;
     return owed > debt ? owed - debt : 0n;
+  }
+
+  /* ───────────── one-signature wallet buys ───────────── */
+  evmOrdersOn() { return this.meta('evm_orders') === '1'; }
+  evmOrderExpire() {
+    this.sql.exec(`UPDATE orders_evm SET status='expired' WHERE status='open' AND expires<?`, now());
+  }
+  evmOrderCreate(user, market, amountWei) {
+    if (!this.evmOrdersOn()) throw new Error('Wallet buys are not live yet');
+    const m = this.market(String(market || ''));
+    if (!m) throw new Error('Unknown token');
+    if (m.network === 'stellar') throw new Error('Stellar tokens are bought with a Stellar wallet');
+    if (m.migrated) throw new Error('This token already graduated');
+    const asset = qa(m);
+    const amt = B(amountWei);
+    if (amt < MIN_BUY[asset]) throw new Error(asset === 'eth' ? 'Minimum buy is 0.00005 ETH' : 'Minimum buy is 0.1 ZRO');
+    this.evmOrderExpire();
+    // a small unique tag on top of the amount tells two same-size payments apart without a contract
+    const used = new Set(this.sql.exec(`SELECT tag FROM orders_evm WHERE user_id=? AND status='open'`, user.id).toArray().map(r => Number(r.tag)));
+    let tag = Math.floor(Math.random() * 998) + 1;
+    for (let i = 0; i < 999 && used.has(tag); i++) tag = (tag % 998) + 1;
+    const tagged = amt + BigInt(tag);
+    const id = this.sql.exec(`INSERT INTO orders_evm (user_id,market,asset,amount,tagged,tag,status,created,expires)
+      VALUES (?,?,?,?,?,?,?,?,?)`, user.id, m.id, asset, amt.toString(), tagged.toString(), tag, 'open', now(), now() + ORDER_TTL_MS).one().last_insert_rowid;
+    const q = this.view(m);
+    return { id, market: m.id, asset, amount: tagged.toString(), base: amt.toString(), tag,
+      to: user.dep_address, expires: now() + ORDER_TTL_MS,
+      quote: { tokens: q.priceZro ? (Number(amt) / 1e18 / q.priceZro) : 0, priceUsd: q.priceUsd } };
+  }
+  // called right after a deposit is credited: does it settle an open order?
+  evmOrderFill(userId, asset, deltaWei) {
+    if (!this.evmOrdersOn()) return null;
+    this.evmOrderExpire();
+    const o = this.sql.exec(`SELECT * FROM orders_evm WHERE user_id=? AND asset=? AND status='open' AND expires>=?
+      ORDER BY id LIMIT 1`, userId, asset, now()).toArray()[0];
+    if (!o) return null;
+    const res = matchOrder({ amount: o.amount, tagged: o.tagged }, deltaWei);
+    if (res.action === 'none') return { order: o.id, action: 'none' };
+    if (res.action === 'cancel') {
+      this.sql.exec(`UPDATE orders_evm SET status='cancelled', note=? WHERE id=?`, 'paid ' + res.shortfall + ' wei short, kept as balance', o.id);
+      return { order: o.id, action: 'cancel' };
+    }
+    const u = this.sql.exec('SELECT * FROM users WHERE id=?', userId).toArray()[0];
+    if (!u) return null;
+    try {
+      const r = this.trade(u, { market: o.market, side: 'buy', amount: res.amount });
+      this.sql.exec(`UPDATE orders_evm SET status='filled', tokens=?, note=?, txid=? WHERE id=?`,
+        String(r.tokens || ''), res.exact ? 'exact tag match' : 'within tolerance', String(r.txid || ''), o.id);
+      return { order: o.id, action: 'fill', tokens: r.tokens };
+    } catch (e) {
+      this.sql.exec(`UPDATE orders_evm SET status='failed', note=? WHERE id=?`, String(e?.message || e).slice(0, 200), o.id);
+      return { order: o.id, action: 'failed', error: String(e?.message || e) };
+    }
   }
 
   /* ───────────── curve ───────────── */
@@ -1886,6 +1944,11 @@ export class Books {
           ON CONFLICT(user_id,chain) DO UPDATE SET last=excluded.last`, u.id, chain, cur.toString());
       });
     });
+    // deposits credited above may settle a one-signature order
+    for (const f of found) {
+      const uu = this.sql.exec('SELECT id FROM users WHERE username=?', f.user).toArray()[0];
+      if (uu) { try { const r = this.evmOrderFill(uu.id, 'zro', f.amount); if (r) f.order = r; } catch { /* next tick */ } }
+    }
     this.setMeta('balblk_' + chain, blk.toString()); // monotonic: every later read uses this block or newer
     if (users.length > 1) this.setMeta('scan_ok_' + chain, String(now()));
     return found;
@@ -1986,6 +2049,11 @@ export class Books {
           ON CONFLICT(user_id,chain) DO UPDATE SET last=excluded.last`, u.id, key, cur.toString());
       });
     });
+    // deposits credited above may settle a one-signature order
+    for (const f of found) {
+      const uu = this.sql.exec('SELECT id FROM users WHERE username=?', f.user).toArray()[0];
+      if (uu) { try { const r = this.evmOrderFill(uu.id, 'eth', f.amount); if (r) f.order = r; } catch { /* next tick */ } }
+    }
     this.setMeta('balblk_' + key, blk.toString());
     return found;
   }
@@ -3197,6 +3265,17 @@ export class Books {
         const found = this.sql.exec(`SELECT chain, amount, ts, COALESCE(asset,'zro') asset FROM transfers WHERE user_id=? AND kind='deposit' AND ts>? ORDER BY id`, user.id, since).toArray();
         this.setMeta(key, String(now()));
         return json({ ok: true, found, lastScanSec: Math.round((now() - Number(this.meta('scan_ok_ethereum') || now())) / 1000) });
+      }
+      if (method === 'POST' && p === '/wallet/order') {
+        if (!user) throw new Error('Log in first');
+        const b = await req.json();
+        return json({ ok: true, order: this.evmOrderCreate(user, b.market, b.amount) });
+      }
+      if (method === 'GET' && p === '/wallet/orders') {
+        if (!user) throw new Error('Log in first');
+        this.evmOrderExpire();
+        return json({ ok: true, live: this.evmOrdersOn(), orders: this.sql.exec(`SELECT id,market,asset,amount,tagged,status,tokens,note,created,expires
+          FROM orders_evm WHERE user_id=? ORDER BY id DESC LIMIT 10`, user.id).toArray() });
       }
       if (method === 'POST' && p === '/wallet/withdraw') { const body = await req.json(); return json(await this.wserial(() => this.withdrawTimed(user, body))); }
       if (method === 'POST' && p === '/rewards/claim') {

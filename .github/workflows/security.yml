@@ -45,7 +45,10 @@ jobs:
         run: |
           node --check worker/index.js
           node --check worker/stellar.js
+          node --check worker/orders.js
           node --check site/app.js
+      - name: order matching rules
+        run: node tools/test_order_match.mjs
       - name: no hardcoded keys in source
         run: |
           if grep -rIn --exclude-dir=node_modules -E '\bS[A-Z2-7]{55}\b|xprv[0-9A-Za-z]{50,}|github_pat_[A-Za-z0-9_]{20,}' worker site deploy.sh deploy-staging.sh 2>/dev/null; then
