@@ -545,6 +545,12 @@ export class Books {
   async stellarSendNow(force = false) {
     if (!this.stSendNowOn()) return { off: true };
     const st = await this.stellar();
+    // holders who linked a Stellar wallet after they bought: queue their tokens once, on the next tick
+    this.sql.exec(`INSERT OR IGNORE INTO st_out (user_id,market,pending,updated)
+      SELECT b.user_id, m.id, b.amount, ? FROM balances b JOIN users u ON u.id=b.user_id
+      JOIN markets m ON 't:' || m.id = b.asset
+      WHERE m.network='stellar' AND m.migrated=0 AND m.st_issuer IS NOT NULL AND m.st_issuer!=''
+        AND b.amount!='0' AND u.stellar_wallet IS NOT NULL AND u.stellar_wallet!=''`, now());
     const rows = this.sql.exec(`SELECT o.*, u.stellar_wallet FROM st_out o JOIN users u ON u.id=o.user_id
       WHERE CAST(o.pending AS REAL) > 0 AND (o.next_try<=? OR ?=1) ORDER BY o.updated LIMIT 15`, now(), force ? 1 : 0).toArray();
     const out = [];
@@ -629,6 +635,8 @@ export class Books {
       }
       this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,txid,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         u ? u.id : 0, 'deposit', 'stellar', amt.toString(), it.id, it.from || '', u ? 'confirmed' : 'unassigned', `tokens from wallet tx ${it.hash}`, now(), 't:' + m.id);
+      // a plain return stays in custody: mark it so the auto-send never bounces it back out
+      if (u && !intent) this.sql.exec(`INSERT OR IGNORE INTO st_out (user_id,market,pending,note,updated) VALUES (?,?,?,?,?)`, u.id, m.id, '0', 'returned to custody by the holder', now());
       if (intent) this.sql.exec(`UPDATE st_intents SET status='paid', txid=? WHERE id=?`, it.id, intent.id);
     });
     if (!u || !intent || m.migrated) return { user: u?.id, credited: amt.toString() };
