@@ -276,6 +276,26 @@ const STW = {
     toast('Signed in with ' + short(address));
     return address;
   },
+  async trust(marketId) {
+    const kind = await STW.detect();
+    if (!kind) throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+    const address = await STW.connect(kind);
+    const p = await api('/stellar/prep-trust', { market: marketId, address });
+    const signed = await STW.signTx(kind, address, p.xdr);
+    await api('/stellar/submit', { xdr: signed });
+    toast('Trustline added. Tokens you buy now arrive in this wallet.');
+  },
+  // sell tokens that are in the wallet: they go back to Rookery with a memo, the XLM comes straight back
+  async sell(marketId, tokensWei) {
+    const kind = await STW.detect();
+    if (!kind) throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+    const address = await STW.connect(kind);
+    const p = await api('/stellar/prep-sell', { market: marketId, amount: String(tokensWei), address });
+    const signed = await STW.signTx(kind, address, p.xdr);
+    const r = await api('/stellar/submit', { xdr: signed });
+    toast('Tokens sent. The sale runs on the curve and the XLM comes back to your wallet in about a minute.');
+    return r;
+  },
   // buy straight from the wallet: server builds the payment, the wallet signs it, we submit
   async buy(marketId, xlm) {
     const kind = await STW.detect();
@@ -1192,19 +1212,31 @@ async function viewToken(id) {
           <div class="kv"><span>Asset code</span><b>${esc(m.stellar.code)}</b><button class="mini" data-copy="${esc(m.stellar.code)}">Copy</button></div>
           <div class="kv"><span>Issuer</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(m.stellar.issuer)}</b><button class="mini" data-copy="${esc(m.stellar.issuer)}">Copy</button></div>
         </div>
-        <p class="mu" style="font-size:11.5px;line-height:1.55;margin:0">The token exists on Stellar from launch and the issuer stays open until graduation. Add the trustline now — 0.5 XLM reserve — so you can withdraw the moment the Aquarius pool opens at ${fmtUsd(m.stellar?.gradUsd || 46000)}.</p>
+        <p class="mu" style="font-size:11.5px;line-height:1.55;margin:0">${S.stats?.stellarSendNow
+          ? `Buy with a Stellar wallet and the tokens land in that wallet right after your buy. No pool can open before ${fmtUsd(m.stellar?.gradUsd || 46000)}: until graduation the token can sit in wallets but not in contracts, so there is one price, the curve.`
+          : `The token exists on Stellar from launch and the issuer stays open until graduation. Add the trustline now — 0.5 XLM reserve — so you can withdraw the moment the Aquarius pool opens at ${fmtUsd(m.stellar?.gradUsd || 46000)}.`}</p>
+        <div id="stWal"></div>
       </div>` : ''}
       ${m.network === 'stellar' && (m.migrated || m.stellar?.job) ? `<div class="panel pb st-grad">
         <span class="net-ico st" style="width:40px;height:40px"><img src="/assets/chains/stellar.svg" alt=""></span>
         <h3 style="font-size:16px;margin:12px 0 6px">${m.migrated ? 'Trading on Aquarius' : 'Graduating to Aquarius…'}</h3>
         <p class="mu" style="font-size:13px;line-height:1.55;margin-bottom:14px">${m.migrated
-          ? `$${esc(m.symbol)} reached ${fmtUsd(m.stellar?.gradUsd || 46000)}. Its liquidity sits in an Aquarius pool on Stellar and the LP is burned forever. Withdraw your tokens to a Stellar wallet (add a trustline for <b>${esc(m.stellar?.code || '')}</b> first) and trade them anywhere on Stellar.`
+          ? `$${esc(m.symbol)} reached ${fmtUsd(m.stellar?.gradUsd || 46000)}. Its liquidity sits in an Aquarius pool on Stellar and the LP is burned forever. Holders with a linked Stellar wallet get their tokens sent there automatically as soon as it has a trustline for <b>${esc(m.stellar?.code || '')}</b>; anyone else can withdraw them to any Stellar wallet.`
           : 'The curve is full. Rookery is issuing the token on Stellar, opening the Aquarius pool and burning the LP. This takes about a minute.'}</p>
         ${m.migrated ? `<div class="st-asset">
           <div class="kv"><span>Asset code</span><b>${esc(m.stellar?.code || '')}</b><button class="mini" data-copy="${esc(m.stellar?.code || '')}">Copy</button></div>
           <div class="kv"><span>Issuer</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(m.stellar?.issuer || '')}</b><button class="mini" data-copy="${esc(m.stellar?.issuer || '')}">Copy</button></div>
           <p class="mu" style="font-size:11.5px;line-height:1.55;margin:8px 0 12px">Add this asset in your Stellar wallet (Freighter: Assets → Add asset; Lobstr: Add asset) before withdrawing. A trustline locks 0.5 XLM as a reserve — you get it back if you remove it.</p>
         </div>
+        ${(() => {
+          const h = (S.me?.holdings || []).find(x => x.id === m.id);
+          if (!h) return '';
+          const dr = h.stellar?.drop, w = h.stellar?.wallet;
+          const msg = dr?.status === 'sent' ? `<span style="color:#3ddc97">✓</span> Your tokens were sent to your Stellar wallet <span class="mono">${esc(short(w || ''))}</span>.`
+            : w ? `Your <b>${esc(weiToStr(B(h.amount), 2))} $${esc(m.symbol)}</b> are sent automatically to <span class="mono">${esc(short(w))}</span> as soon as it has a trustline for <b>${esc(m.stellar?.code || '')}</b>. Nothing else to do.`
+            : `Sign in with a Stellar wallet (or link one in your wallet page) and your <b>${esc(weiToStr(B(h.amount), 2))} $${esc(m.symbol)}</b> are sent there automatically. You can also withdraw them by hand.`;
+          return `<div style="border:1px solid #26262c;border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.5;margin-bottom:12px">${msg}</div>`;
+        })()}
         <a class="btn lg wide" target="_blank" rel="noopener" href="https://aqua.network/pools/${esc(m.stellar?.pool || '')}/">Trade on Aquarius ↗</a>
         <a class="btn lg wide ghost" style="margin-top:8px" href="#/wallet">Withdraw to my Stellar wallet</a>` : '<div class="prog big"><i style="width:70%"></i></div>'}
       </div>` : ''}
@@ -1356,6 +1388,36 @@ async function viewToken(id) {
     }
     const maxw = m.maxBuyBps > 0 && Date.now() < m.maxBuyUntil;
     if (maxw && !$('#maxw')) $('#est').insertAdjacentHTML('beforebegin', `<div id="maxw" class="warn" style="margin:12px 0 0">Launch protection: max ${(m.maxBuyBps / 100).toFixed(2)}% of supply per wallet for ${Math.ceil((m.maxBuyUntil - Date.now()) / 60000)} more min.</div>`);
+  }
+
+  /* the holder's own Stellar wallet: balance there, tokens on their way, trustline and sell-from-wallet */
+  if ($('#stWal') && S.me?.stellarWallet && S.stats?.stellarSendNow) {
+    const paintWal = async () => {
+      const box = $('#stWal'); if (!box) return;
+      let h;
+      try { h = await api(`/stellar/holding?market=${encodeURIComponent(m.id)}&address=${encodeURIComponent(S.me.stellarWallet)}`); } catch { return; }
+      const q = B(h.queued || '0');
+      box.innerHTML = `<div style="border:1px solid #26262c;border-radius:10px;padding:10px 12px;margin-top:10px;font-size:12.5px;line-height:1.55">
+        <div class="kv"><span>Your wallet ${esc(short(S.me.stellarWallet))}</span><b>${h.trust ? esc(Number(h.wallet || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })) + ' $' + esc(m.symbol) : 'no trustline yet'}</b></div>
+        ${q > 0n ? `<div class="mu" style="font-size:11.5px">On its way: ${esc(weiToStr(q, 2))} $${esc(m.symbol)}${h.note ? ' · ' + esc(h.note) : ''}</div>` : ''}
+        ${!h.trust ? `<button class="btn sm wide" id="stTrust" style="margin-top:8px">Add trustline for ${esc(m.stellar.code)} (0.5 XLM reserve)</button>` : ''}
+        ${h.trust && Number(h.wallet) > 0 ? `<div style="display:flex;gap:6px;margin-top:8px"><input id="stSellAmt" class="inp" inputmode="decimal" placeholder="Amount" style="flex:1;min-width:0">
+          <button class="btn sm ghost" id="stSellMax">Max</button><button class="btn sm" id="stSell">Sell from wallet</button></div>
+          <div class="mu" style="font-size:11px;margin-top:4px">One signature. The XLM comes back to this wallet.</div>` : ''}
+      </div>`;
+      if ($('#stTrust')) $('#stTrust').onclick = async () => { try { await STW.trust(m.id); setTimeout(paintWal, 4000); } catch (e) { toast(esc(e.message || e), 'bad'); } };
+      if ($('#stSellMax')) $('#stSellMax').onclick = () => { $('#stSellAmt').value = String(h.wallet); };
+      if ($('#stSell')) $('#stSell').onclick = async () => {
+        const v = Number($('#stSellAmt').value || 0);
+        if (!(v > 0) || v > Number(h.wallet)) return toast('Enter an amount you hold in the wallet', 'bad');
+        const b = $('#stSell'); b.disabled = true; b.textContent = 'Waiting for your wallet…';
+        try { await STW.sell(m.id, toWei(String(v))); setTimeout(paintWal, 8000); }
+        catch (e) { toast(esc(e.message || e), 'bad'); }
+        finally { b.disabled = false; b.textContent = 'Sell from wallet'; }
+      };
+    };
+    paintWal();
+    const iv = setInterval(() => { if (!$('#stWal')) return clearInterval(iv); paintWal(); }, 15000);
   }
 
   /* trade box */

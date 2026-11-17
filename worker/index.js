@@ -310,6 +310,15 @@ export class Books {
     q(`CREATE TABLE IF NOT EXISTS st_intents (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT, amount TEXT, status TEXT, txid TEXT DEFAULT '', created INTEGER, expires INTEGER)`);
     // sender addresses an admin has already resolved by hand: next deposit from the same address needs no memo
     q(`CREATE TABLE IF NOT EXISTS st_addr_users (addr TEXT PRIMARY KEY, user_id INTEGER, ts INTEGER)`);
+    // before graduation (when switched on): tokens bought by a holder with a linked Stellar wallet go straight to that wallet
+    q(`CREATE TABLE IF NOT EXISTS st_out (user_id INTEGER, market TEXT, pending TEXT DEFAULT '0', sent TEXT DEFAULT '0', note TEXT DEFAULT '',
+       tries INTEGER DEFAULT 0, next_try INTEGER DEFAULT 0, updated INTEGER, PRIMARY KEY (user_id, market))`);
+    try { q(`ALTER TABLE st_intents ADD COLUMN side TEXT DEFAULT 'buy'`); } catch { /* exists */ }
+    try { q(`ALTER TABLE st_intents ADD COLUMN address TEXT`); } catch { /* exists */ }
+    // after graduation, every holder with a linked Stellar wallet gets the tokens sent automatically
+    q(`CREATE TABLE IF NOT EXISTS st_drops (id INTEGER PRIMARY KEY AUTOINCREMENT, market TEXT, user_id INTEGER, address TEXT,
+       status TEXT, amount TEXT DEFAULT '', txid TEXT DEFAULT '', note TEXT DEFAULT '', tries INTEGER DEFAULT 0, next_try INTEGER DEFAULT 0,
+       created INTEGER, updated INTEGER, UNIQUE(market, user_id))`);
     // one-signature buys from a connected EVM wallet
     q(`CREATE TABLE IF NOT EXISTS orders_evm (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT,
        asset TEXT, amount TEXT, tagged TEXT, tag INTEGER, status TEXT, tokens TEXT DEFAULT '', txid TEXT DEFAULT '',
@@ -418,10 +427,14 @@ export class Books {
       catch (e) { if (e.status === 404) return { credited, note: 'hot account not funded yet' }; throw e; }
       for (const it of r.items) {
         if (this.sql.exec(`SELECT 1 FROM transfers WHERE chain='stellar' AND txid=?`, it.id).toArray().length) continue;
+        if (it.asset && it.asset !== 'native') {
+          try { const r = await this.stTokenInflow(it); if (r) credited.push({ tokens: r }); } catch (e) { credited.push({ tokenError: String(e?.message || e).slice(0, 120) }); }
+          continue;
+        }
         const memoStr = String(it.memo || '').trim();
         const im = memoStr.match(/^r(\d{1,9})$/);
         if (im) {
-          const it2 = this.sql.exec('SELECT * FROM st_intents WHERE id=? AND status=?', Number(im[1]), 'open').toArray()[0];
+          const it2 = this.sql.exec(`SELECT * FROM st_intents WHERE id=? AND status=? AND COALESCE(side,'buy')='buy'`, Number(im[1]), 'open').toArray()[0];
           if (it2 && it2.expires > now() && !this.sql.exec(`SELECT 1 FROM transfers WHERE chain='stellar' AND txid=?`, it.id).toArray().length) {
             const amt2 = xlm2wei(it.amount);
             this.ctx.storage.transactionSync(() => {
@@ -521,6 +534,177 @@ export class Books {
     }
     return out;
   }
+  stSendNowOn() { return this.meta('st_send_now') === '1'; }
+  // the asset must refuse contracts (pools) before any token leaves custody
+  async stEnsureAuth(m) {
+    if (this.meta('st_auth_' + m.id) === '1') return;
+    const st = await this.stellar();
+    await st.requireAuth({ code: m.st_code, issuerKp: await this.stIssuer(m.id) });
+    this.setMeta('st_auth_' + m.id, '1');
+  }
+  async stellarSendNow(force = false) {
+    if (!this.stSendNowOn()) return { off: true };
+    const st = await this.stellar();
+    const rows = this.sql.exec(`SELECT o.*, u.stellar_wallet FROM st_out o JOIN users u ON u.id=o.user_id
+      WHERE CAST(o.pending AS REAL) > 0 AND (o.next_try<=? OR ?=1) ORDER BY o.updated LIMIT 15`, now(), force ? 1 : 0).toArray();
+    const out = [];
+    const unit = 100_000_000_000n;
+    for (const r of rows) {
+      const m = this.market(r.market);
+      const u = this.sql.exec('SELECT * FROM users WHERE id=?', r.user_id).toArray()[0];
+      if (!m || m.migrated || !m.st_issuer || !u?.stellar_wallet) { this.sql.exec(`UPDATE st_out SET pending='0', note=? WHERE user_id=? AND market=?`, m?.migrated ? 'graduated: sent by the graduation drop' : 'no wallet', r.user_id, r.market); continue; }
+      const bal = this.bal(u.id, 't:' + m.id);
+      let amt = B(r.pending) < bal ? B(r.pending) : bal;
+      amt = (amt / unit) * unit;
+      if (amt <= 0n) { this.sql.exec(`UPDATE st_out SET pending='0' WHERE user_id=? AND market=?`, u.id, m.id); continue; }
+      let tb;
+      try { tb = await st.tokenBalance(u.stellar_wallet, m.st_code, m.st_issuer); } catch { tb = undefined; }
+      if (tb === undefined) { this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 60e3, 'Horizon unavailable', u.id, m.id); continue; }
+      if (!tb || tb.balance === null) {
+        this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 5 * 60e3, `add a trustline for ${m.st_code} to receive the tokens`, u.id, m.id);
+        continue;
+      }
+      try { await this.stEnsureAuth(m); } catch (e) { this.sql.exec('UPDATE st_out SET next_try=?, note=? WHERE user_id=? AND market=?', now() + 60e3, 'auth: ' + String(e.message).slice(0, 100), u.id, m.id); continue; }
+      // settle holder rewards on what leaves, exactly like a sell does
+      let tid;
+      this.ctx.storage.transactionSync(() => {
+        this.settle(u.id, m);
+        this.addBal(u.id, 't:' + m.id, -amt);
+        this.resetDebt(u.id, this.market(m.id));
+        tid = this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
+          u.id, 'withdrawal', 'stellar', amt.toString(), u.stellar_wallet, 'pending', 'sent to your wallet after your buy', now(), 't:' + m.id).one().id;
+      });
+      try {
+        const res = await st.payAssetAuth(u.stellar_wallet, m.st_code, await this.stIssuer(m.id), Math.floor(Number(amt / unit)) / 1e7);
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec(`UPDATE transfers SET status='sent', txid=? WHERE id=?`, res.hash, tid);
+          const cur = this.sql.exec('SELECT pending, sent FROM st_out WHERE user_id=? AND market=?', u.id, m.id).one();
+          const left = B(cur.pending) - amt;
+          this.sql.exec(`UPDATE st_out SET pending=?, sent=?, tries=0, note='', updated=? WHERE user_id=? AND market=?`,
+            (left > 0n ? left : 0n).toString(), (B(cur.sent) + amt).toString(), now(), u.id, m.id);
+        });
+        out.push({ user: u.username, market: m.id, amount: amt.toString(), tx: res.hash });
+      } catch (e) {
+        this.ctx.storage.transactionSync(() => {
+          if (this.sql.exec('SELECT status FROM transfers WHERE id=?', tid).one().status !== 'pending') return;
+          this.settle(u.id, this.market(m.id));
+          this.addBal(u.id, 't:' + m.id, amt);
+          this.resetDebt(u.id, this.market(m.id));
+          this.sql.exec(`UPDATE transfers SET status='failed', note=? WHERE id=?`, 'not sent: ' + String(e.message).slice(0, 150), tid);
+          this.sql.exec('UPDATE st_out SET tries=tries+1, next_try=?, note=? WHERE user_id=? AND market=?', now() + (r.tries + 1) * 2 * 60e3, String(e.message).slice(0, 150), u.id, m.id);
+        });
+      }
+    }
+    // every few minutes: authorize trustlines holders opened themselves, so they can pass tokens to each other
+    if (now() - Number(this.meta('st_authz_last') || 0) > 5 * 60e3) {
+      this.setMeta('st_authz_last', String(now()));
+      for (const m of this.sql.exec(`SELECT * FROM markets WHERE network='stellar' AND migrated=0 AND st_issuer IS NOT NULL AND st_issuer!=''`).toArray()) {
+        if (this.meta('st_auth_' + m.id) !== '1') continue;
+        try { const n = await st.authorizeTrustlines(m.st_code, await this.stIssuer(m.id)); if (n) out.push({ market: m.id, authorized: n }); } catch { /* next round */ }
+      }
+    }
+    return { sent: out.length, out };
+  }
+  // tokens arriving at the hot wallet: a sell from a holder's wallet (memo s<intent>), or a plain return
+  async stTokenInflow(it) {
+    const st = await this.stellar();
+    const m = this.sql.exec('SELECT * FROM markets WHERE st_code=? AND st_issuer=?', it.code, it.issuer).toArray()[0];
+    const amt = xlm2wei(it.amount);
+    if (!m) {
+      this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,txid,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        0, 'deposit', 'stellar', amt.toString(), it.id, it.from || '', 'unassigned', `unknown asset ${it.code}:${String(it.issuer).slice(0, 8)} tx ${it.hash}`, now(), 'other');
+      return null;
+    }
+    const memoStr = String(it.memo || '').trim();
+    const sm = memoStr.match(/^s(\d{1,9})$/);
+    const intent = sm ? this.sql.exec(`SELECT * FROM st_intents WHERE id=? AND side='sell' AND status='open'`, Number(sm[1])).toArray()[0] : null;
+    let u = intent ? this.sql.exec('SELECT * FROM users WHERE id=?', intent.user_id).toArray()[0] : null;
+    if (!u && it.from) u = this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', it.from).toArray()[0] || null;
+    if (!u && it.from) { const k = this.sql.exec('SELECT user_id FROM st_addr_users WHERE addr=?', it.from).toArray()[0]; if (k) u = this.sql.exec('SELECT * FROM users WHERE id=?', k.user_id).toArray()[0]; }
+    this.ctx.storage.transactionSync(() => {
+      if (u) {
+        this.settle(u.id, m);
+        this.addBal(u.id, 't:' + m.id, amt);
+        this.resetDebt(u.id, this.market(m.id));
+      }
+      this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,txid,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        u ? u.id : 0, 'deposit', 'stellar', amt.toString(), it.id, it.from || '', u ? 'confirmed' : 'unassigned', `tokens from wallet tx ${it.hash}`, now(), 't:' + m.id);
+      if (intent) this.sql.exec(`UPDATE st_intents SET status='paid', txid=? WHERE id=?`, it.id, intent.id);
+    });
+    if (!u || !intent || m.migrated) return { user: u?.id, credited: amt.toString() };
+    // sell on the curve, then send the XLM straight back to the wallet the tokens came from
+    try {
+      const r = this.trade(u, { market: m.id, side: 'sell', amount: amt.toString() });
+      const xlmOut = B(r.zro);
+      this.sql.exec(`UPDATE st_intents SET status='done' WHERE id=?`, intent.id);
+      const to = intent.address || it.from;
+      let tid;
+      this.ctx.storage.transactionSync(() => {
+        this.addBal(u.id, 'xlm', -xlmOut);
+        tid = this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
+          u.id, 'withdrawal', 'stellar', xlmOut.toString(), to, 'pending', 'proceeds of a sell from your wallet', now(), 'xlm').one().id;
+      });
+      try {
+        const res = await st.payXlm(to, wei2xlm(xlmOut));
+        this.sql.exec(`UPDATE transfers SET status='sent', txid=? WHERE id=?`, res.hash, tid);
+      } catch (e) {
+        this.ctx.storage.transactionSync(() => {
+          this.addBal(u.id, 'xlm', xlmOut);
+          this.sql.exec(`UPDATE transfers SET status='failed', note=? WHERE id=?`, 'kept on your Rookery balance: ' + String(e.message).slice(0, 120), tid);
+        });
+      }
+      return { user: u.id, sold: amt.toString(), xlm: xlmOut.toString() };
+    } catch (e) {
+      this.sql.exec(`UPDATE st_intents SET status='paid', txid=? WHERE id=?`, String(e.message).slice(0, 60), intent.id);
+      return { user: u.id, credited: amt.toString(), sellError: String(e.message) };
+    }
+  }
+  // graduated tokens leave custody on their own: every holder with a linked Stellar wallet and a trustline gets them;
+  // holders without a trustline are retried until they add one (30 days), the rest keep them on Rookery to withdraw by hand
+  async stellarDrops(force = false) {
+    if (this.meta('st_drops_off') === '1') return { off: true };
+    const grads = this.sql.exec(`SELECT id FROM markets WHERE network='stellar' AND migrated=1 AND st_issuer IS NOT NULL AND st_issuer!=''`).toArray();
+    if (!grads.length) return { sent: 0 };
+    for (const g of grads) {
+      this.sql.exec(`INSERT OR IGNORE INTO st_drops (market,user_id,address,status,created,updated)
+        SELECT ?, b.user_id, u.stellar_wallet, 'queued', ?, ? FROM balances b JOIN users u ON u.id=b.user_id
+        WHERE b.asset=? AND b.amount!='0' AND u.stellar_wallet IS NOT NULL AND u.stellar_wallet!=''`, g.id, now(), now(), 't:' + g.id);
+    }
+    this.sql.exec(`UPDATE st_drops SET status='expired', note='no trustline after 30 days: tokens stay on Rookery', updated=?
+      WHERE status='no_trustline' AND created<?`, now(), now() - 30 * 86400e3);
+    const rows = this.sql.exec(`SELECT * FROM st_drops WHERE status IN ('queued','no_trustline','retry') AND (next_try<=? OR ?=1)
+      ORDER BY id LIMIT 15`, now(), force ? 1 : 0).toArray();
+    const H = ST_NETS[this.stNet()].horizon;
+    const out = [];
+    const upd = (id, f) => this.sql.exec(`UPDATE st_drops SET status=?, note=?, next_try=?, tries=?, amount=COALESCE(?,amount), txid=COALESCE(?,txid), updated=? WHERE id=?`,
+      f.status, f.note || '', f.next || 0, f.tries ?? 0, f.amount ?? null, f.txid ?? null, now(), id);
+    for (const r of rows) {
+      const m = this.market(r.market);
+      const u = this.sql.exec('SELECT * FROM users WHERE id=?', r.user_id).toArray()[0];
+      const unit = 100_000_000_000n;                                  // Stellar keeps 7 decimals
+      const sendable = (this.bal(r.user_id, 't:' + r.market) / unit) * unit;
+      if (!u || sendable <= 0n) { upd(r.id, { status: 'done', note: 'nothing left to send', tries: r.tries }); continue; }
+      const addr = u.stellar_wallet || r.address;
+      let acct;
+      try {
+        const res = await fetch(`${H}/accounts/${addr}`, { signal: AbortSignal.timeout(8000) });
+        acct = res.status === 404 ? 'missing' : res.ok ? await res.json() : null;
+      } catch { acct = null; }
+      if (!acct) { upd(r.id, { status: r.status, note: 'Horizon unavailable, retrying', next: now() + 60e3, tries: r.tries }); continue; }
+      if (acct === 'missing') { upd(r.id, { status: 'no_trustline', note: 'wallet not activated on Stellar yet', next: now() + 30 * 60e3, tries: r.tries }); continue; }
+      const has = (acct.balances || []).some(b => b.asset_code === m.st_code && b.asset_issuer === m.st_issuer);
+      if (!has) { upd(r.id, { status: 'no_trustline', note: `add a trustline for ${m.st_code} to receive the tokens`, next: now() + 10 * 60e3, tries: r.tries }); continue; }
+      try {
+        const w = await this.withdrawStellar(u, { to: addr, amount: sendable.toString(), asset: 't:' + m.id });
+        upd(r.id, { status: 'sent', note: 'sent automatically after graduation', tries: r.tries, amount: sendable.toString(), txid: w.txid });
+        out.push({ market: m.id, user: u.username, amount: sendable.toString(), tx: w.txid });
+      } catch (e) {
+        const tries = r.tries + 1;
+        upd(r.id, { status: tries >= 8 ? 'failed' : 'retry', note: String(e?.message || e).slice(0, 160), next: now() + tries * 5 * 60e3, tries });
+      }
+    }
+    return { sent: out.length, out };
+  }
   async stellarCron() {
     // a Stellar token that failed to mint at creation gets another try on the next tick
     const issued = [], _cand = this.sql.exec(`SELECT id, st_issued, created FROM markets WHERE network='stellar' AND (st_issuer IS NULL OR st_issuer='') ORDER BY created LIMIT 5`).toArray();
@@ -533,7 +717,9 @@ export class Books {
       try { if (this.stMaybeGraduate(m.id)) queued.push(m.id); } catch { /* next tick */ }
     }
     const [scan, jobs] = await Promise.all([this.stellarScan().catch(e => ({ error: String(e?.message || e) })), this.stellarJobs().catch(e => [{ error: String(e?.message || e) }])]);
-    return { scan, jobs, issued, queued, _cand: _cand.length };
+    const sendNow = await this.stellarSendNow().catch(e => ({ error: String(e?.message || e) }));
+    const drops = await this.stellarDrops().catch(e => ({ error: String(e?.message || e) }));
+    return { scan, jobs, issued, queued, sendNow, drops, _cand: _cand.length };
   }
   async withdrawStellar(user, { to, amount, asset, memo }) {
     if (this.meta('withdrawals_paused') === '1') throw new Error('Withdrawals are paused for maintenance');
@@ -1332,6 +1518,12 @@ export class Books {
       } else res = this.tradeCore(user, market, side, amt);
     });
     const mf = this.market(market), q = qa(mf);
+    if (side === 'buy' && mf.network === 'stellar' && mf.st_issuer && !mf.migrated && this.stSendNowOn() && user.stellar_wallet && B(res.tokens || 0) > 0n) {
+      this.sql.exec(`INSERT OR IGNORE INTO st_out (user_id,market,pending,updated) VALUES (?,?,?,?)`, user.id, mf.id, '0', now());
+      const row = this.sql.exec('SELECT pending FROM st_out WHERE user_id=? AND market=?', user.id, mf.id).one();
+      this.sql.exec('UPDATE st_out SET pending=?, next_try=0 WHERE user_id=? AND market=?', (B(row.pending) + B(res.tokens)).toString(), user.id, mf.id);
+      this._stSendKick = true;
+    }
     // points for real volume: 10 per $1 traded, capped per trade so nobody farms the counter
     const usd = (Number(B(res.zro)) / 1e18) * this.usdOf(q);
     const pts = Math.min(20000, Math.round(usd * 10));
@@ -1341,6 +1533,7 @@ export class Books {
     for (const a of this._pa || []) this.award(a.u, a.kind, a.amount, a.ref);
     this._pa = [];
     if (this._stKick) { this._stKick = false; this.wserial(() => this.stellarJobs()).catch(() => {}); }
+    if (this._stSendKick) { this._stSendKick = false; this.ctx.waitUntil(this.wserial(() => this.stellarSendNow()).catch(() => {})); }
     return { ok: true, ...res, points: pts, quote: mf.quote || 'ZRO', market: this.view(mf) };
   }
   // one trade in the market's own quote asset; must run inside a transaction
@@ -2506,7 +2699,7 @@ export class Books {
           netTokens: (() => { const o = { zero: 0, giwa: 0, stellar: 0 }; for (const r of this.sql.exec('SELECT network, COUNT(*) c FROM markets GROUP BY network').toArray()) o[r.network] = r.c; return o; })(),
           traders: this.sql.exec('SELECT COUNT(*) c FROM users').one().c,
           networks: NETWORKS, chains: Object.fromEntries(Object.entries(CHAINS).map(([k, v]) => [k, { label: v.label, explorer: v.explorer, chainId: v.chainId }])),
-          walletBuy: this.evmOrdersOn(), zroToken: ZRO_TOKEN,
+          walletBuy: this.evmOrdersOn(), zroToken: ZRO_TOKEN, stellarSendNow: this.stSendNowOn(),
           tgBot: this.meta('tg_bot') || '', zroToken: ZRO_TOKEN, curve: { supply: CURVE.supply.toString(), curve: CURVE.curve.toString(), vZro: CURVE.vZro.toString(), vTok: CURVE.vTok.toString() },
         });
       }
@@ -2719,8 +2912,45 @@ export class Books {
         const id = this.sql.exec('SELECT last_insert_rowid() id').one().id;
         const st = await this.stellar();
         const memo = 'r' + id;
-        const xdrB64 = await st.buildPaymentXdr({ from, to: st.hotAddress, amount: Number(amt) / 1e18, memo });
+        const trust = this.stSendNowOn() && m.st_issuer && !m.migrated ? { code: m.st_code, issuer: m.st_issuer } : null;
+        const xdrB64 = await st.buildPaymentXdr({ from, to: st.hotAddress, amount: Number(amt) / 1e18, memo, trust });
         return json({ ok: true, id, memo, xdr: xdrB64, address: st.hotAddress });
+      }
+      // sell tokens that sit in the holder's own wallet: one signature sends them back with a memo, XLM comes back
+      if (method === 'POST' && p === '/stellar/prep-sell') {
+        const b = await req.json();
+        const m = this.market(String(b.market || ''));
+        if (!m || m.network !== 'stellar' || !m.st_issuer) throw new Error('Not a Stellar token');
+        if (m.migrated) throw new Error('This token trades on Aquarius now');
+        const from = String(b.address || '').trim();
+        if (!/^G[A-Z2-7]{55}$/.test(from)) throw new Error('Connect your Stellar wallet first');
+        const owner = user || this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', from).toArray()[0];
+        if (!owner) throw new Error('Sign in with this wallet to sell');
+        const amt = B(b.amount);
+        if (amt < 100_000_000_000n) throw new Error('Enter an amount');
+        const st = await this.stellar();
+        this.sql.exec('INSERT INTO st_intents (user_id,market,amount,status,created,expires,side,address) VALUES (?,?,?,?,?,?,?,?)', owner.id, m.id, amt.toString(), 'open', now(), now() + 30 * 60e3, 'sell', from);
+        const id = this.sql.exec('SELECT last_insert_rowid() id').one().id;
+        const xdrB64 = await st.buildTokenPaymentXdr({ from, to: st.hotAddress, code: m.st_code, issuer: m.st_issuer, amount: Math.floor(Number(amt / 100_000_000_000n)) / 1e7, memo: 's' + id });
+        return json({ ok: true, id, memo: 's' + id, xdr: xdrB64 });
+      }
+      if (method === 'POST' && p === '/stellar/prep-trust') {
+        const b = await req.json();
+        const m = this.market(String(b.market || ''));
+        if (!m || m.network !== 'stellar' || !m.st_issuer) throw new Error('Not a Stellar token');
+        const from = String(b.address || '').trim();
+        if (!/^G[A-Z2-7]{55}$/.test(from)) throw new Error('Connect your Stellar wallet first');
+        const st = await this.stellar();
+        return json({ ok: true, xdr: await st.buildTrustXdr({ from, code: m.st_code, issuer: m.st_issuer }) });
+      }
+      if (method === 'GET' && p === '/stellar/holding') {
+        const m = this.market(String(url.searchParams.get('market') || ''));
+        const address = String(url.searchParams.get('address') || '');
+        if (!m || !m.st_issuer || !/^G[A-Z2-7]{55}$/.test(address)) throw new Error('bad request');
+        const st = await this.stellar();
+        const h = await st.tokenBalance(address, m.st_code, m.st_issuer);
+        const q = user ? this.sql.exec('SELECT pending, note FROM st_out WHERE user_id=? AND market=?', user.id, m.id).toArray()[0] : null;
+        return json({ ok: true, wallet: h ? h.balance : null, trust: !!(h && h.balance !== null), queued: q ? q.pending : '0', note: q?.note || '', sendNow: this.stSendNowOn() });
       }
       if (method === 'POST' && p === '/stellar/submit') {
         const b = await req.json();
@@ -3201,6 +3431,30 @@ export class Books {
           if (b.action === 'preview') return json({ ok: true, ...(await this.ownerFeed(true)) });
           return json({ ok: true, linked: !!this.meta('tg_owner_chat'), queued: this.sql.exec(`SELECT COUNT(*) c FROM transfers WHERE tg_notified IS NULL AND kind IN ('deposit','withdrawal')`).one().c });
         }
+        if (p === '/admin/stellar/send-now') {
+          const b = await req.json().catch(() => ({}));
+          if (b.on === true || b.on === false) this.setMeta('st_send_now', b.on ? '1' : '');
+          if (b.authz) this.setMeta('st_authz_last', '0');
+          // send what current wallet holders already hold (pre-graduation tokens with a linked Stellar wallet)
+          let seeded = 0;
+          if (b.seed && this.stSendNowOn()) {
+            for (const r of this.sql.exec(`SELECT b.user_id, b.asset, b.amount FROM balances b JOIN users u ON u.id=b.user_id JOIN markets m ON 't:' || m.id = b.asset
+                WHERE m.network='stellar' AND m.migrated=0 AND m.st_issuer IS NOT NULL AND m.st_issuer!='' AND b.amount!='0' AND u.stellar_wallet IS NOT NULL AND u.stellar_wallet!=''`).toArray()) {
+              const mk = r.asset.slice(2);
+              this.sql.exec(`INSERT OR IGNORE INTO st_out (user_id,market,pending,updated) VALUES (?,?,?,?)`, r.user_id, mk, '0', now());
+              this.sql.exec(`UPDATE st_out SET pending=?, next_try=0 WHERE user_id=? AND market=?`, r.amount, r.user_id, mk);
+              seeded++;
+            }
+          }
+          const run = b.run ? await this.stellarSendNow(!!b.force) : null;
+          return json({ ok: true, on: this.stSendNowOn(), seeded, run, queue: this.sql.exec(`SELECT o.*, u.username FROM st_out o LEFT JOIN users u ON u.id=o.user_id ORDER BY o.updated DESC LIMIT 50`).toArray() });
+        }
+        if (p === '/admin/stellar/drops') {
+          const b = await req.json().catch(() => ({}));
+          const run = b.run ? await this.stellarDrops(!!b.force) : null;
+          return json({ ok: true, run, rows: this.sql.exec(`SELECT d.*, u.username FROM st_drops d LEFT JOIN users u ON u.id=d.user_id
+            ${b.market ? 'WHERE d.market=?' : ''} ORDER BY d.id DESC LIMIT 100`, ...(b.market ? [String(b.market)] : [])).toArray() });
+        }
         if (p === '/admin/stellar/job/clear') {
           const b = await req.json();
           this.sql.exec('DELETE FROM stellar_jobs WHERE market=?', String(b.market || ''));
@@ -3218,7 +3472,9 @@ export class Books {
           .map(h => { const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) return null;
             const v = this.view(m, usd); const pend = this.pendingRewards(user.id, m);
             return { id: m.id, name: m.name, symbol: m.symbol, image: v.image, quote: v.quote, amount: h.amount, priceUsd: v.priceUsd,
-              network: m.network, stellar: m.network === 'stellar' && m.st_issuer ? { code: m.st_code, issuer: m.st_issuer, withdrawable: !!m.migrated } : null,
+              network: m.network, stellar: m.network === 'stellar' && m.st_issuer ? { code: m.st_code, issuer: m.st_issuer, withdrawable: !!m.migrated,
+                drop: this.sql.exec('SELECT status, note, txid FROM st_drops WHERE market=? AND user_id=?', m.id, user.id).toArray()[0] || null,
+                wallet: user.stellar_wallet || null } : null,
               valueUsd: (Number(B(h.amount)) / 1e18) * v.priceUsd, pendingRewards: pend.toString() }; })
           .filter(Boolean);
         // whole-wallet PnL over every token this user ever traded (open and closed), valued in USD at today's ZRO/ETH prices.
@@ -3245,7 +3501,7 @@ export class Books {
           this.sql.exec('UPDATE users SET eth_dep_address=? WHERE id=?', user.eth_dep_address, user.id);
         }
         return json({
-          username: user.username, email: user.email, wallet: user.wallet || '', bio: user.bio, avatar: user.avatar ? `/api/img/u/${user.id}` : '',
+          username: user.username, email: user.email, wallet: user.wallet || '', stellarWallet: user.stellar_wallet || '', bio: user.bio, avatar: user.avatar ? `/api/img/u/${user.id}` : '',
           zro: zro.toString(), zroUsd: (Number(zro) / 1e18) * usd, depositAddress: user.dep_address,
           eth: eth.toString(), ethUsd: (Number(eth) / 1e18) * this.ethUsd(), ethPrice: this.ethUsd(), ethDepositAddress: user.eth_dep_address,
           xlm: xlm.toString(), xlmUsd: (Number(xlm) / 1e18) * this.xlmUsd(), xlmPrice: this.xlmUsd(), stellarDeposit: stDep,

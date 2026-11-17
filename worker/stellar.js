@@ -1,6 +1,6 @@
 // Rookery ⇄ Stellar: XLM deposits (omnibus account + memo), payouts, and on-chain graduation into Aquarius.
 // Network I/O is plain fetch (Horizon REST + Soroban JSON-RPC); the SDK is only used to build/sign XDR.
-import { Keypair, Asset, Operation, TransactionBuilder, Networks, rpc, Address, xdr, nativeToScVal, scValToNative, Account, Memo } from '@stellar/stellar-sdk';
+import { Keypair, Asset, Operation, TransactionBuilder, Networks, rpc, Address, xdr, nativeToScVal, scValToNative, Account, Memo, AuthRequiredFlag } from '@stellar/stellar-sdk';
 
 export const ST_NETS = {
   testnet: { horizon: 'https://horizon-testnet.stellar.org', rpc: 'https://soroban-testnet.stellar.org', pass: Networks.TESTNET,
@@ -140,10 +140,12 @@ export class StellarIO {
       const to = p.type === 'create_account' ? p.account : p.to;
       if (to !== this.hotAddress || !p.transaction_successful) continue;
       const native = p.type === 'create_account' || (p.type === 'payment' && p.asset_type === 'native') || (/path_payment/.test(p.type) && p.asset_type === 'native');
-      if (!native) continue;
+      const token = p.type === 'payment' && p.asset_type !== 'native' && p.asset_code;
+      if (!native && !token) continue;
       const amount = p.type === 'create_account' ? p.starting_balance : p.amount;
       const t = p.transaction || {};
-      out.push({ id: p.id, paging: p.paging_token, from: p.from || p.funder || p.source_account, amount, memo: t.memo, memoType: t.memo_type, hash: p.transaction_hash });
+      out.push({ id: p.id, paging: p.paging_token, from: p.from || p.funder || p.source_account, amount, memo: t.memo, memoType: t.memo_type, hash: p.transaction_hash,
+        asset: native ? 'native' : `${p.asset_code}:${p.asset_issuer}`, code: native ? null : p.asset_code, issuer: native ? null : p.asset_issuer });
     }
     const last = j._embedded.records.length ? j._embedded.records[j._embedded.records.length - 1].paging_token : cursor;
     return { items: out, cursor: last, more: j._embedded.records.length === 100 };
@@ -206,13 +208,76 @@ export class StellarIO {
     return this.sac(asset);
   }
   // build an unsigned XLM payment the user's own wallet signs (no keys leave the wallet)
-  async buildPaymentXdr({ from, to, amount, memo }) {
+  async buildPaymentXdr({ from, to, amount, memo, trust }) {
     const acc = await this.account(from);
     if (!acc) throw new Error('This Stellar account is not active yet: fund it with at least 1 XLM');
     const tb = new TransactionBuilder(new Account(from, acc.sequence), { fee: '10000', networkPassphrase: this.N.pass });
+    if (trust && !acc.balances.some(b => b.asset_code === trust.code && b.asset_issuer === trust.issuer))
+      tb.addOperation(Operation.changeTrust({ asset: new Asset(trust.code, trust.issuer) }));
     tb.addOperation(Operation.payment({ destination: to, asset: Asset.native(), amount: f7(amount) }));
     if (memo) tb.addMemo(Memo.text(String(memo).slice(0, 28)));
     return tb.setTimeout(180).build().toXDR();
+  }
+  // a holder sends tokens back from their wallet (to sell them on the curve); the wallet signs, we submit
+  async buildTokenPaymentXdr({ from, to, code, issuer, amount, memo }) {
+    const acc = await this.account(from);
+    if (!acc) throw new Error('This Stellar account is not active yet');
+    const tb = new TransactionBuilder(new Account(from, acc.sequence), { fee: '10000', networkPassphrase: this.N.pass });
+    tb.addOperation(Operation.payment({ destination: to, asset: new Asset(code, issuer), amount: f7(amount) }));
+    if (memo) tb.addMemo(Memo.text(String(memo).slice(0, 28)));
+    return tb.setTimeout(180).build().toXDR();
+  }
+  // only a trustline, for holders who want their wallet ready before they buy
+  async buildTrustXdr({ from, code, issuer }) {
+    const acc = await this.account(from);
+    if (!acc) throw new Error('This Stellar account is not active yet: fund it with at least 2 XLM');
+    const tb = new TransactionBuilder(new Account(from, acc.sequence), { fee: '10000', networkPassphrase: this.N.pass });
+    tb.addOperation(Operation.changeTrust({ asset: new Asset(code, issuer) }));
+    return tb.setTimeout(180).build().toXDR();
+  }
+  async tokenBalance(address, code, issuer) {
+    const a = await this.account(address);
+    if (!a) return null;
+    const b = a.balances.find(x => x.asset_code === code && x.asset_issuer === issuer);
+    return b ? { balance: Number(b.balance), authorized: !!b.is_authorized } : { balance: null, authorized: false };
+  }
+
+  /* ───── tokens in holders' own wallets before graduation ───── */
+  // AUTH_REQUIRED, never revocable: authorized wallets hold and move the token freely, but no contract (an Aquarius
+  // pool) can receive it until graduation clears the flag, so nobody can open a pool at another price early
+  async requireAuth({ code, issuerKp }) {
+    const acc = await this.account(issuerKp.publicKey());
+    if (!acc) throw new Error('issuer account missing');
+    if (acc.flags?.auth_required) return false;
+    if (!acc.signers.some(x => x.weight > 0)) return false;          // issuer already closed: token graduated
+    await this.classic(this.hot, [Operation.setOptions({ source: issuerKp.publicKey(), setFlags: AuthRequiredFlag })], { signers: [issuerKp], memo: `auth ${code}` });
+    return true;
+  }
+  // pay tokens to a holder; authorizes the trustline in the same transaction when needed
+  async payAssetAuth(to, code, issuerKp, amount, memo) {
+    const iss = issuerKp.publicKey();
+    const a = await this.account(to);
+    if (!a) throw new Error('This Stellar address does not exist yet');
+    const tl = a.balances.find(b => b.asset_code === code && b.asset_issuer === iss);
+    if (!tl) throw new Error(`Add a trustline for ${code} in your Stellar wallet first (issuer ${iss.slice(0, 6)}…)`);
+    const asset = new Asset(code, iss);
+    const ops = [];
+    if (!tl.is_authorized) ops.push(Operation.setTrustLineFlags({ source: iss, trustor: to, asset, flags: { authorized: true } }));
+    ops.push(Operation.payment({ destination: to, asset, amount: f7(amount) }));
+    return this.classic(this.hot, ops, { signers: ops.length > 1 ? [issuerKp] : [], memo: memo || undefined });
+  }
+  // authorize trustlines holders opened on their own (so they can pass tokens to each other); contracts stay blocked
+  async authorizeTrustlines(code, issuerKp) {
+    const iss = issuerKp.publicKey();
+    const j = await this.hz(`/accounts?asset=${code}:${iss}&limit=200`);
+    const todo = (j._embedded?.records || [])
+      .filter(r => r.account_id !== this.hotAddress && r.balances.some(b => b.asset_code === code && b.asset_issuer === iss && !b.is_authorized))
+      .map(r => r.account_id);
+    const asset = new Asset(code, iss);
+    for (let i = 0; i < todo.length; i += 50) {
+      await this.classic(this.hot, todo.slice(i, i + 50).map(t => Operation.setTrustLineFlags({ source: iss, trustor: t, asset, flags: { authorized: true } })), { signers: [issuerKp] });
+    }
+    return todo.length;
   }
   async submitXdr(xdrB64) {
     const tx = TransactionBuilder.fromXDR(String(xdrB64), this.N.pass);
@@ -230,7 +295,8 @@ export class StellarIO {
     }
     const acc = await this.account(iss);
     if (acc && acc.signers.some(x => x.weight > 0)) {
-      await this.classic(this.hot, [Operation.setOptions({ source: iss, masterWeight: 0, lowThreshold: 1, medThreshold: 1, highThreshold: 1 })], { signers: [issuerKp], memo: `lock ${code}` });
+      await this.classic(this.hot, [Operation.setOptions({ source: iss, ...(acc.flags?.auth_required ? { clearFlags: AuthRequiredFlag } : {}),
+        masterWeight: 0, lowThreshold: 1, medThreshold: 1, highThreshold: 1 })], { signers: [issuerKp], memo: `lock ${code}` });
       log('issuer locked');
     }
   }
