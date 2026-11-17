@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify BRYAN's curve -> pool transition against the expected values, from the watcher log."""
+"""Verify a curve -> pool transition against the expected values, from the watcher log."""
 import json, sys
 
 WEI = 10**18
@@ -13,7 +13,7 @@ def main(path):
     grad = [r for r in rows if r.get('graduated')]
     if not grad:
         last = rows[-1]
-        print(f'nie zbondowal jeszcze: progress {last["progress"]:.2f}%, rezerwa {last["reserve"]/1e18:.2f} ZRO')
+        print(f'not bonded yet: progress {last["progress"]:.2f}%, reserve {last["reserve"]/1e18:.2f} ZRO')
         return
     pre = [r for r in rows if not r.get('graduated')]
     p = pre[-1] if pre else None
@@ -42,8 +42,8 @@ def main(path):
         print(f'cena konca krzywej        {curve_price}')
         print(f'cena puli po przejsciu    {g["price"]}')
         print(f'roznica (wei na token)    {g["price"] - curve_price}   {"OK - zero skoku" if g["price"] == curve_price else "UWAGA - skok ceny"}')
-        print(f'poolTok  oczekiwane {pt/WEI:.6f}   jest {int(g["poolTok"])/WEI:.6f}   {"OK" if int(g["poolTok"]) == pt else "ROZNICA"}')
-        print(f'poolZro  oczekiwane {pz/WEI:.6f}   jest {int(g["poolZro"])/WEI:.6f}   {"OK" if int(g["poolZro"]) == pz else "ROZNICA"}')
+        print(f'poolTok  expected {pt/WEI:.6f}   is {int(g["poolTok"])/WEI:.6f}   {"OK" if int(g["poolTok"]) == pt else "DIFF"}')
+        print(f'poolZro  expected {pz/WEI:.6f}   is {int(g["poolZro"])/WEI:.6f}   {"OK" if int(g["poolZro"]) == pz else "DIFF"}')
         print(f'ZRO poza pula (na spalenie $臭企鹅): {spare_zro/WEI:.6f} ZRO')
         print(f'cena oczekiwana {exp_price}  |  cena rzeczywista {g["price"]}  |  {"ZGADZA SIE" if g["price"] == exp_price else "NIE ZGADZA SIE"}')
         print(f'cena po bondingu w ZRO/token: {g["price"]/WEI:.12f}   (wczesniej {curve_price/WEI:.12f})')

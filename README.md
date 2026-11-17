@@ -1,87 +1,90 @@
-# Rookery (by Stinky Penguin) — launchpad dla sieci, które jeszcze nie działają
+# Rookery (by Stinky Penguin) — a launchpad for chains that are not live yet
 
 [![security](https://github.com/MrStinkyCroatia/rookery/actions/workflows/security.yml/badge.svg)](https://github.com/MrStinkyCroatia/rookery/actions/workflows/security.yml)
 [![license](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 [![secret scan](https://img.shields.io/badge/secrets-gitleaks%20on%20every%20push-black.svg)](.gitleaks.toml)
 
-Strona: **https://rookery.stinkypenguin.xyz**
+Site: **https://rookery.stinkypenguin.xyz**
 
-Sieci: **Zero** (LayerZero, mainnet 30.11) i **GIWA** (Upbit, testnet, mainnet TBA).
-Waluta handlu: **ZRO**, wszystkie ceny pokazywane w **USD** (kurs ZRO z OKX, zapasowo Bybit, KuCoin, CoinGecko, odświeżany co minutę).
-Opłata platformy: **0,5% od każdej transakcji** trafia do rezerwy **$臭企鹅 buy & burn**.
+Networks: **Zero** (LayerZero, mainnet 30 Nov) and **GIWA** (Upbit, testnet, mainnet TBA), plus **Stellar** on mainnet.
+Trading currency: **ZRO**, every price shown in **USD** (ZRO rate from OKX, fallbacks Bybit, KuCoin, CoinGecko, refreshed every minute).
+Platform fee: **0.5% of every trade** goes into the **$臭企鹅 buy & burn** reserve.
 
-## Co działa
+## What works
 
-| Funkcja | Opis |
+| Feature | Description |
 |---|---|
-| Konta | rejestracja i logowanie emailem i hasłem (PBKDF2), sesja w ciasteczku HttpOnly na 30 dni |
-| Depozyty ZRO | każdy użytkownik dostaje własny adres (ten sam na Ethereum, Base, Arbitrum, BNB Chain i Optimism). Wpłaty wykrywane automatycznie co minutę, gdy użytkownik ma otwartą stronę portfela, albo przyciskiem „Check for deposits” |
-| Wypłaty | natychmiast z hot walleta na wybraną sieć. Limity 5 000 ZRO na wypłatę i 20 000 ZRO dziennie. Jeśli wysyłka się nie uda, saldo wraca od razu |
-| Handel | krzywa bondingowa (1 mld podaży, 800 mln na krzywej, 200 mln na pulę mainnetu), kupno i sprzedaż dowolnej kwoty, szybkie kwoty, „⚡ Quick buy” jednym kliknięciem |
-| Tworzenie tokena | zdjęcie z komputera, nazwa, ticker, opis, sieć (Zero/GIWA), para ZRO, socials (X, Telegram, www), limit kupna na start (% podaży przez X minut), podatki twórcy: marketing (ZRO do twórcy), burn tokena, nagrody w ZRO dla holderów (max 5% każdy, 10% łącznie), opcjonalny dev buy |
-| Strona tokena | świece (TradingView Lightweight Charts) 1m/5m/15m/1h w USD, transakcje, holderzy, komentarze, opis, postęp krzywej, podatki, nagrody do odebrania |
-| Trading | tabela wszystkich rynków (cena, 5m/1h/24h, MC, wolumen, holderzy, postęp) i strumień transakcji na żywo |
-| Profil tradera | avatar, nazwa, bio, wartość portfela, wolumen, transakcje, stworzone tokeny |
-| Docs | pełna dokumentacja z wykresem krzywej i podziałem opłat |
-| Proofs | suma ZRO należnych użytkownikom, rezerwa pLAUNCH, adres hot walleta z linkami do eksploratorów, Merkle root sald |
+| Accounts | email and password sign-up and login (PBKDF2), 30-day session in an HttpOnly cookie |
+| ZRO deposits | every user gets a personal address (the same one on Ethereum, Base, Arbitrum, BNB Chain and Optimism). Deposits are detected every minute, or on demand with the "Check for deposits" button |
+| Withdrawals | instant from the hot wallet to the chosen network. Limits of 5,000 ZRO per withdrawal and 20,000 ZRO per day. A failed send is refunded to the balance immediately |
+| Trading | bonding curve (1B supply, 800M on the curve, 200M reserved for the mainnet pool), buy and sell any amount, preset amounts, one-click "⚡ Quick buy" |
+| Token creation | image upload, name, ticker, description, network (Zero/GIWA/Stellar), ZRO pair, socials (X, Telegram, website), launch buy cap (% of supply over X minutes), creator taxes: marketing (ZRO to the creator), token burn, ZRO rewards for holders (max 5% each, 10% total), optional dev buy |
+| Token page | candles (TradingView Lightweight Charts) 1m/5m/15m/1h in USD, trades, holders, comments, description, curve progress, taxes, claimable rewards |
+| Trading view | table of all markets (price, 5m/1h/24h, market cap, volume, holders, progress) and a live trade feed |
+| Trader profile | avatar, name, bio, portfolio value, volume, trades, tokens created |
+| Docs | full documentation with the curve chart and fee breakdown |
+| Proofs | total ZRO owed to users, pLAUNCH reserve, hot wallet address with explorer links, Merkle root of balances |
 
-## Portfel platformy (najważniejsze)
+## Platform wallet (the important part)
 
-- Wszystkie adresy depozytowe i hot wallet pochodzą z **jednej frazy seed** (ścieżka `m/44'/60'/0'/0/i`).
-  - `i = 0` to **hot wallet**: `0x2fc334dB3B68995Ca29Ba752d47B4d88c025990D`
-  - `i = 1, 2, 3…` to adresy depozytowe kolejnych użytkowników.
-- Po zaimportowaniu frazy do MetaMaska konto nr 1 to hot wallet, a kolejne konta to adresy depozytowe.
-- Fraza leży w pliku `.master_mnemonic` na serwerze roboczym, a klucz rozszerzony jako sekret `MASTER_XPRV` w Cloudflare. **Zrób kopię frazy offline.** Bez niej nie odzyskasz depozytów.
+- Every deposit address and the hot wallet are derived from **one seed phrase** (path `m/44'/60'/0'/0/i`).
+  - `i = 0` is the **hot wallet**: `0x2fc334dB3B68995Ca29Ba752d47B4d88c025990D`
+  - `i = 1, 2, 3…` are the per-user deposit addresses.
+- Import the phrase into MetaMask and account #1 is the hot wallet, the next accounts are deposit addresses.
+- The phrase lives in `.master_mnemonic` on the working server, and the extended key is the `MASTER_XPRV` secret in Cloudflare. **Keep an offline copy of the phrase.** Without it the deposits cannot be recovered.
 
-### Żeby wypłaty działały
-Zasil hot wallet ZRO i gazem na sieciach, na których chcesz wypłacać:
+### For withdrawals to work
+Fund the hot wallet with ZRO and with gas on each network you want to pay out on:
 - Ethereum, Base, Arbitrum, Optimism: ETH,
 - BNB Chain: BNB.
 
-### Przenoszenie depozytów do hot walleta (sweep)
-Depozyty zostają na adresach użytkowników. Żeby zasiliły hot wallet, trzeba je okresowo przenieść. Każdy adres depozytowy potrzebuje na to odrobiny gazu. Na razie robi się to ręcznie z MetaMaska (frazą). Automatyczny sweep to następny krok.
+### Sweeping deposits into the hot wallet
+Deposits sit on the user addresses. To move them into the hot wallet they have to be swept periodically, and each deposit address needs a little gas for that. Today this is done manually with MetaMask (using the phrase). Automated sweeping is the next step.
 
-## Administracja
+## Administration
 
 ```bash
 K=$(cat .admin_key)
 U=https://rookery.stinkypenguin.xyz/api
 
-# ręczne dopisanie ZRO użytkownikowi (np. wpłata z innej sieci)
+# manually credit ZRO to a user (for example a deposit made on another network)
 curl -s -X POST $U/admin/credit -H 'content-type: application/json' -H 'x-pl: 1' \
-  -d "{\"key\":\"$K\",\"user\":\"nazwa_lub_email\",\"amount\":\"10000000000000000000\",\"note\":\"manual\"}"
+  -d "{\"key\":\"$K\",\"user\":\"username_or_email\",\"amount\":\"10000000000000000000\",\"note\":\"manual\"}"
 
-# publikacja Merkle root sald (raz dziennie)
+# publish the Merkle root of balances (once a day)
 curl -s -X POST "$U/admin/proof?key=$K" -H 'x-pl: 1'
 
-# awaryjne wstrzymanie i wznowienie wypłat
+# emergency stop and resume of withdrawals
 curl -s -X POST "$U/admin/pause?key=$K&on=1" -H 'x-pl: 1'
 curl -s -X POST "$U/admin/pause?key=$K&on=0" -H 'x-pl: 1'
 ```
 
-Kwoty w wei: 1 ZRO = `1000000000000000000`.
+Amounts are in wei: 1 ZRO = `1000000000000000000`.
 
-## Migracja na mainnet
-Opisana w Docs na stronie: snapshot sald, wdrożenie tokena (1 mld), mint 1:1 dla holderów, pula z rezerwy krzywej i 200 mln tokenów po ostatniej cenie, LP zablokowane.
+## Mainnet migration
+Described in Docs on the site: balance snapshot, token deployment (1B), 1:1 mint for holders, a pool from the curve reserve plus 200M tokens at the last price, LP locked.
 
-## Przed dużym ruchem
-1. Kopia frazy offline i przeniesienie jej do sejfu sprzętowego.
-2. Automatyczny sweep depozytów do hot walleta i cold walleta.
-3. Weryfikacja emaila i reset hasła (wymaga dostawcy poczty, np. Resend).
-4. 2FA dla wypłat.
-5. Licencja: kustodia i handel w UE to CASP/MiCA.
+## Before serious volume
+1. Offline copy of the phrase, moved into a hardware wallet.
+2. Automated sweeping of deposits into the hot wallet and a cold wallet.
+3. Email verification and password reset (needs a mail provider such as Resend).
+4. 2FA for withdrawals.
+5. Licensing: custody and trading in the EU mean CASP/MiCA.
 
 ## Deploy
+
 ```bash
 ./deploy.sh                                         # rookery.stinkypenguin.xyz
-PRELAUNCH_DOMAIN=launch.twojadomena.xyz ./deploy.sh
+PRELAUNCH_DOMAIN=launch.example.com ./deploy.sh
 ```
 
-## Bezpieczeństwo
+The Cloudflare account id is read from `CLOUDFLARE_ACCOUNT_ID` or from `$WR/.cf_account`, never from the repo.
 
-- **Zero sekretów w repo.** `.master_xprv`, `.master_mnemonic`, `.admin_key`, `.staging/` i `.dev.vars` są ignorowane i blokowane przez hook pre-commit oraz CI.
-- **Każdy push** uruchamia skan sekretów (gitleaks na całej historii), kontrolę składni workera i frontu oraz audyt zależności.
-- **Zgłaszanie luk:** patrz [SECURITY.md](SECURITY.md). Nie zgłaszaj publicznie niczego, co dotyczy środków.
-- **Adresy on-chain nie są sekretami.** Allowlista w `.gitleaks.toml` przepuszcza publiczne adresy EVM (0x + 40 znaków) i Stellar (G + 55). Klucze prywatne i sekretne klucze Stellar (S…) nadal są wykrywane.
+## Security
 
-> Ten kod steruje prawdziwymi środkami. Przed każdym deployem: kopia zapasowa, test na stagingu, potem produkcja.
+- **No secrets in the repository.** `.master_xprv`, `.master_mnemonic`, `.admin_key`, `.staging/` and `.dev.vars` are ignored and blocked by a pre-commit hook and by CI.
+- **Every push** runs a secret scan (gitleaks over the whole history), a syntax check of the worker and the frontend, and a dependency audit.
+- **Reporting:** see [SECURITY.md](SECURITY.md). Do not report anything that touches funds in public.
+- **On-chain addresses are not secrets.** The allowlist in `.gitleaks.toml` lets public EVM addresses (0x + 40 characters) and Stellar public keys (G + 55) through. Private keys and Stellar secret keys (S…) are still detected.
+
+> This code moves real funds. Before every deploy: back up, test on staging, then production.
