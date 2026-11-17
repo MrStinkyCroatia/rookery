@@ -4,7 +4,7 @@ set -e
 WR=/home/user/412832f0-09bf-4a6c-846e-8a45ae49c7eb/wr
 W="$WR/node_modules/.bin/wrangler"
 export CLOUDFLARE_API_TOKEN=$(cat "$WR/.cf_token")
-export CLOUDFLARE_ACCOUNT_ID=fa6c629eb1cfc4c5286d0c1735702f20
+export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-$(cat \"$WR/.cf_account\" 2>/dev/null || cat \"$HOME/.cf_account\" 2>/dev/null)}"
 APP=/home/user/95359ef5-7be3-4b6b-89f3-63cb34ac24d5/prelaunch
 DOMAIN=${PRELAUNCH_DOMAIN:-rookery.stinkypenguin.xyz}
 

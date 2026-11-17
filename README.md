@@ -1,5 +1,9 @@
 # Rookery (by Stinky Penguin) — launchpad dla sieci, które jeszcze nie działają
 
+[![security](https://github.com/MrStinkyCroatia/rookery/actions/workflows/security.yml/badge.svg)](https://github.com/MrStinkyCroatia/rookery/actions/workflows/security.yml)
+[![license](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
+[![secret scan](https://img.shields.io/badge/secrets-gitleaks%20on%20every%20push-black.svg)](.gitleaks.toml)
+
 Strona: **https://rookery.stinkypenguin.xyz**
 
 Sieci: **Zero** (LayerZero, mainnet 30.11) i **GIWA** (Upbit, testnet, mainnet TBA).
