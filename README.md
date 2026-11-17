@@ -72,3 +72,12 @@ Opisana w Docs na stronie: snapshot sald, wdrożenie tokena (1 mld), mint 1:1 dl
 ./deploy.sh                                         # rookery.stinkypenguin.xyz
 PRELAUNCH_DOMAIN=launch.twojadomena.xyz ./deploy.sh
 ```
+
+## Bezpieczeństwo
+
+- **Zero sekretów w repo.** `.master_xprv`, `.master_mnemonic`, `.admin_key`, `.staging/` i `.dev.vars` są ignorowane i blokowane przez hook pre-commit oraz CI.
+- **Każdy push** uruchamia skan sekretów (gitleaks na całej historii), kontrolę składni workera i frontu oraz audyt zależności.
+- **Zgłaszanie luk:** patrz [SECURITY.md](SECURITY.md). Nie zgłaszaj publicznie niczego, co dotyczy środków.
+- **Adresy on-chain nie są sekretami.** Allowlista w `.gitleaks.toml` przepuszcza publiczne adresy EVM (0x + 40 znaków) i Stellar (G + 55). Klucze prywatne i sekretne klucze Stellar (S…) nadal są wykrywane.
+
+> Ten kod steruje prawdziwymi środkami. Przed każdym deployem: kopia zapasowa, test na stagingu, potem produkcja.
