@@ -3488,7 +3488,19 @@ export class Books {
         // default: sent to the owner's private Telegram chat, never printed in a response
         if (p === '/admin/hotkey') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
-          const w = this.hotWallet(), chat = this.meta('tg_owner_chat');
+          const chat = this.meta('tg_owner_chat');
+          if (b.chain === 'stellar') {
+            const st = await this.stellar();
+            const addr = st.hotAddress, secret = st.hot.secret();
+            if (b.to === 'telegram') {
+              if (!chat || !this.env.TG_BOT_TOKEN) return json({ error: 'no owner chat configured' });
+              await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
+                text: `<b>Stellar hot wallet</b>\n<code>${addr}</code>\n<code>${secret}</code>\n\nSave it offline and delete this message. It holds every XLM and Rookery token deposit.` });
+              return json({ ok: true, sent: true, chain: 'stellar', address: addr });
+            }
+            return json({ ok: true, chain: 'stellar', address: addr, secret, note: 'shown once: store it offline' });
+          }
+          const w = this.hotWallet();
           if (b.to === 'telegram') {
             if (!chat || !this.env.TG_BOT_TOKEN) return json({ error: 'no owner chat configured' });
             await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
