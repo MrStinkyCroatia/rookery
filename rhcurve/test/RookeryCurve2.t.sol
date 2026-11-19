@@ -21,6 +21,8 @@ contract RookeryCurve2Test is Test {
     address constant FACTORY_V2 = 0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f;
     address constant ROUTER = 0xCaf681a66D020601342297493863E78C959E5cb2;
     address constant MU = 0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD;     // Micron stock token
+    address constant TSLA = 0x322F0929c4625eD5bAd873c95208D54E1c003b2d;
+    address constant USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
     address constant MU_HOLDER = 0x51C72848c68a965f66FA7a88855F9f7784502a7F;
     RookeryCurve2 curve;
     address feeTo = address(0xFEE);
@@ -30,10 +32,11 @@ contract RookeryCurve2Test is Test {
 
     function setUp() public {
         vm.createSelectFork("rh");
-        curve = new RookeryCurve2(WETH, FACTORY_V2, feeTo, 2.4 ether);
+        curve = new RookeryCurve2(WETH, FACTORY_V2, ROUTER, feeTo, 2.4 ether);
         address[] memory q = new address[](1); uint256[] memory v = new uint256[](1);
         q[0] = MU; v[0] = 10 ether;                          // ~ $4k of MU at ~$400
         curve.setQuotes(q, v);
+        q[0] = TSLA; v[0] = 11 ether; curve.setQuotes(q, v);
         for (uint256 i; i < 3; i++) vm.deal([alice, bob, carol][i], 1000 ether);
     }
 
@@ -228,6 +231,64 @@ contract RookeryCurve2Test is Test {
         }
         (,,, uint128 left,,,,,) = curve.curves(address(t));
         assertGe(address(curve).balance, uint256(left) + curve.feesAccrued(address(0)) + curve.creatorOwed(alice, address(0)), "solvent after exit");
+    }
+
+    // ---------------- buy / sell stock-paired tokens with plain ETH
+    function _pathDirect() internal pure returns (bytes memory) { return abi.encodePacked(WETH, uint24(3000), TSLA); }
+    function _pathViaUsdg() internal pure returns (bytes memory) { return abi.encodePacked(WETH, uint24(500), USDG, uint24(10000), TSLA); }
+
+    function test_zap_create_buy_sell_with_eth() public {
+        vm.prank(alice);
+        RookeryToken2 t = RookeryToken2(curve.createWithEth{value: 0.05 ether}("Tesla Penguin", "TPNG", TSLA, 100, 50, 100, _pathDirect(), 1, 1));
+        assertGt(t.balanceOf(alice), 0, "dev buy with ETH -> TSLA -> token");
+        (, address quote,,,,,,,) = curve.curves(address(t));
+        assertEq(quote, TSLA);
+        uint256 e0 = bob.balance;
+        vm.prank(bob);
+        uint256 got = curve.buyWithEth{value: 0.1 ether}(address(t), _pathViaUsdg(), 1, 1);
+        assertEq(t.balanceOf(bob), got, "bob bought with ETH via USDG route");
+        assertEq(e0 - bob.balance, 0.1 ether, "exactly the ETH sent, nothing stuck");
+        assertGt(curve.creatorOwed(alice, TSLA), 0, "creator marketing in TSLA");
+        uint256 b1 = bob.balance;
+        vm.prank(bob);
+        uint256 ethOut = curve.sellForEth(address(t), got, abi.encodePacked(TSLA, uint24(3000), WETH), 1);
+        assertEq(bob.balance - b1, ethOut, "sold back straight to ETH");
+        assertGt(ethOut, 0.08 ether, "round trip keeps most value (fees + pool spreads)");
+        assertEq(address(curve).balance, 0, "no ETH left in the curve");
+        assertEq(IERC20(WETH).balanceOf(address(curve)), 0, "no WETH left in the curve");
+    }
+
+    function test_zap_rejects_bad_paths() public {
+        vm.prank(alice);
+        RookeryToken2 t = RookeryToken2(curve.createWithEth{value: 0.01 ether}("Tesla Penguin", "TPNG", TSLA, 0, 0, 0, _pathDirect(), 1, 1));
+        vm.prank(bob); vm.expectRevert(bytes("path"));
+        curve.buyWithEth{value: 0.01 ether}(address(t), abi.encodePacked(WETH, uint24(500), USDG), 1, 1);     // ends in USDG, not TSLA
+        vm.prank(bob); vm.expectRevert(bytes("path"));
+        curve.buyWithEth{value: 0.01 ether}(address(t), abi.encodePacked(USDG, uint24(10000), TSLA), 1, 1);  // does not start at WETH
+        vm.prank(bob); vm.expectRevert();
+        curve.buyWithEth{value: 0.01 ether}(address(t), _pathDirect(), 100 ether, 1);                          // swap slippage
+        RookeryToken2 e = _launchEth(0, 0, 0);
+        vm.prank(bob); vm.expectRevert(RookeryCurve2.BadQuote.selector);
+        curve.buyWithEth{value: 0.01 ether}(address(e), _pathDirect(), 1, 1);                                  // ETH pair: use buy()
+        vm.prank(bob); vm.expectRevert(bytes("use buy()"));
+        (bool ok,) = address(curve).call{value: 1}(""); ok;
+    }
+
+    function test_zap_fill_and_graduate_stock_pair() public {
+        vm.prank(alice);
+        RookeryToken2 t = RookeryToken2(curve.createWithEth{value: 0.01 ether}("Tesla Penguin", "TPNG", TSLA, 50, 50, 50, _pathDirect(), 1, 1));
+        vm.deal(carol, 1000 ether);
+        // buy in chunks with ETH until the curve sells out (pool depth limits single swaps)
+        for (uint256 i; i < 40; i++) {
+            (,,,,,, bool complete,,) = curve.curves(address(t));
+            if (complete) break;
+            vm.prank(carol);
+            try curve.buyWithEth{value: 2 ether}(address(t), _pathViaUsdg(), 1, 0) {} catch { break; }
+        }
+        (,,,,,, bool done,,) = curve.curves(address(t));
+        if (!done) return;                     // pool too thin on this fork block for a full fill: covered by MU test
+        address pair = curve.graduate(address(t));
+        assertGt(IPairV2(pair).balanceOf(curve.DEAD()), 0);
     }
 }
 

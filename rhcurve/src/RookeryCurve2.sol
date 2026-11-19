@@ -10,6 +10,11 @@ interface IERC20 {
 }
 interface IWETH9 is IERC20 {
     function deposit() external payable;
+    function withdraw(uint256) external;
+}
+interface ISwapRouter02 {
+    struct ExactInputParams { bytes path; address recipient; uint256 amountIn; uint256 amountOutMinimum; }
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }
 interface IUniswapV2Factory {
     function getPair(address, address) external view returns (address);
@@ -50,6 +55,7 @@ contract RookeryCurve2 {
 
     IWETH9 public immutable weth;
     IUniswapV2Factory public immutable factoryV2;
+    ISwapRouter02 public immutable router;          // Uniswap SwapRouter02: ETH <-> pair asset for stock pairs
     RookeryTokenDeployer public immutable deployer;
 
     address public owner;
@@ -92,9 +98,10 @@ contract RookeryCurve2 {
     modifier nonReentrant() { require(locked == 1, "reentrancy"); locked = 2; _; locked = 1; }
     modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
 
-    constructor(address _weth, address _factoryV2, address _feeTo, uint256 _vEth) {
+    constructor(address _weth, address _factoryV2, address _router, address _feeTo, uint256 _vEth) {
         weth = IWETH9(_weth);
         factoryV2 = IUniswapV2Factory(_factoryV2);
+        router = ISwapRouter02(_router);
         deployer = new RookeryTokenDeployer();
         owner = msg.sender;
         feeTo = _feeTo;
@@ -106,19 +113,35 @@ contract RookeryCurve2 {
     function create(string calldata name, string calldata symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew,
         uint256 quoteIn, uint256 minTokensOut) external payable nonReentrant returns (address token)
     {
+        if (quote != ETH && msg.value > 0) revert BadQuote();
+        token = _create(name, symbol, quote, taxMkt, taxBurn, taxRew);
+        uint256 amt = quote == ETH ? msg.value : quoteIn;
+        if (amt > 0) _buy(token, msg.sender, _pullQuote(quote, amt), minTokensOut);
+    }
+
+    /// @notice launch a token paired with a stock token (or USDG) and make the first buy with plain ETH:
+    ///         the ETH is swapped on Uniswap v3 along `path` (WETH -> ... -> pair asset) inside this transaction
+    function createWithEth(string calldata name, string calldata symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew,
+        bytes calldata path, uint256 minQuote, uint256 minTokensOut) external payable nonReentrant returns (address token)
+    {
+        if (quote == ETH || msg.value == 0) revert BadQuote();
+        token = _create(name, symbol, quote, taxMkt, taxBurn, taxRew);
+        _buy(token, msg.sender, _swapEthTo(quote, path, minQuote), minTokensOut);
+    }
+
+    function _create(string calldata name, string calldata symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew)
+        internal returns (address token)
+    {
         if (launchesPaused) revert Paused();
         if (bytes(name).length == 0 || bytes(symbol).length == 0 || bytes(name).length > 32 || bytes(symbol).length > 12) revert Zero();
         uint256 vq = vQuoteFor[quote];
         if (vq == 0) revert BadQuote();
         if (taxMkt > MAX_TAX || taxBurn > MAX_TAX || taxRew > MAX_TAX || uint256(taxMkt) + taxBurn + taxRew > MAX_TAX_TOTAL) revert BadTax();
-        if (quote != ETH && msg.value > 0) revert BadQuote();
         token = deployer.deploy(name, symbol, SUPPLY, msg.sender, taxMkt, taxBurn, taxRew);
         curves[token] = Curve({ creator: msg.sender, quote: quote, vQuote: uint128(vq), realQuote: 0, sold: 0,
             createdAt: uint64(block.timestamp), complete: false, graduated: false, pair: address(0) });
         allTokens.push(token);
         emit Created(token, msg.sender, quote, name, symbol, vq, taxMkt, taxBurn, taxRew);
-        uint256 amt = quote == ETH ? msg.value : quoteIn;
-        if (amt > 0) _buy(token, msg.sender, _pullQuote(quote, amt), minTokensOut);
     }
 
     // ---------------------------------------------------------------- trading
@@ -129,7 +152,38 @@ contract RookeryCurve2 {
         out = _buy(token, msg.sender, _pullQuote(c.quote, c.quote == ETH ? msg.value : quoteIn), minTokensOut);
     }
 
+    /// @notice buy a stock-paired (or USDG-paired) token with plain ETH in one transaction
+    function buyWithEth(address token, bytes calldata path, uint256 minQuote, uint256 minTokensOut) external payable nonReentrant returns (uint256 out) {
+        Curve storage c = curves[token];
+        if (c.creator == address(0)) revert UnknownToken();
+        if (c.quote == ETH || msg.value == 0) revert BadQuote();
+        out = _buy(token, msg.sender, _swapEthTo(c.quote, path, minQuote), minTokensOut);
+    }
+
     function sell(address token, uint256 tokenAmount, uint256 minQuoteOut) external nonReentrant returns (uint256 quoteOut) {
+        quoteOut = _sell(token, tokenAmount, minQuoteOut, msg.sender);
+    }
+
+    /// @notice sell a stock-paired token and receive plain ETH: the pair asset is swapped back along `path`
+    ///         (pair asset -> ... -> WETH) and unwrapped in the same transaction
+    function sellForEth(address token, uint256 tokenAmount, bytes calldata path, uint256 minEthOut) external nonReentrant returns (uint256 ethOut) {
+        Curve storage c = curves[token];
+        if (c.creator == address(0)) revert UnknownToken();
+        if (c.quote == ETH) revert BadQuote();
+        uint256 q = _sell(token, tokenAmount, 0, address(this));
+        (address a, address z) = _pathEnds(path);
+        require(a == c.quote && z == address(weth), "path");
+        _safeApprove(c.quote, address(router), q);
+        uint256 w0 = weth.balanceOf(address(this));
+        router.exactInput(ISwapRouter02.ExactInputParams({ path: path, recipient: address(this), amountIn: q, amountOutMinimum: minEthOut }));
+        _safeApprove(c.quote, address(router), 0);
+        ethOut = weth.balanceOf(address(this)) - w0;
+        if (ethOut < minEthOut) revert Slippage();
+        weth.withdraw(ethOut);
+        _sendQuote(ETH, msg.sender, ethOut);
+    }
+
+    function _sell(address token, uint256 tokenAmount, uint256 minQuoteOut, address payTo) internal returns (uint256 quoteOut) {
         Curve storage c = curves[token];
         if (c.creator == address(0)) revert UnknownToken();
         if (c.complete) revert CurveClosed();
@@ -154,7 +208,7 @@ contract RookeryCurve2 {
         t.transferFrom(msg.sender, address(this), tokenAmount);    // the curve pulls without an approval
         if (brn > 0) t.burn(brn);
         if (rew > 0) { t.transfer(token, rew); t.distribute(rew); }
-        _sendQuote(c.quote, msg.sender, quoteOut);
+        if (payTo != address(this)) _sendQuote(c.quote, payTo, quoteOut);
         emit Taxes(token, mkt, brn, rew);
         emit Trade(token, msg.sender, false, gross, tokenAmount, fee, c.realQuote, c.sold);
     }
@@ -305,5 +359,25 @@ contract RookeryCurve2 {
     }
     function _divUp(uint256 a, uint256 b) internal pure returns (uint256) { return (a + b - 1) / b; }
 
-    receive() external payable { revert("use buy()"); }
+    /// @dev Uniswap v3 path = token(20) [fee(3) token(20)]...
+    function _pathEnds(bytes calldata path) internal pure returns (address first, address last) {
+        require(path.length >= 43 && (path.length - 20) % 23 == 0, "path");
+        first = address(bytes20(path[0:20]));
+        last = address(bytes20(path[path.length - 20:]));
+    }
+    /// @dev ETH -> pair asset through the fixed Uniswap router; returns what actually arrived here
+    function _swapEthTo(address quote, bytes calldata path, uint256 minQuote) internal returns (uint256 got) {
+        (address a, address z) = _pathEnds(path);
+        require(a == address(weth) && z == quote, "path");
+        uint256 b0 = IERC20(quote).balanceOf(address(this));
+        router.exactInput{value: msg.value}(ISwapRouter02.ExactInputParams({ path: path, recipient: address(this), amountIn: msg.value, amountOutMinimum: minQuote }));
+        got = IERC20(quote).balanceOf(address(this)) - b0;
+        if (got < minQuote) revert Slippage();
+    }
+    function _safeApprove(address tk, address spender, uint256 a) internal {
+        (bool ok, bytes memory d) = tk.call(abi.encodeWithSignature("approve(address,uint256)", spender, a));
+        require(ok && (d.length == 0 || abi.decode(d, (bool))), "approve");
+    }
+
+    receive() external payable { require(msg.sender == address(weth), "use buy()"); }
 }

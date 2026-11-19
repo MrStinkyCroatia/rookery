@@ -87,7 +87,7 @@ ok('sell pays ETH', (await RH.getBalance(bob.address)) > b0, 'quote ' + fmt(ps.q
 
 console.log('\n3. Stock-token pair (TSLA)');
 const pcs = await api('POST', '/rh/prepare-create', { name: 'Tesla Penguin', symbol: 'TPNG', quote: TSLA, taxMarketing: 0.5, taxBurn: 0.5, taxRewards: 0.5,
-  devBuy: (2n * 10n ** 18n).toString(), from: carol.address });
+  devBuy: (2n * 10n ** 18n).toString(), from: carol.address, pay: 'quote' });
 ok('create asks for TSLA approve first', !!pcs.approve && pcs.tx.value === '0x0', pcs.error || '');
 const s3 = await send(carol, pcs);
 const mid2 = s3.market;
@@ -95,12 +95,12 @@ let md2 = await api('GET', '/market/' + mid2);
 ok('market quoted in TSLA', md2.market.quote === 'TSLA' && md2.market.rh.quote === TSLA.toLowerCase(), md2.market.quote);
 ok('USD values from the stock price', md2.market.mcapUsd > 1000 && md2.market.mcapUsd < 20000, '$' + Math.round(md2.market.mcapUsd));
 const T2 = new ethers.Contract(md2.market.rh.token, ['function balanceOf(address) view returns (uint256)'], RH);
-const pbs = await api('POST', '/rh/prepare-trade', { market: mid2, side: 'buy', amount: (5n * 10n ** 18n).toString(), from: bob.address });
+const pbs = await api('POST', '/rh/prepare-trade', { market: mid2, side: 'buy', amount: (5n * 10n ** 18n).toString(), from: bob.address, pay: 'quote' });
 ok('buy with TSLA asks approve', !!pbs.approve);
 const t0 = await tsla.balanceOf(bob.address);
 await send(bob, pbs);
 ok('bob paid 5 TSLA and got tokens', t0 - (await tsla.balanceOf(bob.address)) === 5n * 10n ** 18n && (await T2.balanceOf(bob.address)).toString() === pbs.quote);
-const pss = await api('POST', '/rh/prepare-trade', { market: mid2, side: 'sell', amount: (await T2.balanceOf(bob.address)).toString(), from: bob.address });
+const pss = await api('POST', '/rh/prepare-trade', { market: mid2, side: 'sell', amount: (await T2.balanceOf(bob.address)).toString(), from: bob.address, pay: 'quote' });
 const t1 = await tsla.balanceOf(bob.address);
 await send(bob, pss);
 ok('sold back for TSLA', (await tsla.balanceOf(bob.address)) - t1 === BigInt(pss.quote), fmt(pss.quote) + ' TSLA');
@@ -139,16 +139,81 @@ const wt = await T.balanceOf(bob.address);
 await (await T.connect(bob).transfer(dan.address, wt / 3n)).wait(1);
 ok('wallet-to-wallet still untaxed', true);
 
+console.log('\n5b. Stock pair bought and sold with plain ETH (Uniswap v3 route inside the transaction)');
+{
+  // a WETH/TSLA v3 pool on the replica (1 ETH = 4.5 TSLA), deep enough to fill a curve
+  const lp = new ethers.Wallet('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', RH);
+  await RH.send('anvil_setBalance', [lp.address, '0x' + (100000n * 10n ** 18n).toString(16)]);
+  const NPM = '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3';
+  const weth = new ethers.Contract(WETH, ['function deposit() payable', 'function approve(address,uint256) returns (bool)'], lp);
+  const ts = new ethers.Contract(TSLA, ['function mint(address,uint256)', 'function approve(address,uint256) returns (bool)'], lp);
+  await (await weth.deposit({ value: 5000n * 10n ** 18n })).wait(1);
+  await (await ts.mint(lp.address, 22500n * 10n ** 18n)).wait(1);
+  await (await weth.approve(NPM, ethers.MaxUint256)).wait(1);
+  await (await ts.approve(NPM, ethers.MaxUint256)).wait(1);
+  const [t0, t1] = WETH.toLowerCase() < TSLA.toLowerCase() ? [WETH, TSLA] : [TSLA, WETH];
+  const a0 = t0 === WETH ? 5000n * 10n ** 18n : 22500n * 10n ** 18n, a1 = t0 === WETH ? 22500n * 10n ** 18n : 5000n * 10n ** 18n;
+  const sq = (x) => { let z = x, y = (x >> 1n) + 1n; while (y < z) { z = y; y = (x / y + y) >> 1n; } return z; };
+  const sqrtP = sq((a1 << 192n) / a0);
+  const npm = new ethers.Contract(NPM, ['function createAndInitializePoolIfNecessary(address,address,uint24,uint160) payable returns (address)',
+    'function mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)) payable returns (uint256,uint128,uint256,uint256)'], lp);
+  await (await npm.createAndInitializePoolIfNecessary(t0, t1, 3000, sqrtP)).wait(1);
+  await (await npm.mint([t0, t1, 3000, -887220, 887220, a0, a1, 0, 0, lp.address, 9999999999])).wait(1);
+}
+const eve = ethers.Wallet.createRandom().connect(RH);
+await RH.send('anvil_setBalance', [eve.address, '0x' + (500n * 10n ** 18n).toString(16)]);
+const pz = await api('POST', '/rh/prepare-create', { name: 'Zap Penguin', symbol: 'ZPNG', quote: TSLA, taxMarketing: 1, taxBurn: 0.5, taxRewards: 1,
+  devBuy: (5n * 10n ** 16n).toString(), from: eve.address });
+ok('launch paid in ETH (no approve)', pz.pay === 'ETH' && !pz.approve && BigInt(pz.tx.value) === 5n * 10n ** 16n, pz.error || pz.route);
+const sz = await send(eve, pz);
+const midZ = sz.market;
+let mz = await api('GET', '/market/' + midZ);
+const TZ = new ethers.Contract(mz.market.rh.token, ['function balanceOf(address) view returns (uint256)', 'function approve(address,uint256) returns (bool)'], RH);
+ok('TSLA-paired token created, dev buy with ETH', mz.market.quote === 'TSLA' && (await TZ.balanceOf(eve.address)) > 0n);
+const pzb = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'buy', amount: (10n ** 17n).toString(), from: dan.address });
+const dE = await RH.getBalance(dan.address);
+await send(dan, pzb);
+const dTok = await TZ.balanceOf(dan.address);
+ok('buy with 0.1 ETH -> TSLA -> token', pzb.pay === 'ETH' && dTok > 0n && dTok >= BigInt(pzb.quote) * 97n / 100n, fmt(dTok) + ' vs ' + fmt(pzb.quote));
+ok('only ETH left the wallet (+gas)', dE - (await RH.getBalance(dan.address)) < 10n ** 17n + 10n ** 15n);
+ok('dan holds no TSLA (never touched it)', (await tsla.balanceOf(dan.address)) === 0n);
+const pzs = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'sell', amount: (dTok / 2n).toString(), from: dan.address });
+const dE2 = await RH.getBalance(dan.address);
+await send(dan, pzs);
+ok('sell straight to ETH', (await RH.getBalance(dan.address)) > dE2, 'quote ' + fmt(pzs.quote) + ' ETH');
+// fill the TSLA curve with ETH buys -> graduation
+for (let i = 0; i < 12; i++) {
+  mz = await api('GET', '/market/' + midZ);
+  if (mz.market.graduated) break;
+  const p = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'buy', amount: (30n * 10n ** 18n).toString(), from: eve.address, slipBps: 5000 });
+  if (p.error) break;
+  await send(eve, p);
+}
+let zp = null;
+for (let i = 0; i < 30 && !zp; i++) { await sleep(2000); mz = await api('GET', '/market/' + midZ); if (mz.market.rh?.pool) zp = mz.market.rh.pool; }
+ok('TSLA pair filled with ETH and graduated', !!zp, zp || JSON.stringify({ g: mz.market.graduated, err: (await api('GET', '/admin/rh', null, true)).keeperError }));
+const pzd = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'buy', amount: (10n ** 17n).toString(), from: dan.address });
+ok('after graduation: ETH -> TSLA -> token in one router call', pzd.pay === 'ETH' && pzd.venue === 'uniswap' && !pzd.approve, pzd.error || '');
+const dT0 = await TZ.balanceOf(dan.address);
+await send(dan, pzd);
+ok('bought on Uniswap with ETH', (await TZ.balanceOf(dan.address)) > dT0);
+const pzx = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'sell', amount: ((await TZ.balanceOf(dan.address)) / 2n).toString(), from: dan.address });
+const dE3 = await RH.getBalance(dan.address);
+await send(dan, pzx);
+ok('sold on Uniswap straight to ETH', (await RH.getBalance(dan.address)) > dE3, 'quote ' + fmt(pzx.quote));
+const pq = await api('POST', '/rh/prepare-trade', { market: midZ, side: 'buy', amount: (10n ** 18n).toString(), from: dan.address, pay: 'quote' });
+ok('paying in TSLA still possible', pq.pay !== 'ETH' && !pq.error);
+
 console.log('\n6. Scan + Explore');
 await api('POST', '/admin/rh', { action: 'scan' }, true);
 const ex = await api('GET', '/markets?network=robinhood');
-ok('Explore lists both tokens', ex.markets?.filter(m => [mid, mid2].includes(m.id)).length === 2);
+ok('Explore lists all tokens', ex.markets?.filter(m => [mid, mid2, midZ].includes(m.id)).length === 3);
 const fin = await api('GET', '/admin/rh', null, true);
 ok('keeper error empty', !fin.keeperError, fin.keeperError);
 await login(alice);
 const lt = await api('POST', '/trade', { market: mid, side: 'buy', amount: '1000000000000000' });
 ok('ledger trade refused (wallet only)', /from your wallet/.test(lt.error || ''), lt.error);
 
-fs.writeFileSync('/tmp/rh_mids.json', JSON.stringify([mid, mid2]));
+fs.writeFileSync('/tmp/rh_mids.json', JSON.stringify([mid, mid2, midZ]));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

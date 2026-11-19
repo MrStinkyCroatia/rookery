@@ -19,11 +19,15 @@ export const RH = {
   usdg: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
   factoryV2: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f',
   router: '0xCaf681a66D020601342297493863E78C959E5cb2',   // SwapRouter02 (V2 swaps support taxed tokens)
+  quoter: '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7',   // Uniswap v3 QuoterV2
 };
 
 export const CURVE_IFACE = new Interface([
   'function create(string name, string symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew, uint256 quoteIn, uint256 minTokensOut) payable returns (address)',
   'function buy(address token, uint256 quoteIn, uint256 minTokensOut) payable returns (uint256)',
+  'function buyWithEth(address token, bytes path, uint256 minQuote, uint256 minTokensOut) payable returns (uint256)',
+  'function sellForEth(address token, uint256 tokenAmount, bytes path, uint256 minEthOut) returns (uint256)',
+  'function createWithEth(string name, string symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew, bytes path, uint256 minQuote, uint256 minTokensOut) payable returns (address)',
   'function sell(address token, uint256 tokenAmount, uint256 minQuoteOut) returns (uint256)',
   'function graduate(address token) returns (address)',
   'function claimFees(address quote)',
@@ -57,7 +61,9 @@ const ERC20_IFACE = new Interface([
   'function getReserves() view returns (uint112, uint112, uint32)',
   'function token0() view returns (address)',
 ]);
+const QUOTER_IFACE = new Interface(['function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] a, uint32[] b, uint256 gas)']);
 const ROUTER_IFACE = new Interface([
+  'function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum)) payable returns (uint256)',
   'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to) payable returns (uint256)',
   'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
   'function multicall(bytes[] data) payable returns (bytes[])',
@@ -138,8 +144,54 @@ export function installRhpad(Cls, H) {
     };
     return w;
   };
+  // every ops-wallet transaction goes through one queue with an explicit nonce: the cron (scan, keeper, quote sync)
+  // and admin calls can overlap inside the same object and would otherwise send two transactions with one nonce
+  P.rhSend = function (tx) {
+    const run = async () => {
+      const w = this.rhSigner();
+      const raw = await this.rhRpc('eth_getTransactionCount', [w.address, 'pending'])
+        .catch(() => this.rhRpc('eth_getTransactionCount', [w.address, 'latest']));
+      const chain = Number(BigInt(raw));
+      const meta = Number(this.meta('rh_nonce') || 0);
+      const nonce = Math.max(chain, meta);              // a lagging node never makes us reuse a nonce
+      this.setMeta('rh_nonce', String(nonce + 1));
+      try { return await w.sendTransaction({ ...tx, nonce }); }
+      catch (e) {
+        if (/nonce|already been used/i.test(e.message || '')) this.setMeta('rh_nonce', String(chain + 1));
+        throw e;
+      }
+    };
+    this._rhq = (this._rhq || Promise.resolve()).then(run, run);
+    return this._rhq;
+  };
   P.rhCurve = function () { return this.meta('rh_curve') || ''; };
-  P.rhLive = function () { return !!this.rhCurve() && this.meta('rh_version') === '2' && this.meta('rh_onchain_off') !== '1'; };
+  P.rhLive = function () { return !!this.rhCurve() && Number(this.meta('rh_version') || 1) >= 2 && this.meta('rh_onchain_off') !== '1'; };
+  P.rhZap = function () { return Number(this.meta('rh_version') || 1) >= 3; };   // curve can buy/sell stock pairs with plain ETH
+
+  /* ───────────── ETH <-> pair asset routing on Uniswap v3 (best of direct and via USDG) ───────────── */
+  const packPath = (tokens, fees) => '0x' + tokens.map((t, i) => t.slice(2).toLowerCase() + (i < fees.length ? fees[i].toString(16).padStart(6, '0') : '')).join('');
+  P.rhRoute = async function (from, to, amountIn) {
+    if (B(amountIn) <= 0n) throw new Error('Enter an amount');
+    const cands = [];
+    for (const f of [500, 3000, 10000]) cands.push([[from, to], [f]]);
+    if (lc(from) !== lc(RH.usdg) && lc(to) !== lc(RH.usdg))
+      for (const f1 of [500, 3000]) for (const f2 of [500, 3000, 10000]) cands.push([[from, RH.usdg, to], [f1, f2]]);
+    const res = await Promise.all(cands.map(async ([t, f]) => {
+      const path = packPath(t, f);
+      try {
+        const r = await this.rhRpc('eth_call', [{ to: RH.quoter, data: QUOTER_IFACE.encodeFunctionData('quoteExactInput', [path, B(amountIn)]) }, 'latest']);
+        return { path, out: QUOTER_IFACE.decodeFunctionResult('quoteExactInput', r)[0] };
+      } catch { return null; }
+    }));
+    const best = res.filter(Boolean).sort((a, b) => (b.out > a.out ? 1 : b.out < a.out ? -1 : 0))[0];
+    if (!best || best.out === 0n) throw new Error('No Uniswap route for this asset right now: pay with the asset itself');
+    return best;
+  };
+  const revPath = (path) => {
+    const h = path.slice(2), toks = [], fees = [];
+    for (let i = 0; i < h.length; i += 46) { toks.push('0x' + h.slice(i, i + 40)); if (i + 40 < h.length) fees.push(parseInt(h.slice(i + 40, i + 46), 16)); }
+    return packPath(toks.reverse(), fees.reverse());
+  };
 
   /* ───────────── pair assets: ETH, USDG and Robinhood Stock Tokens ───────────── */
   // [{ symbol, name, address, usd, logo }] — refreshed from Robinhood's stock-token API (multiplier-adjusted token price)
@@ -193,9 +245,9 @@ export function installRhpad(Cls, H) {
       if (drift > 0.15) { addrs.push(q.address); vals.push(v); }
     }
     if (!addrs.length) return { updated: 0 };
-    const w = this.rhSigner(), done = [];
+    const done = [];
     for (let i = 0; i < addrs.length; i += 60) {
-      const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('setQuotes', [addrs.slice(i, i + 60), vals.slice(i, i + 60)]) });
+      const tx = await this.rhSend({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('setQuotes', [addrs.slice(i, i + 60), vals.slice(i, i + 60)]) });
       await this.rhWait(tx.hash, (m, p) => this.rhRpc(m, p));
       done.push(tx.hash);
     }
@@ -205,7 +257,7 @@ export function installRhpad(Cls, H) {
   /* ───────────── public config ───────────── */
   P.rhConfig = async function () {
     const curve = this.rhCurve();
-    const out = { live: this.rhLive(), chainId: RH_CHAIN_ID, curve, router: RH.router, weth: RH.weth, explorer: 'https://robinhoodchain.blockscout.com',
+    const out = { live: this.rhLive(), zap: this.rhZap(), chainId: RH_CHAIN_ID, curve, router: RH.router, weth: RH.weth, explorer: 'https://robinhoodchain.blockscout.com',
       supply: '1000000000', curveTokens: '800000000', vToken: '1073000000', maxTax: 5, maxTaxTotal: 10,
       quotes: [{ symbol: 'ETH', name: 'Ether', address: ZERO, usd: this.ethUsd() }, ...this.rhQuotes()].map(q => ({ symbol: q.symbol, name: q.name, address: q.address, usd: q.usd, logo: q.logo || '' })) };
     if (!curve) return out;
@@ -253,12 +305,21 @@ export function installRhpad(Cls, H) {
     if (mkt + brn + rew > 1000) throw new Error('Total creator taxes can be at most 10%');
     const [fee] = await this.rhCall('feeBps', []);
     const dev = b.devBuy ? B(b.devBuy) : 0n;
-    const expect = dev > 0n ? quoteNew(vQ, Number(fee), mkt, brn, rew, dev) : 0n;
+    // stock / USDG pairs: the first buy can be paid in plain ETH (swapped on Uniswap inside the launch transaction)
+    const viaEth = !q.eth && dev > 0n && b.pay !== 'quote' && this.rhZap();
+    const route = viaEth ? await this.rhRoute(RH.weth, q.address, dev) : null;
+    const qIn = viaEth ? route.out : dev;
+    const expect = dev > 0n ? quoteNew(vQ, Number(fee), mkt, brn, rew, qIn) : 0n;
     const minOut = dev > 0n ? slipMin(expect, b.slipBps) : 0n;
     const id = randHex(12);
     const body = { description: String(b.description || '').slice(0, 600), image: img, x: b.x || '', tg: b.tg || '', web: b.web || '', hatchId: b.hatchId || '' };
     this.sql.exec('INSERT INTO rh_drafts (id,name,symbol,body,user_id,created) VALUES (?,?,?,?,?,?)', id, name, symbol, JSON.stringify(body), user?.id || null, now());
     this.sql.exec('DELETE FROM rh_drafts WHERE created < ? AND used = ?', now() - 7 * 86400e3, '');
+    if (viaEth) {
+      return { ok: true, draft: id, chainId: RH_CHAIN_ID, quote: q.symbol, pay: 'ETH', approve: null, route: route.path, quoteIn: qIn.toString(),
+        tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('createWithEth', [name, symbol, q.address, mkt, brn, rew, route.path, slipMin(qIn, b.slipBps), minOut]), value: hex(dev) },
+        expectTokens: expect.toString() };
+    }
     const approve = !q.eth && dev > 0n ? await this.rhNeedApprove(q.address, b.from, this.rhCurve(), dev) : null;
     return { ok: true, draft: id, chainId: RH_CHAIN_ID, quote: q.symbol, approve,
       tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('create', [name, symbol, q.address, mkt, brn, rew, q.eth ? 0n : dev, minOut]),
@@ -286,6 +347,49 @@ export function installRhpad(Cls, H) {
     const amt = B(b.amount);
     if (amt <= 0n) throw new Error('Enter an amount');
     const from = isAddr(b.from) ? getAddress(b.from) : null;
+    // stock / USDG pairs: pay and receive plain ETH by default (Uniswap v3 swap inside the same transaction)
+    const viaEth = !isEth && b.pay !== 'quote' && this.rhZap();
+    const TWO = '0x0000000000000000000000000000000000000002';   // SwapRouter02 ADDRESS_THIS
+
+    if (viaEth && m.migrated && m.rh_pool) {
+      // graduated stock pair: ETH -> (v3) stock -> (V2 pool) token, or back, in one router multicall
+      const { rTok, rQ } = await this.rhPoolState(m);
+      const st = getAddress(q.address);
+      if (b.side === 'sell') {
+        const net = amt - (amt * taxBps(m)) / 10000n;
+        const qOut = v2Out(net, rTok, rQ);
+        const r = await this.rhRoute(st, RH.weth, qOut);
+        const min = slipMin(r.out, b.slipBps || 500);
+        const data = ROUTER_IFACE.encodeFunctionData('multicall', [[
+          ROUTER_IFACE.encodeFunctionData('swapExactTokensForTokens', [amt, 0n, [token, st], TWO]),
+          ROUTER_IFACE.encodeFunctionData('exactInput', [[r.path, TWO, 0n, 0n]]),
+          ROUTER_IFACE.encodeFunctionData('unwrapWETH9', [min, from || ZERO])]]);
+        return { ok: true, chainId: RH_CHAIN_ID, venue: 'uniswap', pay: 'ETH', quote: r.out.toString(),
+          approve: await this.rhNeedApprove(token, from, RH.router, amt), tx: { to: RH.router, data, value: '0x0' } };
+      }
+      const r = await this.rhRoute(RH.weth, st, amt);
+      const gross = v2Out(r.out, rQ, rTok);
+      const out = gross - (gross * taxBps(m)) / 10000n;
+      const data = ROUTER_IFACE.encodeFunctionData('multicall', [[
+        ROUTER_IFACE.encodeFunctionData('exactInput', [[r.path, TWO, amt, 0n]]),
+        ROUTER_IFACE.encodeFunctionData('swapExactTokensForTokens', [0n, slipMin(out, b.slipBps || 500), [st, token], from || ZERO])]]);
+      return { ok: true, chainId: RH_CHAIN_ID, venue: 'uniswap', pay: 'ETH', quote: out.toString(), approve: null, tx: { to: RH.router, data, value: hex(amt) } };
+    }
+    if (viaEth && !m.graduated) {
+      if (b.side === 'sell') {
+        const [qo] = await this.rhCall('quoteSell', [token, amt]);
+        if (qo === 0n) throw new Error('Amount too small');
+        const r = await this.rhRoute(getAddress(q.address), RH.weth, qo);
+        return { ok: true, chainId: RH_CHAIN_ID, venue: 'curve', pay: 'ETH', quote: r.out.toString(), quoteAsset: qo.toString(),
+          tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('sellForEth', [token, amt, r.path, slipMin(r.out, b.slipBps || 500)]), value: '0x0' } };
+      }
+      if (amt < 50_000_000_000_000n) throw new Error('Minimum buy is 0.00005 ETH');
+      const r = await this.rhRoute(RH.weth, getAddress(q.address), amt);
+      const [qo] = await this.rhCall('quoteBuy', [token, r.out]);
+      if (qo === 0n) throw new Error('This curve is sold out: it graduates to Uniswap in a moment');
+      return { ok: true, chainId: RH_CHAIN_ID, venue: 'curve', pay: 'ETH', quote: qo.toString(), quoteAsset: r.out.toString(),
+        tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('buyWithEth', [token, r.path, slipMin(r.out, b.slipBps || 300), slipMin(qo, b.slipBps || 300)]), value: hex(amt) } };
+    }
 
     if (m.migrated && m.rh_pool) {
       // graduated: trade on the Uniswap V2 pool through SwapRouter02 (supports the token's taxes)
@@ -568,12 +672,11 @@ export function installRhpad(Cls, H) {
     const done = [];
     const claimDue = now() - Number(this.meta('rh_claim_ts') || 0) > 3600e3;
     if (!due.length && !claimDue) return { done };
-    const w = this.rhSigner();
     for (const m of due) {
       const c = await this.rhCall('curves', [getAddress(m.rh_token)]);
       if (c.graduated) continue;
       try {
-        const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('graduate', [getAddress(m.rh_token)]), gasLimit: 6_000_000n });
+        const tx = await this.rhSend({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('graduate', [getAddress(m.rh_token)]), gasLimit: 6_000_000n });
         await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
         await this.rhSyncTx(tx.hash);
         done.push({ market: m.id, tx: tx.hash });
@@ -583,7 +686,7 @@ export function installRhpad(Cls, H) {
     this.setMeta('rh_claim_ts', String(now()));
     const [pot] = await this.rhCall('feesAccrued', [ZERO]);
     if (pot >= 2_000_000_000_000_000n) {   // 0.002 ETH
-      const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimFees', [ZERO]) });
+      const tx = await this.rhSend({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimFees', [ZERO]) });
       await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
       done.push({ claimed: pot.toString(), tx: tx.hash });
     }
@@ -648,22 +751,21 @@ export function installRhpad(Cls, H) {
 
   // deploys RookeryCurve2 from the ops key (owner + keeper); creation bytecode comes from the tested build in rhcurve/
   P.rhDeploy = async function (b) {
-    if (this.rhCurve() && this.meta('rh_version') === '2' && !b.force) throw new Error('Curve already deployed at ' + this.rhCurve());
-    const pending = this.meta('rh_deploy2_tx');
+    if (this.rhCurve() && this.rhZap() && !b.force) throw new Error('Curve already deployed at ' + this.rhCurve());
+    const pending = this.meta('rh_deploy3_tx');
     if (pending && !b.force) throw new Error('A deploy was already sent: ' + pending + ' (check it, then set the curve)');
     const code = String(b.bytecode || '');
     if (!/^0x[0-9a-fA-F]+$/.test(code) || code.length < 2000) throw new Error('bytecode missing');
     const vEth = B(b.vEthWei || 0) || BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n;
-    const w = this.rhSigner();
-    const args = AbiCoder.defaultAbiCoder().encode(['address', 'address', 'address', 'uint256'], [RH.weth, b.factoryV2 || RH.factoryV2, w.address, vEth]);
-    const tx = await w.sendTransaction({ data: code + args.slice(2) });
-    this.setMeta('rh_deploy2_tx', tx.hash);
+    const args = AbiCoder.defaultAbiCoder().encode(['address', 'address', 'address', 'address', 'uint256'], [RH.weth, b.factoryV2 || RH.factoryV2, RH.router, w.address, vEth]);
+    const tx = await this.rhSend({ data: code + args.slice(2) });
+    this.setMeta('rh_deploy3_tx', tx.hash);
     const rc = await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
     if (!rc.contractAddress) throw new Error('no contract address');
     const addr = getAddress(rc.contractAddress), blk = Number(BigInt(rc.blockNumber));
-    if (this.rhCurve()) this.setMeta('rh_curve_v1', this.rhCurve());
+    if (this.rhCurve()) this.setMeta('rh_curve_prev', this.rhCurve());
     this.setMeta('rh_curve', addr);
-    this.setMeta('rh_version', '2');
+    this.setMeta('rh_version', '3');
     this.setMeta('rh_deploy_block', String(blk));
     this.setMeta('rh_block', String(blk));
     this.setMeta('rh_qsync_ts', '0');
@@ -672,12 +774,12 @@ export function installRhpad(Cls, H) {
 
   // mainnet smoke test with the ops wallet: launch with taxes, check the mirror, sell everything back, check again
   P.rhSelfTest = async function (b) {
-    const w = this.rhSigner(), rpc = (m2, p2) => this.rhRpc(m2, p2), report = {};
+    const rpc = (m2, p2) => this.rhRpc(m2, p2), report = {}, w = { address: this.rhOps().address };
     const dev = B(b.devWei || '500000000000000');
     const name = 'Rookery Smoke Test', symbol = 'RSMOKE' + randHex(1).toUpperCase();
     const prep = await this.rhPrepareCreate(null, { name, symbol, description: 'self-test, removed after the check', devBuy: dev.toString(),
       quote: 'ETH', taxMarketing: 1, taxBurn: 0.5, taxRewards: 1 });
-    const t1 = await w.sendTransaction({ to: prep.tx.to, data: prep.tx.data, value: B(prep.tx.value) });
+    const t1 = await this.rhSend({ to: prep.tx.to, data: prep.tx.data, value: B(prep.tx.value) });
     await this.rhWait(t1.hash, rpc);
     const s1 = await this.rhSyncTx(t1.hash);
     const m = this.market(s1.market);
@@ -686,7 +788,7 @@ export function installRhpad(Cls, H) {
     report.walletTokens = bal.toString(); report.expectTokens = prep.expectTokens;
     const ps = await this.rhPrepareTrade({ market: m.id, side: 'sell', amount: bal.toString(), slipBps: 100 });
     const before = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
-    const t2 = await w.sendTransaction({ to: ps.tx.to, data: ps.tx.data, value: 0n });
+    const t2 = await this.rhSend({ to: ps.tx.to, data: ps.tx.data, value: 0n });
     const rc2 = await this.rhWait(t2.hash, rpc);
     await this.rhSyncTx(t2.hash);
     const after = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
@@ -698,9 +800,41 @@ export function installRhpad(Cls, H) {
     report.mirror = { trades: m2.trades, mktPaid: m2.mkt_paid, burned: m2.burned, creatorOwed: owed.toString() };
     report.pass = !!(bal.toString() === prep.expectTokens && report.sell.ethBack === ps.quote && m2.trades === 2 && owed > 0n && B(m2.burned) > 0n);
     if (owed > 0n) {
-      const t3 = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimCreator', [ZERO]) });
+      const t3 = await this.rhSend({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimCreator', [ZERO]) });
       await this.rhWait(t3.hash, rpc);
       report.claimCreator = t3.hash;
+    }
+    // stock pair paid in plain ETH (Uniswap v3 swap inside the launch / buy / sell)
+    if (!b.skipZap && this.rhZap()) {
+      const pair = this.rhQuotes().find(q => q.symbol === (b.pairSymbol || 'TSLA'));
+      if (pair) {
+        const ecc = {};
+        const cp = await this.rhPrepareCreate(null, { name: 'Rookery Zap Test', symbol: 'RZAP' + randHex(1).toUpperCase(), quote: pair.symbol,
+          taxMarketing: 1, taxBurn: 0.5, taxRewards: 1, devBuy: dev.toString() });
+        const z1 = await this.rhSend({ to: cp.tx.to, data: cp.tx.data, value: B(cp.tx.value) });
+        await this.rhWait(z1.hash, rpc);
+        const zs = await this.rhSyncTx(z1.hash);
+        const zm = this.market(zs.market);
+        Object.assign(ecc, { market: zs.market, quote: zm?.quote, token: zm?.rh_token, route: cp.route, quoteIn: cp.quoteIn,
+          tokensInWallet: await this.rhWalletBalance(zm, w.address), expect: cp.expectTokens });
+        // buy more with ETH, sell everything back to ETH
+        const bp = await this.rhPrepareTrade({ market: zm.id, side: 'buy', amount: dev.toString(), from: w.address });
+        const zb = await this.rhSend({ to: bp.tx.to, data: bp.tx.data, value: B(bp.tx.value) });
+        await this.rhWait(zb.hash, rpc); await this.rhSyncTx(zb.hash);
+        const bal2 = await this.rhWalletBalance(zm, w.address);
+        const sp = await this.rhPrepareTrade({ market: zm.id, side: 'sell', amount: bal2, from: w.address });
+        const e1 = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
+        const zsl = await this.rhSend({ to: sp.tx.to, data: sp.tx.data, value: 0n });
+        await this.rhWait(zsl.hash, rpc); await this.rhSyncTx(zsl.hash);
+        const e2 = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
+        Object.assign(ecc, { buyTx: zb.hash, sellTx: zsl.hash, ethBack: (e2 - e1).toString(), sellQuote: sp.quote,
+          pass: BigInt(cp.expectTokens) > 0n && BigInt(bal2) > 0n && (e2 - e1) > 0n });
+        report.zap = ecc;
+        if (b.keep !== true) {
+          this.sql.exec('DELETE FROM trades WHERE market=?', zm.id); this.sql.exec('DELETE FROM markets WHERE id=?', zm.id);
+          this.sql.exec('DELETE FROM rh_holdings WHERE token=?', zm.rh_token);
+        }
+      } else report.zap = { skipped: 'pair not listed' };
     }
     if (b.keep !== true) {
       this.sql.exec('DELETE FROM trades WHERE market=?', m.id); this.sql.exec('DELETE FROM markets WHERE id=?', m.id);

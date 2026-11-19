@@ -1036,9 +1036,9 @@ async function viewExplore() {
       </div>
       <div class="nets">
         <div class="net-card"><span class="net-ico">Ø</span><div><h4>Zero</h4><span class="mu" style="font-size:12.5px">by LayerZero · mainnet 30.11</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.zero || 0}</b> tokens</span></div>
-          <div class="cd"><b id="cdZero">${countdown(nets.zero?.launchAt)}</b><span class="mono mu">${esc(nets.zero?.status || '')}</span></div></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">Pre-market · mainnet in <i id="cdZero">${countdown(nets.zero?.launchAt)}</i></span></div></div>
         <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
-          <div class="cd"><b>TBA</b><span class="mono mu">${esc(nets.giwa?.status || '')}</span></div></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">Pre-market · testnet</span></div></div>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=robinhood]')?.click()"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">by Robinhood · ETH &amp; stock pairs · Uniswap V2</span><span class="net-meta"><i class="dotp live"></i>Pre-market live · on-chain · <b>${nt.robinhood || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">Premarket · on-chain</span></div></a>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
@@ -1802,11 +1802,14 @@ async function viewCreate(hatchId) {
           <optgroup label="Crypto">${qs.filter(q => ['ETH', 'USDG'].includes(q.symbol)).map(opt).join('')}</optgroup>
           <optgroup label="Robinhood Stock Tokens (${stocks.length})">${stocks.map(opt).join('')}</optgroup>
         </select>
-        <small class="mu" style="display:block;margin-top:6px;font-size:11.5px;line-height:1.5">${cur.symbol === 'ETH' ? 'Buyers pay in ETH.' : `Buyers pay in <b>${esc(cur.symbol)}</b> (${esc(cur.name)}); their wallet approves it once.`} The token is a real ERC-20 from block one and graduates to a Uniswap V2 pool with the LP burned.</small></div>`;
+        <small class="mu" style="display:block;margin-top:6px;font-size:11.5px;line-height:1.5">${cur.symbol === 'ETH' ? 'Buyers pay in ETH.' : `Buyers pay in <b>ETH</b>: Uniswap swaps it to ${esc(cur.symbol)} inside the same transaction.${S.rh?.zap ? '' : ` They can also pay in ${esc(cur.symbol)} itself.`}`} The token is a real ERC-20 from block one and graduates to a Uniswap V2 pool with the LP burned.</small></div>`;
       $('#rhPair').onchange = (e) => { F.rhQuote = e.target.value; paint(); };
+      const devCur = (cur.symbol === 'ETH' || !S.rh?.zap) ? cur.symbol : 'ETH';
       $('#devTxt').textContent = '';
-      $('#devLbl').textContent = 'Amount · ' + cur.symbol;
-      $('#devHint').textContent = `Optional first buy in ${cur.symbol} from your wallet, in the same transaction that deploys the token. Bought tokens land in your wallet.`;
+      $('#devLbl').textContent = 'Amount · ' + devCur;
+      $('#devHint').textContent = cur.symbol === 'ETH'
+        ? 'Optional first buy in ETH from your wallet, in the same transaction that deploys the token. Bought tokens land in your wallet.'
+        : `Optional first buy in ETH: it is swapped to ${cur.symbol} on Uniswap inside the same transaction that deploys the token. You never touch ${cur.symbol} yourself.`;
       const ql = $$('.qcur'); if (ql[0]) ql[0].textContent = cur.symbol; if (ql[1]) ql[1].textContent = '$' + (F.symbol || 'TOKEN');
       const tn = $('#taxNote'); tn.style.display = 'block';
       tn.textContent = 'Robinhood Chain: these taxes apply on the bonding curve AND keep applying on Uniswap after graduation. On the curve marketing is paid in the pair asset; on Uniswap it is paid in your token. Rewards go to holders in your token: they land in wallets on the next transfer or with one claim. Wallet-to-wallet transfers are never taxed.';
@@ -3314,10 +3317,11 @@ const RHW = {
         <p class="mu" style="font-size:13px;line-height:1.55">The curve is sold out. The contract is opening the Uniswap V2 pool and sending the LP to the dead address. This takes a few seconds.</p>`;
       return;
     }
-    let side = 'buy', addr = null, timer = null;
+    let side = 'buy', addr = null, timer = null, payEth = !!(S.rh?.zap && !RHW.isEth(m));   // stock pairs: pay/receive plain ETH by default
     box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <span class="mono mu" style="font-size:11px">${dex ? 'UNISWAP V2 · ROBINHOOD CHAIN' : 'BONDING CURVE · ON-CHAIN'}</span><span class="tag robinhood">${esc(m.symbol)}/${esc(Q)}</span></div>
       <div class="tb-tabs"><button class="buy on" data-rs="buy">Buy</button><button class="sell" data-rs="sell">Sell</button></div>
+      ${RHW.isEth(m) ? '' : `<div class="pay-sel" id="rhPay"><span class="mu">${side === 'buy' ? 'Pay with' : 'Get paid in'}</span><button data-pay="eth">ETH</button><button data-pay="q">${esc(Q)}</button></div>`}
       <div class="amt"><input id="rhAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="rhUnit">${esc(Q)}</span></div>
       <div class="quick" id="rhQuick"></div>
       <div class="est" id="rhEst"></div>
@@ -3340,17 +3344,22 @@ const RHW = {
       $('#rhEst').innerHTML = '<div class="kv"><span>You get ≈</span><b class="mu">…</b></div>';
       timer = setTimeout(async () => {
         try {
-          const r = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString() });
-          $('#rhEst').innerHTML = `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(B(r.quote), side === 'buy' ? 2 : 6))} ${side === 'buy' ? '$' + esc(m.symbol) : esc(Q)}</b></div>
+          const r = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), pay: payEth ? 'eth' : 'quote' });
+          const outUnit = side === 'buy' ? '$' + esc(m.symbol) : (payEth ? 'ETH' : esc(Q));
+          $('#rhEst').innerHTML = `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(B(r.quote), side === 'buy' ? 2 : payEth ? 6 : 4))} ${outUnit}</b></div>
             <div class="kv"><span>Slippage guard</span><b>${dex ? '5' : '3'}%</b></div>`;
         } catch (e) { $('#rhEst').innerHTML = `<div class="kv"><span class="dn">${esc(e.message)}</span></div>`; }
       }, 350);
     };
     const quick = () => {
-      $('#rhUnit').textContent = side === 'buy' ? Q : '$' + m.symbol;
+      const pq = payEth ? 'ETH' : Q;
+      $('#rhUnit').textContent = side === 'buy' ? pq : '$' + m.symbol;
+      $$('#rhPay button').forEach(b => b.classList.toggle('on', b.dataset.pay === (payEth ? 'eth' : 'q')));
+      $('#rhPay .mu') && ($('#rhPay .mu').textContent = side === 'buy' ? 'Pay with' : 'Get paid in');
       $('#rhGo').textContent = side === 'buy' ? 'Buy from wallet' : 'Sell from wallet';
       $('#rhGo').className = 'btn lg wide ' + (side === 'buy' ? 'up' : 'dn');
-      $('#rhQuick').innerHTML = side === 'buy' ? quickBuy.map(v => `<button data-v="${v}">${v} ${esc(Q)}</button>`).join('')
+      const qb = payEth ? [0.001, 0.005, 0.01, 0.05].map(v => String(v)) : quickBuy;
+      $('#rhQuick').innerHTML = side === 'buy' ? qb.map(v => `<button data-v="${v}">${v} ${esc(pq)}</button>`).join('')
         : ['25', '50', '100'].map(v => `<button data-p="${v}">${v}%</button>`).join('');
       $$('#rhQuick button').forEach(b => b.onclick = async () => {
         if (b.dataset.v) $('#rhAmt').value = b.dataset.v;
@@ -3363,7 +3372,11 @@ const RHW = {
       });
       est();
     };
-    $$('[data-rs]').forEach(b => b.onclick = () => { side = b.dataset.rs; $$('[data-rs]').forEach(x => x.classList.toggle('on', x === b)); $('#rhAmt').value = ''; quick(); });
+    $$('[data-rs]').forEach(b => b.onclick = () => { side = b.dataset.rs; $$('[data-rs]').forEach(x => x.classList.toggle('on', x === b));
+      $('#rhPay') && ($('#rhPay').innerHTML = `<span class="mu">${side === 'buy' ? 'Pay with' : 'Get paid in'}</span><button data-pay="eth">ETH</button><button data-pay="q">${esc(Q)}</button>`);
+      bindPay(); $('#rhAmt').value = ''; quick(); });
+    const bindPay = () => $$('#rhPay button').forEach(b => b.onclick = () => { payEth = b.dataset.pay === 'eth'; $('#rhAmt').value = ''; quick(); });
+    bindPay();
     $('#rhAmt').oninput = est;
     $('#rhWatch').onclick = () => RHW.watch(m);
     $('#rhGo').onclick = async () => {
@@ -3372,9 +3385,9 @@ const RHW = {
       const btn = $('#rhGo'); btn.disabled = true;
       try {
         addr = await RHW.connect();
-        const prep = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), from: addr, slipBps: dex ? 500 : 300 });
+        const prep = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), from: addr, slipBps: dex ? 500 : 300, pay: payEth ? 'eth' : 'quote' });
         await RHW.send(addr, prep, btn);
-        toast(side === 'buy' ? `Bought $${esc(m.symbol)}: the tokens are in your wallet` : `Sold $${esc(m.symbol)}: the ${esc(Q)} is in your wallet`);
+        toast(side === 'buy' ? `Bought $${esc(m.symbol)}: the tokens are in your wallet` : `Sold $${esc(m.symbol)}: the ${payEth ? 'ETH' : esc(Q)} is in your wallet`);
         viewToken(m.id);
       } catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); }
       finally { btn.disabled = false; quick(); }
