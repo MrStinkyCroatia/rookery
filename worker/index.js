@@ -247,7 +247,7 @@ export class Books {
     const usd = this.zroUsd();
     const burn = B(this.meta('plaunch_burn')), burnEth = B(this.meta('plaunch_burn_eth'));
     const stats = {
-      volumeUsd: this.sql.exec('SELECT volume, quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * this.usdOf(qa(r)), 0),
+      volumeUsd: this.sql.exec('SELECT volume, quote, rh_quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * (r.rh_quote ? this.rhMarketUsd(r) : this.usdOf(qa(r))), 0),
       markets: this.sql.exec('SELECT COUNT(*) c FROM markets').one().c,
       traders: this.sql.exec('SELECT COUNT(*) c FROM users').one().c,
       burnReserveUsd: (Number(burn) / 1e18) * usd + (Number(burnEth) / 1e18) * this.ethUsd() + (Number(B(this.meta('plaunch_burn_xlm'))) / 1e18) * this.xlmUsd(),
@@ -1368,7 +1368,7 @@ export class Books {
   }
 
   view(m, _usd) {
-    const usd = this.usdOf(qa(m)); // quote asset -> USD
+    const usd = m.rh_quote ? this.rhMarketUsd(m) : this.usdOf(qa(m)); // quote asset -> USD (Robinhood pairs: ETH, USDG or a stock token)
     const price = Books.price(m);
     const sold = B(m.reserve_tok);
     const curve = B(m.curve_tokens) * WEI;
@@ -1408,7 +1408,8 @@ export class Books {
         net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer,
         gradUsd: Number(m.grad_usd) || ((m.graduated || m.migrated) ? Math.round(Number(B(m.v_wei || 0)) / 1e18 * 14.397 * this.xlmUsd()) : this.stGradUsd()),
         job: m.graduated && !m.migrated ? (this.sql.exec('SELECT status, error FROM stellar_jobs WHERE market=?', m.id).toArray()[0] || null) : null } : null,
-      rh: m.rh_token ? { token: m.rh_token, pool: m.rh_pool || null, curve: this.rhCurve(), creator: m.rh_creator, explorer: 'https://robinhoodchain.blockscout.com' } : null,
+      rh: m.rh_token ? { token: m.rh_token, pool: m.rh_pool || null, curve: this.rhCurve(), creator: m.rh_creator, quote: m.rh_quote || '0x0000000000000000000000000000000000000000',
+        rewards: m.rh_rewards || '0', explorer: 'https://robinhoodchain.blockscout.com' } : null,
       maxBuyBps: m.max_buy_bps, maxBuyUntil: m.max_buy_until,
       taxes: { platform: 0.5, marketing: m.tax_mkt / 100, burn: m.tax_burn / 100, rewards: m.tax_rew / 100 },
       rewardsPaidUsd: (Number(B(m.rewards_paid)) / 1e18) * usd,
@@ -2834,7 +2835,7 @@ export class Books {
 
       /* public */
       if (method === 'GET' && p === '/stats') {
-        const volUsd = this.sql.exec('SELECT volume, quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * this.usdOf(qa(r)), 0);
+        const volUsd = this.sql.exec('SELECT volume, quote, rh_quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * (r.rh_quote ? this.rhMarketUsd(r) : this.usdOf(qa(r))), 0);
         const burn = B(this.meta('plaunch_burn')), burnEth = B(this.meta('plaunch_burn_eth')), burnXlm = B(this.meta('plaunch_burn_xlm'));
         return json({
           zroUsd: usd, zroChange24h: Number(this.meta('zro_chg') || 0), ethUsd: this.ethUsd(), ethChains: ETH_CHAINS, xlmUsd: this.xlmUsd(),
@@ -3115,6 +3116,11 @@ export class Books {
       if (method === 'POST' && p === '/rh/prepare-create') return json(await this.rhPrepareCreate(user, await req.json().catch(() => ({}))));
       if (method === 'POST' && p === '/rh/prepare-trade') return json(await this.rhPrepareTrade(await req.json().catch(() => ({}))));
       if (method === 'POST' && p === '/rh/sync') { const b = await req.json().catch(() => ({})); return json(await this.rhSyncTx(String(b.hash || ''))); }
+      if (method === 'GET' && p === '/rh/wallet') {
+        const m = this.market(url.searchParams.get('market') || '');
+        return json({ ok: true, ...(await this.rhWalletInfo(m, url.searchParams.get('address') || '')) });
+      }
+      if (method === 'POST' && p === '/rh/prepare-claim') return json(await this.rhPrepareClaim(await req.json().catch(() => ({}))));
       if (method === 'GET' && p === '/rh/balance') {
         const m = this.market(url.searchParams.get('market') || '');
         return json({ ok: true, balance: await this.rhWalletBalance(m, url.searchParams.get('address') || '') });
@@ -3483,6 +3489,7 @@ export class Books {
           if (b.action === 'fund') return json({ ok: true, ...(await this.rhFund(b)) });
           if (b.action === 'deploy') return json({ ok: true, ...(await this.rhDeploy(b)) });
           if (b.action === 'scan') return json({ ok: true, scan: await this.rhScan() });
+          if (b.action === 'quotes') return json({ ok: true, refreshed: await this.rhRefreshQuotes(true), sync: await this.rhSyncQuotes(true) });
           if (b.action === 'selftest') return json({ ok: true, ...(await this.rhSelfTest(b)) });
           // our own smoke-test token: drop it from Rookery's lists (it stays on-chain; seen events are never re-applied)
           if (b.action === 'forget') {

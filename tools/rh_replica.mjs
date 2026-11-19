@@ -9,6 +9,7 @@ const C = {
   factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA',
   npm: '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3',
   router: '0xCaf681a66D020601342297493863E78C959E5cb2',
+  factoryV2: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f',
 };
 const IMPL = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const ADMIN = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
@@ -35,6 +36,7 @@ const tiers = [100, 500, 3000, 10000].map(f => ethers.keccak256(ethers.AbiCoder.
 out.factory = await copy(C.factory, [...range(0, 8), ...tiers]);
 out.npm = await copy(C.npm, range(0, 32));
 out.router = await copy(C.router, range(0, 16));
+out.factoryV2 = await copy(C.factoryV2, range(0, 4));
 // sanity: the replica answers like mainnet
 const f = new ethers.Contract(C.factory, ['function feeAmountTickSpacing(uint24) view returns (int24)'], LOCAL);
 const w = new ethers.Contract(C.weth, ['function symbol() view returns (string)'], LOCAL);

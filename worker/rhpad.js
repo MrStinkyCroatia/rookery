@@ -1,54 +1,86 @@
-// Robinhood Chain launchpad: every token is a real ERC-20 from the first second, bought and sold from the user's own
-// wallet against the RookeryCurve contract (pump-style), graduating into a Uniswap v3 pool with the LP burned.
-// The worker never holds user funds here. It mirrors contract events into markets/trades so Explore, charts and
-// token pages work like every other network, builds the transactions the wallet signs, and runs a keeper that
-// graduates sold-out curves and collects the platform fee (0.5%) for the $臭企鹅 buy & burn.
+// Robinhood Chain launchpad (RookeryCurve2): every token is a real ERC-20 from the first second, bought and sold from the
+// user's own wallet against the curve contract (pump-style). A token trades against its pair asset: ETH, USDG or a
+// Robinhood Stock Token. Creator taxes (marketing / burn / holder rewards) apply on the curve and keep applying on the
+// Uniswap V2 pool after graduation (LP minted to the dead address).
+// The worker never holds user funds here. It mirrors contract events into markets/trades so Explore, charts and token
+// pages work like every other network, builds the transactions the wallet signs, keeps the pair allow-list priced from
+// Robinhood's stock-token API, and runs a keeper that graduates sold-out curves and collects the platform fee.
 import { Interface, JsonRpcProvider, Wallet, getAddress, AbiCoder } from 'ethers';
 
 export const RHOPS_INDEX = 2_000_000_001;   // HD child for Robinhood Chain operations (deployer, keeper, fee address)
 const RH_CHAIN_ID = 4663;
 const RELAY_API = 'https://api.relay.link';
+const RHJ_API = 'https://api.robinhood.com/rhj';
 const V_TOKEN = 1_073_000_000n * 10n ** 18n;
 const CURVE_TOKENS = 800_000_000n * 10n ** 18n;
+const ZERO = '0x0000000000000000000000000000000000000000';
+export const RH = {
+  weth: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
+  usdg: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+  factoryV2: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f',
+  router: '0xCaf681a66D020601342297493863E78C959E5cb2',   // SwapRouter02 (V2 swaps support taxed tokens)
+};
 
 export const CURVE_IFACE = new Interface([
-  'function create(string name, string symbol, uint256 minTokensOut) payable returns (address)',
-  'function buy(address token, uint256 minTokensOut) payable returns (uint256)',
-  'function sell(address token, uint256 tokenAmount, uint256 minEthOut) returns (uint256)',
+  'function create(string name, string symbol, address quote, uint16 taxMkt, uint16 taxBurn, uint16 taxRew, uint256 quoteIn, uint256 minTokensOut) payable returns (address)',
+  'function buy(address token, uint256 quoteIn, uint256 minTokensOut) payable returns (uint256)',
+  'function sell(address token, uint256 tokenAmount, uint256 minQuoteOut) returns (uint256)',
   'function graduate(address token) returns (address)',
-  'function claimFees()',
-  'function quoteBuy(address token, uint256 ethIn) view returns (uint256)',
+  'function claimFees(address quote)',
+  'function claimCreator(address quote)',
+  'function setQuotes(address[] quotes, uint256[] vQuotes)',
+  'function quoteBuy(address token, uint256 quoteIn) view returns (uint256)',
   'function quoteSell(address token, uint256 tokenAmount) view returns (uint256)',
-  'function curves(address) view returns (address creator, uint128 vEth, uint128 realEth, uint128 sold, uint64 createdAt, bool complete, bool graduated, address pool)',
+  'function curves(address) view returns (address creator, address quote, uint128 vQuote, uint128 realQuote, uint128 sold, uint64 createdAt, bool complete, bool graduated, address pair)',
+  'function vQuoteFor(address) view returns (uint256)',
   'function feeBps() view returns (uint16)',
-  'function vEthNext() view returns (uint256)',
-  'function feesAccrued() view returns (uint256)',
+  'function feesAccrued(address) view returns (uint256)',
+  'function creatorOwed(address, address) view returns (uint256)',
   'function feeTo() view returns (address)',
   'function owner() view returns (address)',
   'function launchesPaused() view returns (bool)',
-  'event Created(address indexed token, address indexed creator, string name, string symbol, uint256 vEth)',
-  'event Trade(address indexed token, address indexed trader, bool isBuy, uint256 ethAmount, uint256 tokenAmount, uint256 fee, uint256 realEth, uint256 sold)',
+  'event Created(address indexed token, address indexed creator, address indexed quote, string name, string symbol, uint256 vQuote, uint16 taxMarketing, uint16 taxBurn, uint16 taxRewards)',
+  'event Trade(address indexed token, address indexed trader, bool isBuy, uint256 quoteAmount, uint256 tokenAmount, uint256 fee, uint256 realQuote, uint256 sold)',
+  'event Taxes(address indexed token, uint256 marketingQuote, uint256 burnedTokens, uint256 rewardTokens)',
   'event Complete(address indexed token)',
-  'event Graduated(address indexed token, address pool, uint256 lpTokenId, uint256 ethToPool, uint256 tokensToPool, uint256 tokensBurned)',
-  'event FeesClaimed(address to, uint256 amount)',
+  'event Graduated(address indexed token, address pair, uint256 liquidity, uint256 quoteToPool, uint256 tokensToPool, uint256 tokensBurned)',
 ]);
 const ERC20_IFACE = new Interface([
   'event Transfer(address indexed from, address indexed to, uint256 value)',
+  'event Taxed(address indexed from, address indexed to, uint256 marketing, uint256 burned, uint256 rewards)',
+  'event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)',
   'function balanceOf(address) view returns (uint256)',
+  'function allowance(address, address) view returns (uint256)',
+  'function approve(address, uint256) returns (bool)',
+  'function pendingRewards(address) view returns (uint256)',
+  'function claim()',
+  'function getReserves() view returns (uint112, uint112, uint32)',
+  'function token0() view returns (address)',
+]);
+const ROUTER_IFACE = new Interface([
+  'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to) payable returns (uint256)',
+  'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
+  'function multicall(bytes[] data) payable returns (bytes[])',
 ]);
 const T_TRANSFER = ERC20_IFACE.getEvent('Transfer').topicHash;
+const T_TAXED = ERC20_IFACE.getEvent('Taxed').topicHash;
+const T_SWAP = ERC20_IFACE.getEvent('Swap').topicHash;
 
 export function installRhpad(Cls, H) {
   const { B, WEI, now, randHex, CHAINS } = H;
   const P = Cls.prototype;
   const lc = (a) => String(a || '').toLowerCase();
   const isAddr = (a) => /^0x[0-9a-fA-F]{40}$/.test(String(a || ''));
+  const hex = (v) => '0x' + B(v).toString(16);
 
   P.rhInit = function () {
     if (this._rhInit) return; this._rhInit = true;
     const q = (s) => this.sql.exec(s);
-    for (const col of ['rh_token TEXT', 'rh_pool TEXT', 'rh_creator TEXT']) { try { q(`ALTER TABLE markets ADD COLUMN ${col}`); } catch { /* exists */ } }
+    for (const col of ['rh_token TEXT', 'rh_pool TEXT', 'rh_creator TEXT', 'rh_quote TEXT', "rh_rewards TEXT DEFAULT '0'"]) {
+      try { q(`ALTER TABLE markets ADD COLUMN ${col}`); } catch { /* exists */ }
+    }
     try { q('CREATE UNIQUE INDEX IF NOT EXISTS markets_rh_token ON markets (rh_token)'); } catch { /* exists */ }
+    try { q('CREATE INDEX IF NOT EXISTS markets_rh_pool ON markets (rh_pool)'); } catch { /* exists */ }
     // exact on-chain balances, rebuilt from Transfer events (NOT ledger money: never withdrawable from us)
     q(`CREATE TABLE IF NOT EXISTS rh_holdings (token TEXT, address TEXT, bal TEXT DEFAULT '0', PRIMARY KEY (token, address))`);
     q(`CREATE TABLE IF NOT EXISTS rh_seen (k TEXT PRIMARY KEY, ts INTEGER)`);
@@ -78,6 +110,10 @@ export function installRhpad(Cls, H) {
     const res = await this.rhRpc('eth_call', [{ to: this.rhCurve(), data }, 'latest']);
     return CURVE_IFACE.decodeFunctionResult(fn, res);
   };
+  P.rhErc = async function (to, fn, args) {
+    const res = await this.rhRpc('eth_call', [{ to, data: ERC20_IFACE.encodeFunctionData(fn, args) }, 'latest']);
+    return ERC20_IFACE.decodeFunctionResult(fn, res);
+  };
   P.rhWait = async function (hash, rpcFn, tries = 60) {
     for (let i = 0; i < tries; i++) {
       try {
@@ -103,31 +139,102 @@ export function installRhpad(Cls, H) {
     return w;
   };
   P.rhCurve = function () { return this.meta('rh_curve') || ''; };
-  P.rhLive = function () { return !!this.rhCurve() && this.meta('rh_onchain_off') !== '1'; };
+  P.rhLive = function () { return !!this.rhCurve() && this.meta('rh_version') === '2' && this.meta('rh_onchain_off') !== '1'; };
+
+  /* ───────────── pair assets: ETH, USDG and Robinhood Stock Tokens ───────────── */
+  // [{ symbol, name, address, usd, logo }] — refreshed from Robinhood's stock-token API (multiplier-adjusted token price)
+  P.rhQuotes = function () {
+    try { return JSON.parse(this.meta('rh_quotes') || '[]'); } catch { return []; }
+  };
+  P.rhQuoteBy = function (q) {
+    if (!q || q === 'ETH' || lc(q) === ZERO) return { symbol: 'ETH', name: 'Ether', address: ZERO, usd: this.ethUsd(), eth: true };
+    const k = lc(q);
+    return this.rhQuotes().find(x => lc(x.address) === k || x.symbol === q) || null;
+  };
+  P.rhMarketUsd = function (m) {
+    if (!m?.rh_quote || lc(m.rh_quote) === ZERO) return this.ethUsd();
+    return this.rhQuoteBy(m.rh_quote)?.usd || 0;
+  };
+  P.rhRefreshQuotes = async function (force = false) {
+    if (!force && now() - Number(this.meta('rh_quotes_ts') || 0) < 5 * 60e3) return null;
+    if (this.env.RH_QUOTES_STATIC) { this.setMeta('rh_quotes', this.env.RH_QUOTES_STATIC); this.setMeta('rh_quotes_ts', String(now())); return null; }
+    const [assets, prices] = await Promise.all([
+      fetch(`${RHJ_API}/assets`, { signal: AbortSignal.timeout(15000) }).then(r => r.json()),
+      fetch(`${RHJ_API}/prices`, { signal: AbortSignal.timeout(15000) }).then(r => r.json()),
+    ]);
+    const list = Array.isArray(assets) ? assets : (assets.results || assets.assets || Object.values(assets)[0] || []);
+    const px = new Map((prices.quotes || []).map(q => [q.tokenSymbol, q]));
+    const out = [{ symbol: 'USDG', name: 'Global Dollar', address: RH.usdg, usd: 1, logo: '' }];
+    for (const a of list) {
+      if (a.status !== 'ASSET_STATUS_ACTIVE') continue;
+      const d = (a.deployments || []).find(x => x.chainId === RH_CHAIN_ID);
+      const p = px.get(a.tokenSymbol);
+      if (!d || !p || p.isTradingHalt) continue;
+      const usd = (Number(p.tokenBid) + Number(p.tokenAsk)) / 2 || Number(p.bid) * Number(a.currentMultiplier || 1);
+      if (!(usd > 0)) continue;
+      out.push({ symbol: a.tokenSymbol, name: String(a.tokenName || '').replace(/\s*•\s*Robinhood Token$/, ''), address: d.contractAddress, usd, logo: a.logoUrl || '' });
+    }
+    if (out.length > 1) { this.setMeta('rh_quotes', JSON.stringify(out)); this.setMeta('rh_quotes_ts', String(now())); }
+    return out.length;
+  };
+  // keep the contract's allow-list priced: every pair asset starts a token at the same USD market cap
+  P.rhSyncQuotes = async function (force = false) {
+    if (!this.rhCurve()) return null;
+    if (!force && now() - Number(this.meta('rh_qsync_ts') || 0) < 6 * 3600e3) return null;
+    this.setMeta('rh_qsync_ts', String(now()));
+    const startUsd = 3150 * this.zroUsd();                 // same starting market cap as every other Rookery network
+    const want = [{ address: ZERO, usd: this.ethUsd() }, ...this.rhQuotes()];
+    const addrs = [], vals = [];
+    for (const q of want) {
+      if (!(q.usd > 0)) continue;
+      const v = BigInt(Math.round((startUsd / q.usd) * 1e6)) * 10n ** 12n;
+      const [cur] = await this.rhCall('vQuoteFor', [q.address]);
+      const drift = cur === 0n ? 1 : Math.abs(Number(v - cur) / Number(cur));
+      if (drift > 0.15) { addrs.push(q.address); vals.push(v); }
+    }
+    if (!addrs.length) return { updated: 0 };
+    const w = this.rhSigner(), done = [];
+    for (let i = 0; i < addrs.length; i += 60) {
+      const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('setQuotes', [addrs.slice(i, i + 60), vals.slice(i, i + 60)]) });
+      await this.rhWait(tx.hash, (m, p) => this.rhRpc(m, p));
+      done.push(tx.hash);
+    }
+    return { updated: addrs.length, txs: done };
+  };
 
   /* ───────────── public config ───────────── */
   P.rhConfig = async function () {
     const curve = this.rhCurve();
-    const out = { live: this.rhLive(), chainId: RH_CHAIN_ID, curve, explorer: 'https://robinhoodchain.blockscout.com',
-      supply: '1000000000', curveTokens: '800000000', vToken: '1073000000' };
+    const out = { live: this.rhLive(), chainId: RH_CHAIN_ID, curve, router: RH.router, weth: RH.weth, explorer: 'https://robinhoodchain.blockscout.com',
+      supply: '1000000000', curveTokens: '800000000', vToken: '1073000000', maxTax: 5, maxTaxTotal: 10,
+      quotes: [{ symbol: 'ETH', name: 'Ether', address: ZERO, usd: this.ethUsd() }, ...this.rhQuotes()].map(q => ({ symbol: q.symbol, name: q.name, address: q.address, usd: q.usd, logo: q.logo || '' })) };
     if (!curve) return out;
     try {
-      const [fee] = await this.rhCall('feeBps', []); const [v] = await this.rhCall('vEthNext', []); const [p] = await this.rhCall('launchesPaused', []);
-      Object.assign(out, { feeBps: Number(fee), vEth: v.toString(), paused: p });
+      const [fee] = await this.rhCall('feeBps', []); const [p] = await this.rhCall('launchesPaused', []);
+      Object.assign(out, { feeBps: Number(fee), paused: p });
     } catch (e) { out.error = String(e.message || e).slice(0, 120); }
     return out;
   };
 
   /* ───────────── transactions for the user's wallet ───────────── */
   const slipMin = (q, slipBps) => (B(q) * BigInt(10000 - Math.max(0, Math.min(5000, Number(slipBps) || 300)))) / 10000n;
-  // the curve's own math (same as the contract), for the creator's first buy before the token exists
-  const quoteNew = (vEth, feeBps, ethIn) => {
-    const net = ethIn - (ethIn * BigInt(feeBps)) / 10000n;
-    const k = vEth * V_TOKEN;
-    let out = V_TOKEN - (k + (vEth + net) - 1n) / (vEth + net);
-    if (out > CURVE_TOKENS) out = CURVE_TOKENS;
-    return out;
+  const MAXU = (1n << 256n) - 1n;
+  // approvals the wallet still needs before the main transaction (ERC-20 pair assets and DEX sells)
+  P.rhNeedApprove = async function (tokenAddr, owner, spender, amount) {
+    if (!isAddr(owner) || lc(tokenAddr) === ZERO) return null;
+    const [a] = await this.rhErc(tokenAddr, 'allowance', [owner, spender]);
+    if (a >= B(amount)) return null;
+    return { to: getAddress(tokenAddr), data: ERC20_IFACE.encodeFunctionData('approve', [spender, MAXU]), value: '0x0' };
   };
+  // the curve's own math (same as the contract), for the creator's first buy before the token exists
+  const quoteNew = (vQ, feeBps, mkt, brn, rew, qIn) => {
+    const net = qIn - (qIn * BigInt(feeBps + mkt)) / 10000n;
+    const k = vQ * V_TOKEN;
+    let gross = V_TOKEN - (k + (vQ + net) - 1n) / (vQ + net);
+    if (gross > CURVE_TOKENS) gross = CURVE_TOKENS;
+    return gross - (gross * BigInt(brn)) / 10000n - (gross * BigInt(rew)) / 10000n;
+  };
+  const bps = (v) => Math.max(0, Math.min(500, Math.round((Number(v) || 0) * 100)));
 
   P.rhPrepareCreate = async function (user, b) {
     this.rhInit();
@@ -138,39 +245,103 @@ export function installRhpad(Cls, H) {
     if (!symbol) throw new Error('Ticker is required');
     const img = String(b.image || '');
     if (img && (!img.startsWith('data:image/') || img.length > 300_000)) throw new Error('Image must be under 200 KB');
-    const cfg = await this.rhConfig();
-    if (cfg.paused) throw new Error('Launches are paused for a moment');
+    const q = this.rhQuoteBy(b.quote || 'ETH');
+    if (!q) throw new Error('This pair asset is not available');
+    const [vQ] = await this.rhCall('vQuoteFor', [q.address]);
+    if (vQ === 0n) throw new Error(`${q.symbol} pairs open in a few minutes`);
+    const mkt = bps(b.taxMarketing), brn = bps(b.taxBurn), rew = bps(b.taxRewards);
+    if (mkt + brn + rew > 1000) throw new Error('Total creator taxes can be at most 10%');
+    const [fee] = await this.rhCall('feeBps', []);
     const dev = b.devBuy ? B(b.devBuy) : 0n;
-    const minOut = dev > 0n ? slipMin(quoteNew(B(cfg.vEth), cfg.feeBps, dev), b.slipBps) : 0n;
+    const expect = dev > 0n ? quoteNew(vQ, Number(fee), mkt, brn, rew, dev) : 0n;
+    const minOut = dev > 0n ? slipMin(expect, b.slipBps) : 0n;
     const id = randHex(12);
     const body = { description: String(b.description || '').slice(0, 600), image: img, x: b.x || '', tg: b.tg || '', web: b.web || '', hatchId: b.hatchId || '' };
     this.sql.exec('INSERT INTO rh_drafts (id,name,symbol,body,user_id,created) VALUES (?,?,?,?,?,?)', id, name, symbol, JSON.stringify(body), user?.id || null, now());
     this.sql.exec('DELETE FROM rh_drafts WHERE created < ? AND used = ?', now() - 7 * 86400e3, '');
-    return { ok: true, draft: id, chainId: RH_CHAIN_ID,
-      tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('create', [name, symbol, minOut]), value: '0x' + dev.toString(16) },
-      expectTokens: dev > 0n ? quoteNew(B(cfg.vEth), cfg.feeBps, dev).toString() : '0' };
+    const approve = !q.eth && dev > 0n ? await this.rhNeedApprove(q.address, b.from, this.rhCurve(), dev) : null;
+    return { ok: true, draft: id, chainId: RH_CHAIN_ID, quote: q.symbol, approve,
+      tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('create', [name, symbol, q.address, mkt, brn, rew, q.eth ? 0n : dev, minOut]),
+        value: q.eth ? hex(dev) : '0x0' },
+      expectTokens: expect.toString() };
   };
+
+  // Uniswap V2 maths for graduated tokens (0.3% pool fee), with the token's own taxes
+  const v2Out = (amtIn, rIn, rOut) => { const a = amtIn * 997n; return (a * rOut) / (rIn * 1000n + a); };
+  P.rhPoolState = async function (m) {
+    const [r0, r1] = await this.rhErc(m.rh_pool, 'getReserves', []);
+    const [t0] = await this.rhErc(m.rh_pool, 'token0', []);
+    const tokIs0 = lc(t0) === lc(m.rh_token);
+    return { rTok: tokIs0 ? r0 : r1, rQ: tokIs0 ? r1 : r0 };
+  };
+  const taxBps = (m) => BigInt((m.tax_mkt || 0) + (m.tax_burn || 0) + (m.tax_rew || 0));
 
   P.rhPrepareTrade = async function (b) {
     this.rhInit();
     const m = this.market(String(b.market || ''));
     if (!m || !m.rh_token) throw new Error('Not a Robinhood Chain token');
     const token = getAddress(m.rh_token);
-    if (m.graduated || m.migrated) throw new Error('This token graduated to Uniswap: trade it in any Robinhood Chain wallet or on Uniswap');
-    if (b.side === 'sell') {
-      const amt = B(b.amount);
-      if (amt <= 0n) throw new Error('Enter an amount');
-      const [q] = await this.rhCall('quoteSell', [token, amt]);
-      if (q === 0n) throw new Error('Amount too small');
-      return { ok: true, chainId: RH_CHAIN_ID, quote: q.toString(),
-        tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('sell', [token, amt, slipMin(q, b.slipBps)]), value: '0x0' } };
+    const q = this.rhQuoteBy(m.rh_quote || ZERO) || { address: m.rh_quote, eth: false, symbol: m.quote };
+    const isEth = lc(q.address) === ZERO;
+    const amt = B(b.amount);
+    if (amt <= 0n) throw new Error('Enter an amount');
+    const from = isAddr(b.from) ? getAddress(b.from) : null;
+
+    if (m.migrated && m.rh_pool) {
+      // graduated: trade on the Uniswap V2 pool through SwapRouter02 (supports the token's taxes)
+      const { rTok, rQ } = await this.rhPoolState(m);
+      const qt = isEth ? RH.weth : getAddress(q.address);
+      if (b.side === 'sell') {
+        const net = amt - (amt * taxBps(m)) / 10000n;
+        const out = v2Out(net, rTok, rQ);
+        const min = slipMin(out, b.slipBps || 500);
+        const swap = ROUTER_IFACE.encodeFunctionData('swapExactTokensForTokens', [amt, isEth ? 0n : min, [token, qt], isEth ? '0x0000000000000000000000000000000000000002' : (from || ZERO)]);
+        const data = isEth ? ROUTER_IFACE.encodeFunctionData('multicall', [[swap, ROUTER_IFACE.encodeFunctionData('unwrapWETH9', [min, from || ZERO])]]) : swap;
+        return { ok: true, chainId: RH_CHAIN_ID, venue: 'uniswap-v2', quote: out.toString(),
+          approve: await this.rhNeedApprove(token, from, RH.router, amt), tx: { to: RH.router, data, value: '0x0' } };
+      }
+      const gross = v2Out(amt, rQ, rTok);
+      const out = gross - (gross * taxBps(m)) / 10000n;
+      const min = slipMin(out, b.slipBps || 500);
+      return { ok: true, chainId: RH_CHAIN_ID, venue: 'uniswap-v2', quote: out.toString(),
+        approve: isEth ? null : await this.rhNeedApprove(qt, from, RH.router, amt),
+        tx: { to: RH.router, data: ROUTER_IFACE.encodeFunctionData('swapExactTokensForTokens', [amt, min, [qt, token], from || ZERO]), value: isEth ? hex(amt) : '0x0' } };
     }
-    const eth = B(b.amount);
-    if (eth < 50_000_000_000_000n) throw new Error('Minimum buy is 0.00005 ETH');
-    const [q] = await this.rhCall('quoteBuy', [token, eth]);
-    if (q === 0n) throw new Error('This curve is sold out: it graduates to Uniswap in a moment');
-    return { ok: true, chainId: RH_CHAIN_ID, quote: q.toString(),
-      tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('buy', [token, slipMin(q, b.slipBps)]), value: '0x' + eth.toString(16) } };
+    if (m.graduated) throw new Error('Sold out: the Uniswap pool opens in a few seconds');
+    if (b.side === 'sell') {
+      const [qo] = await this.rhCall('quoteSell', [token, amt]);
+      if (qo === 0n) throw new Error('Amount too small');
+      return { ok: true, chainId: RH_CHAIN_ID, venue: 'curve', quote: qo.toString(),
+        tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('sell', [token, amt, slipMin(qo, b.slipBps)]), value: '0x0' } };
+    }
+    if (isEth && amt < 50_000_000_000_000n) throw new Error('Minimum buy is 0.00005 ETH');
+    const [qo] = await this.rhCall('quoteBuy', [token, amt]);
+    if (qo === 0n) throw new Error('This curve is sold out: it graduates to Uniswap in a moment');
+    return { ok: true, chainId: RH_CHAIN_ID, venue: 'curve', quote: qo.toString(),
+      approve: isEth ? null : await this.rhNeedApprove(q.address, from, this.rhCurve(), amt),
+      tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('buy', [token, isEth ? 0n : amt, slipMin(qo, b.slipBps)]), value: isEth ? hex(amt) : '0x0' } };
+  };
+
+  // what one wallet holds/earns on one token: balances, pending rewards, creator marketing owed
+  P.rhWalletInfo = async function (m, address) {
+    if (!m?.rh_token || !isAddr(address)) return { balance: '0' };
+    const a = getAddress(address);
+    const q = m.rh_quote && lc(m.rh_quote) !== ZERO ? getAddress(m.rh_quote) : ZERO;
+    const [bal] = await this.rhErc(m.rh_token, 'balanceOf', [a]);
+    const [pend] = await this.rhErc(m.rh_token, 'pendingRewards', [a]).catch(() => [0n]);
+    const qBal = q === ZERO ? BigInt(await this.rhRpc('eth_getBalance', [a, 'latest'])) : (await this.rhErc(q, 'balanceOf', [a]))[0];
+    let owed = 0n;
+    if (lc(m.rh_creator) === lc(a)) owed = (await this.rhCall('creatorOwed', [a, q]))[0];
+    return { balance: bal.toString(), pendingRewards: pend.toString(), quoteBalance: qBal.toString(), creatorOwed: owed.toString(), isCreator: lc(m.rh_creator) === lc(a) };
+  };
+  P.rhPrepareClaim = async function (b) {
+    const m = this.market(String(b.market || ''));
+    if (!m?.rh_token) throw new Error('Not a Robinhood Chain token');
+    if (b.kind === 'creator') {
+      const q = m.rh_quote && lc(m.rh_quote) !== ZERO ? getAddress(m.rh_quote) : ZERO;
+      return { ok: true, chainId: RH_CHAIN_ID, tx: { to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimCreator', [q]), value: '0x0' } };
+    }
+    return { ok: true, chainId: RH_CHAIN_ID, tx: { to: getAddress(m.rh_token), data: ERC20_IFACE.encodeFunctionData('claim', []), value: '0x0' } };
   };
 
   /* ───────────── users for wallets (no account needed) ───────────── */
@@ -189,50 +360,83 @@ export function installRhpad(Cls, H) {
 
   /* ───────────── event mirror ───────────── */
   P.rhMarketByToken = function (token) { return this.sql.exec('SELECT * FROM markets WHERE rh_token=?', lc(token)).toArray()[0] || null; };
+  P.rhMarketByPool = function (pool) { return this.sql.exec('SELECT * FROM markets WHERE rh_pool=?', lc(pool)).toArray()[0] || null; };
+  const seen = function (key) { return this.sql.exec('SELECT 1 FROM rh_seen WHERE k=?', key).toArray().length > 0; };
+
+  // a trade row + market stats (curve trades and Uniswap trades share this)
+  P.rhRecordTrade = function (m, trader, isBuy, quoteAmt, tokAmt, ts, txid, extra = {}) {
+    const user = this.rhWalletUser(trader);
+    const usdPer = this.rhMarketUsd(m);
+    this.sql.exec(`UPDATE markets SET volume=?, trades=trades+1, last_trade=? WHERE id=?`, (B(m.volume) + quoteAmt).toString(), ts || now(), m.id);
+    if (extra.realQuote !== undefined)
+      this.sql.exec('UPDATE markets SET reserve_zro=?, reserve_tok=? WHERE id=?', B(extra.realQuote).toString(), B(extra.sold).toString(), m.id);
+    if (extra.pool) this.sql.exec('UPDATE markets SET pool_zro=?, pool_tok=? WHERE id=?', extra.pool.rQ.toString(), extra.pool.rTok.toString(), m.id);
+    const mm = this.market(m.id);
+    const price = extra.price !== undefined ? extra.price : Cls.price(mm);
+    this.sql.exec('UPDATE markets SET last_price=? WHERE id=?', price.toString(), m.id);
+    const usd = (Number(quoteAmt) / 1e18) * usdPer;
+    this.sql.exec('INSERT INTO trades (market,user_id,side,zro,tokens,price,usd,ts,quote,txid) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      m.id, user.id, isBuy ? 'buy' : 'sell', quoteAmt.toString(), tokAmt.toString(), price.toString(), usd, ts || now(), mm.quote || 'ETH', lc(txid));
+    this._rhTicker = { side: isBuy ? 'buy' : 'sell', usd, user: user.username, symbol: m.symbol, id: m.id };
+  };
 
   P.rhApplyLog = function (log, ts) {
     const key = lc(log.transactionHash) + ':' + Number(log.logIndex);
-    if (this.sql.exec('SELECT 1 FROM rh_seen WHERE k=?', key).toArray().length) return null;
-    let ev = null;
-    if (lc(log.address) === lc(this.rhCurve())) {
+    if (seen.call(this, key)) return null;
+    const addr = lc(log.address);
+    let ev = null, res = null, mid = null;
+    if (addr === lc(this.rhCurve())) {
       try { ev = CURVE_IFACE.parseLog({ topics: log.topics, data: log.data }); } catch { return null; }
-    } else if (log.topics[0] === T_TRANSFER) {
+    } else if (log.topics[0] === T_TRANSFER || log.topics[0] === T_TAXED) {
       const m = this.rhMarketByToken(log.address);
       if (!m) return null;
-      const { args } = ERC20_IFACE.parseLog({ topics: log.topics, data: log.data });
-      const move = (addr, d) => {
-        const a = lc(addr);
-        if (a === '0x0000000000000000000000000000000000000000') return;
-        const cur = this.sql.exec('SELECT bal FROM rh_holdings WHERE token=? AND address=?', lc(log.address), a).toArray()[0];
-        const nb = B(cur?.bal || 0) + d;
-        this.sql.exec('INSERT INTO rh_holdings (token,address,bal) VALUES (?,?,?) ON CONFLICT(token,address) DO UPDATE SET bal=excluded.bal', lc(log.address), a, (nb < 0n ? 0n : nb).toString());
-      };
       this.ctx.storage.transactionSync(() => {
-        move(args.from, -B(args.value)); move(args.to, B(args.value));
+        if (log.topics[0] === T_TAXED) {
+          // DEX trade taxes after graduation: marketing tokens to the creator, burned tokens, rewards to holders
+          const { args } = ERC20_IFACE.parseLog({ topics: log.topics, data: log.data });
+          this.sql.exec('UPDATE markets SET burned=?, rh_rewards=? WHERE id=?', (B(m.burned) + B(args.burned)).toString(), (B(m.rh_rewards) + B(args.rewards)).toString(), m.id);
+        } else {
+          const { args } = ERC20_IFACE.parseLog({ topics: log.topics, data: log.data });
+          const move = (a0, d) => {
+            const a = lc(a0);
+            if (a === ZERO) return;
+            const cur = this.sql.exec('SELECT bal FROM rh_holdings WHERE token=? AND address=?', addr, a).toArray()[0];
+            const nb = B(cur?.bal || 0) + d;
+            this.sql.exec('INSERT INTO rh_holdings (token,address,bal) VALUES (?,?,?) ON CONFLICT(token,address) DO UPDATE SET bal=excluded.bal', addr, a, (nb < 0n ? 0n : nb).toString());
+          };
+          move(args.from, -B(args.value)); move(args.to, B(args.value));
+        }
         this.sql.exec('INSERT INTO rh_seen (k,ts) VALUES (?,?)', key, now());
       });
-      return 'transfer';
+      return log.topics[0] === T_TAXED ? 'taxed' : 'transfer';
+    } else if (log.topics[0] === T_SWAP) {
+      // Uniswap V2 trade on a graduated token's pool
+      const m = this.rhMarketByPool(log.address);
+      if (!m) return null;
+      return { swap: true, m, log };
     }
     if (!ev) return null;
     const a = ev.args;
-    let res = ev.name, mid = null;
+    res = ev.name;
     this.ctx.storage.transactionSync(() => {
       if (ev.name === 'Created') {
         const token = lc(a.token);
         let m = this.rhMarketByToken(token);
         if (!m) {
           const creator = this.rhWalletUser(a.creator);
-          // the creator's draft (image, description, links) is matched by name + ticker within the last day
           const d = this.sql.exec(`SELECT * FROM rh_drafts WHERE used='' AND name=? AND symbol=? AND created>? ORDER BY created DESC LIMIT 1`,
             a.name, a.symbol, now() - 86400e3).toArray()[0];
           const body = d ? JSON.parse(d.body) : {};
           const url = (u, re) => { u = String(u || '').trim(); if (!u) return ''; if (!/^https?:\/\//.test(u)) u = 'https://' + u; return re.test(u) ? u.slice(0, 200) : ''; };
+          const q = this.rhQuoteBy(a.quote);
           const id = (String(a.symbol).toLowerCase().replace(/[^a-z0-9]/g, '') || 'tkn').slice(0, 10) + '-' + randHex(3);
           this.sql.exec(`INSERT INTO markets (id,creator_id,name,symbol,description,image,network,quote,x,tg,web,
-            supply,curve_tokens,v_zro,v_tok,created,v_wei,rh_token,rh_creator) VALUES (?,?,?,?,?,?,'robinhood','ETH',?,?,?,?,?,?,?,?,?,?,?)`,
-            id, creator.id, String(a.name).slice(0, 32), String(a.symbol).slice(0, 12), body.description || '', body.image || '',
+            supply,curve_tokens,v_zro,v_tok,created,v_wei,rh_token,rh_creator,rh_quote,tax_mkt,tax_burn,tax_rew)
+            VALUES (?,?,?,?,?,?,'robinhood',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            id, creator.id, String(a.name).slice(0, 32), String(a.symbol).slice(0, 12), body.description || '', body.image || '', q?.symbol || 'ETH',
             url(body.x, /^https:\/\/(x|twitter)\.com\//), url(body.tg, /^https:\/\/t\.me\//), url(body.web, /^https:\/\//),
-            '1000000000', '800000000', '0', '1073000000', ts || now(), B(a.vEth).toString(), token, lc(a.creator));
+            '1000000000', '800000000', '0', '1073000000', ts || now(), B(a.vQuote).toString(), token, lc(a.creator), lc(a.quote),
+            Number(a.taxMarketing), Number(a.taxBurn), Number(a.taxRewards));
           if (d) this.sql.exec('UPDATE rh_drafts SET used=? WHERE id=?', id, d.id);
           if (body.hatchId) {
             const h = this.sql.exec('SELECT * FROM hatches WHERE id=? AND creator_id=? AND market_id=?', String(body.hatchId), d?.user_id || -1, '').toArray()[0];
@@ -244,20 +448,13 @@ export function installRhpad(Cls, H) {
       } else if (ev.name === 'Trade') {
         const m = this.rhMarketByToken(a.token);
         if (!m) { res = null; return; }
-        const user = this.rhWalletUser(a.trader);
-        const eth = B(a.ethAmount), tok = B(a.tokenAmount);
-        this.sql.exec(`UPDATE markets SET reserve_zro=?, reserve_tok=?, volume=?, trades=trades+1, last_trade=? WHERE id=?`,
-          B(a.realEth).toString(), B(a.sold).toString(), (B(m.volume) + eth).toString(), ts || now(), m.id);
-        const mm = this.market(m.id);
-        const price = Cls.price(mm);
-        this.sql.exec('UPDATE markets SET last_price=? WHERE id=?', price.toString(), m.id);
-        const usd = (Number(eth) / 1e18) * this.ethUsd();
-        this.sql.exec('INSERT INTO trades (market,user_id,side,zro,tokens,price,usd,ts,quote,txid) VALUES (?,?,?,?,?,?,?,?,?,?)',
-          m.id, user.id, a.isBuy ? 'buy' : 'sell', eth.toString(), tok.toString(), price.toString(), usd, ts || now(), 'ETH', lc(log.transactionHash));
-        // platform fee is collected by the contract for the $臭企鹅 buy & burn: track it next to the other networks
+        this.rhRecordTrade(m, a.trader, a.isBuy, B(a.quoteAmount), B(a.tokenAmount), ts, log.transactionHash, { realQuote: a.realQuote, sold: a.sold });
         this.setMeta('rh_fees_wei', (B(this.meta('rh_fees_wei') || 0) + B(a.fee)).toString());
         mid = m.id;
-        this._rhTicker = { side: a.isBuy ? 'buy' : 'sell', usd, user: user.username, symbol: m.symbol, id: m.id };
+      } else if (ev.name === 'Taxes') {
+        const m = this.rhMarketByToken(a.token);
+        if (m) this.sql.exec('UPDATE markets SET mkt_paid=?, burned=?, rh_rewards=? WHERE id=?', (B(m.mkt_paid) + B(a.marketingQuote)).toString(),
+          (B(m.burned) + B(a.burnedTokens)).toString(), (B(m.rh_rewards) + B(a.rewardTokens)).toString(), m.id);
       } else if (ev.name === 'Complete') {
         const m = this.rhMarketByToken(a.token);
         if (m) { this.sql.exec('UPDATE markets SET graduated=1, grad_at=? WHERE id=?', ts || now(), m.id); mid = m.id; }
@@ -265,7 +462,7 @@ export function installRhpad(Cls, H) {
         const m = this.rhMarketByToken(a.token);
         if (m) {
           this.sql.exec('UPDATE markets SET graduated=1, migrated=1, rh_pool=?, pool_zro=?, pool_tok=? WHERE id=?',
-            lc(a.pool), B(a.ethToPool).toString(), B(a.tokensToPool).toString(), m.id);
+            lc(a.pair), B(a.quoteToPool).toString(), B(a.tokensToPool).toString(), m.id);
           mid = m.id;
         }
       }
@@ -275,16 +472,41 @@ export function installRhpad(Cls, H) {
     return res;
   };
 
-  P.rhApplyLogs = function (logs, tsOf = {}) {
+  // Uniswap V2 swaps need the trader (tx sender) and fresh reserves, so they are applied with async lookups
+  P.rhApplySwap = async function ({ m, log }, ts) {
+    const key = lc(log.transactionHash) + ':' + Number(log.logIndex);
+    if (seen.call(this, key)) return null;
+    const { args } = ERC20_IFACE.parseLog({ topics: log.topics, data: log.data });
+    const [t0] = await this.rhErc(m.rh_pool, 'token0', []);
+    const tokIs0 = lc(t0) === lc(m.rh_token);
+    const tokIn = tokIs0 ? B(args.amount0In) : B(args.amount1In), tokOut = tokIs0 ? B(args.amount0Out) : B(args.amount1Out);
+    const qIn = tokIs0 ? B(args.amount1In) : B(args.amount0In), qOut = tokIs0 ? B(args.amount1Out) : B(args.amount0Out);
+    const isBuy = tokOut > 0n;
+    const tx = await this.rhRpc('eth_getTransactionByHash', [log.transactionHash]);
+    const pool = await this.rhPoolState(m);
+    const price = pool.rTok > 0n ? (pool.rQ * WEI) / pool.rTok : 0n;
+    this.ctx.storage.transactionSync(() => {
+      if (seen.call(this, key)) return;
+      this.rhRecordTrade(this.market(m.id), tx?.from || args.to, isBuy, isBuy ? qIn : qOut, isBuy ? tokOut : tokIn, ts, log.transactionHash, { pool, price });
+      this.sql.exec('INSERT INTO rh_seen (k,ts) VALUES (?,?)', key, now());
+    });
+    try { this.queuePush(m.id, 'trade', this._rhTicker); } catch { /* no sockets */ }
+    return 'Swap';
+  };
+
+  P.rhApplyLogs = async function (logs, tsOf = {}) {
     const order = (l) => BigInt(l.blockNumber) * 100000n + BigInt(Number(l.logIndex));
-    // curve events first in each block would break holdings order; apply strictly by chain order
     const sorted = [...logs].sort((x, y) => (order(x) < order(y) ? -1 : order(x) > order(y) ? 1 : 0));
     const out = [];
-    for (const l of sorted) { const r = this.rhApplyLog(l, tsOf[l.blockNumber]); if (r) out.push(r); }
+    for (const l of sorted) {
+      const r = this.rhApplyLog(l, tsOf[l.blockNumber]);
+      if (r && r.swap) { const s = await this.rhApplySwap(r, tsOf[l.blockNumber]); if (s) out.push(s); }
+      else if (r) out.push(r);
+    }
     return out;
   };
 
-  // the creator's/trader's page calls this right after the wallet returns a tx hash, so the token shows up at once
+  // the page calls this right after the wallet returns a tx hash, so the result shows up at once
   P.rhSyncTx = async function (hash) {
     this.rhInit();
     if (!/^0x[0-9a-fA-F]{64}$/.test(String(hash || ''))) throw new Error('Bad transaction hash');
@@ -294,45 +516,53 @@ export function installRhpad(Cls, H) {
     if (rc.status !== '0x1') return { ok: false, error: 'Transaction failed on-chain' };
     const blk = await this.rhRpc('eth_getBlockByNumber', [rc.blockNumber, false]);
     const ts = blk ? Number(BigInt(blk.timestamp)) * 1000 : now();
-    // new token addresses created in this tx must be known before their Transfer logs are applied
     const curveLogs = rc.logs.filter(l => lc(l.address) === lc(this.rhCurve()));
     const other = rc.logs.filter(l => lc(l.address) !== lc(this.rhCurve()));
-    const applied = [...this.rhApplyLogs(curveLogs, { [rc.blockNumber]: ts }), ...this.rhApplyLogs(other, { [rc.blockNumber]: ts })];
+    const applied = [...await this.rhApplyLogs(curveLogs, { [rc.blockNumber]: ts }), ...await this.rhApplyLogs(other, { [rc.blockNumber]: ts })];
     let market = null;
-    for (const l of curveLogs) {
+    for (const l of rc.logs) {
       try { const ev = CURVE_IFACE.parseLog(l); if (ev?.args?.token) { market = this.rhMarketByToken(ev.args.token)?.id || null; break; } } catch { /* other */ }
+      const mp = this.rhMarketByPool(l.address) || this.rhMarketByToken(l.address);
+      if (mp && !market) market = mp.id;
     }
     if (applied.includes('Complete')) this.ctx.waitUntil(this.rhKeeper().catch(() => {}));
     return { ok: true, applied, market };
   };
 
-  // cron: catch every event (trades made outside our site included), then run the keeper
+  // cron: catch every event (trades made outside our site included), then keep prices + allow-list fresh and run the keeper
   P.rhScan = async function () {
     this.rhInit();
     const curve = this.rhCurve();
     if (!curve) return { off: true };
+    const qr = await this.rhRefreshQuotes().catch(e => ({ error: String(e.message || e).slice(0, 120) }));
     const head = Number(BigInt(await this.rhRpc('eth_blockNumber', [])));
     let from = Number(this.meta('rh_block') || 0) || Number(this.meta('rh_deploy_block') || head);
     const STEP = 9000;
     let n = 0, loops = 0;
     while (from <= head && loops++ < 8) {
       const to = Math.min(head, from + STEP);
-      const cl = await this.rhRpc('eth_getLogs', [{ address: curve, fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) }]);
-      n += this.rhApplyLogs(cl).length;           // creates markets first
+      const range = { fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) };
+      n += (await this.rhApplyLogs(await this.rhRpc('eth_getLogs', [{ address: curve, ...range }]))).length;   // creates markets first
       const tokens = this.sql.exec('SELECT rh_token FROM markets WHERE rh_token IS NOT NULL').toArray().map(r => r.rh_token);
       for (let i = 0; i < tokens.length; i += 50) {
-        const tl = await this.rhRpc('eth_getLogs', [{ address: tokens.slice(i, i + 50), topics: [T_TRANSFER], fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) }]);
-        n += this.rhApplyLogs(tl).length;
+        const tl = await this.rhRpc('eth_getLogs', [{ address: tokens.slice(i, i + 50), topics: [[T_TRANSFER, T_TAXED]], ...range }]);
+        n += (await this.rhApplyLogs(tl)).length;
+      }
+      const pools = this.sql.exec('SELECT rh_pool FROM markets WHERE rh_pool IS NOT NULL').toArray().map(r => r.rh_pool);
+      for (let i = 0; i < pools.length; i += 50) {
+        const pl = await this.rhRpc('eth_getLogs', [{ address: pools.slice(i, i + 50), topics: [T_SWAP], ...range }]);
+        n += (await this.rhApplyLogs(pl)).length;
       }
       this.setMeta('rh_block', String(to + 1));
       from = to + 1;
     }
     this.setMeta('rh_scan_ok', String(now()));
+    const qs = await this.rhSyncQuotes().catch(e => ({ error: String(e.message || e).slice(0, 160) }));
     const k = await this.rhKeeper().catch(e => ({ error: String(e.message || e).slice(0, 200) }));
-    return { head, applied: n, keeper: k };
+    return { head, applied: n, quotes: qr, allowList: qs, keeper: k };
   };
 
-  // graduate sold-out curves (anyone may, we pay the gas) and claim the fee pot once it is worth the gas
+  // graduate sold-out curves (anyone may, we pay the gas) and claim the ETH fee pot once it is worth the gas
   P.rhKeeper = async function () {
     const due = this.sql.exec(`SELECT id, rh_token FROM markets WHERE rh_token IS NOT NULL AND graduated=1 AND migrated=0`).toArray();
     const done = [];
@@ -341,20 +571,19 @@ export function installRhpad(Cls, H) {
     const w = this.rhSigner();
     for (const m of due) {
       const c = await this.rhCall('curves', [getAddress(m.rh_token)]);
-      if (c.graduated) continue;  // the Graduated event lands in the next scan
+      if (c.graduated) continue;
       try {
-        const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('graduate', [getAddress(m.rh_token)]), gasLimit: 9_000_000n });
+        const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('graduate', [getAddress(m.rh_token)]), gasLimit: 6_000_000n });
         await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
         await this.rhSyncTx(tx.hash);
         done.push({ market: m.id, tx: tx.hash });
-        try { this.ownerAlert?.(`🎓 Robinhood Chain token graduated to Uniswap: ${m.id}\nhttps://robinhoodchain.blockscout.com/tx/${tx.hash}`); } catch { /* optional */ }
       } catch (e) { this.setMeta('rh_keeper_error', String(e.message || e).slice(0, 300)); }
     }
     if (!claimDue) return { done };
     this.setMeta('rh_claim_ts', String(now()));
-    const [pot] = await this.rhCall('feesAccrued', []);
+    const [pot] = await this.rhCall('feesAccrued', [ZERO]);
     if (pot >= 2_000_000_000_000_000n) {   // 0.002 ETH
-      const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimFees', []) });
+      const tx = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimFees', [ZERO]) });
       await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
       done.push({ claimed: pot.toString(), tx: tx.hash });
     }
@@ -369,24 +598,23 @@ export function installRhpad(Cls, H) {
     const curve = lc(this.rhCurve()), pool = lc(m.rh_pool || ''), dead = '0x000000000000000000000000000000000000dead';
     return rows.slice(0, limit).map(r => {
       const u = this.sql.exec('SELECT username FROM users WHERE lower(wallet)=?', r.address).toArray()[0];
-      const tag = r.address === curve ? 'bonding curve' : r.address === pool ? 'Uniswap pool' : r.address === dead ? 'burned' : '';
+      const tag = r.address === curve ? 'bonding curve' : r.address === pool ? 'Uniswap pool' : r.address === dead ? 'burned' : r.address === lc(m.rh_token) ? 'rewards pot' : '';
       return { address: r.address, username: u?.username || '', tag, amount: r.bal.toString(), pct: Number((r.bal * 10000n) / (10n ** 27n)) / 100 };
     });
   };
   P.rhWalletBalance = async function (m, address) {
     if (!m?.rh_token || !isAddr(address)) return '0';
-    const res = await this.rhRpc('eth_call', [{ to: m.rh_token, data: ERC20_IFACE.encodeFunctionData('balanceOf', [address]) }, 'latest']);
-    return BigInt(res === '0x' ? 0 : res).toString();
+    return (await this.rhErc(m.rh_token, 'balanceOf', [address]))[0].toString();
   };
 
-  /* ───────────── admin: funding + deploy ───────────── */
+  /* ───────────── admin: funding, deploy, self-test ───────────── */
   P.rhStatus = async function () {
     const ops = this.rhOps().address;
     const bal = BigInt(await this.rhRpc('eth_getBalance', [ops, 'latest']));
-    const out = { ops, opsEth: Number(bal) / 1e18, curve: this.rhCurve(), block: this.meta('rh_block'), scanOk: this.meta('rh_scan_ok'),
-      keeperError: this.meta('rh_keeper_error') || '', feesWei: this.meta('rh_fees_wei') || '0', fund: this.meta('rh_fund') || '' };
+    const out = { ops, opsEth: Number(bal) / 1e18, curve: this.rhCurve(), version: this.meta('rh_version') || '1', block: this.meta('rh_block'), scanOk: this.meta('rh_scan_ok'),
+      keeperError: this.meta('rh_keeper_error') || '', feesWei: this.meta('rh_fees_wei') || '0', fund: this.meta('rh_fund') || '', quotes: this.rhQuotes().length };
     if (out.curve) {
-      try { const [o] = await this.rhCall('owner', []); const [f] = await this.rhCall('feesAccrued', []); out.owner = o; out.feesAccrued = f.toString(); } catch (e) { out.err = e.message; }
+      try { const [o] = await this.rhCall('owner', []); const [f] = await this.rhCall('feesAccrued', [ZERO]); out.owner = o; out.feesAccrued = f.toString(); } catch (e) { out.err = e.message; }
     }
     return out;
   };
@@ -402,10 +630,9 @@ export function installRhpad(Cls, H) {
     const ops = this.rhOps().address;
     const q = await (await fetch(`${RELAY_API}/quote`, { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ user: hot.address, recipient: ops, originChainId: src.chainId, destinationChainId: RH_CHAIN_ID,
-        originCurrency: '0x0000000000000000000000000000000000000000', destinationCurrency: '0x0000000000000000000000000000000000000000',
-        amount: amount.toString(), tradeType: 'EXACT_INPUT' }) })).json();
+        originCurrency: ZERO, destinationCurrency: ZERO, amount: amount.toString(), tradeType: 'EXACT_INPUT' }) })).json();
     if (!q.steps) throw new Error('Relay quote failed: ' + (q.message || 'no route'));
-    if (b.dry) return { dry: true, out: q.details?.currencyOut?.amountFormatted, fees: q.fees, steps: q.steps.length };
+    if (b.dry) return { dry: true, out: q.details?.currencyOut?.amountFormatted, steps: q.steps.length };
     const sent = [];
     for (const step of q.steps) for (const it of step.items) {
       const d = it.data;
@@ -413,28 +640,50 @@ export function installRhpad(Cls, H) {
       if (getAddress(d.from) !== hot.address) throw new Error('Unexpected Relay sender');
       if (B(d.value || 0) > amount) throw new Error('Relay asked for more than the amount');
       const tx = await hot.sendTransaction({ to: d.to, data: d.data, value: B(d.value || 0) });
-      await tx.wait(1);
       sent.push({ step: step.id, tx: tx.hash, requestId: step.requestId || '' });
+      this.setMeta('rh_fund', JSON.stringify({ ts: now(), from, amount: amount.toString(), sent }));   // recorded before waiting
     }
-    this.setMeta('rh_fund', JSON.stringify({ ts: now(), from, amount: amount.toString(), sent, out: q.details?.currencyOut?.amountFormatted }));
     return { ok: true, from, amount: amount.toString(), out: q.details?.currencyOut?.amountFormatted, sent };
   };
 
-  // mainnet smoke test with the ops wallet: launch, check the mirror, sell everything back, check the mirror again
+  // deploys RookeryCurve2 from the ops key (owner + keeper); creation bytecode comes from the tested build in rhcurve/
+  P.rhDeploy = async function (b) {
+    if (this.rhCurve() && this.meta('rh_version') === '2' && !b.force) throw new Error('Curve already deployed at ' + this.rhCurve());
+    const pending = this.meta('rh_deploy2_tx');
+    if (pending && !b.force) throw new Error('A deploy was already sent: ' + pending + ' (check it, then set the curve)');
+    const code = String(b.bytecode || '');
+    if (!/^0x[0-9a-fA-F]+$/.test(code) || code.length < 2000) throw new Error('bytecode missing');
+    const vEth = B(b.vEthWei || 0) || BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n;
+    const w = this.rhSigner();
+    const args = AbiCoder.defaultAbiCoder().encode(['address', 'address', 'address', 'uint256'], [RH.weth, b.factoryV2 || RH.factoryV2, w.address, vEth]);
+    const tx = await w.sendTransaction({ data: code + args.slice(2) });
+    this.setMeta('rh_deploy2_tx', tx.hash);
+    const rc = await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
+    if (!rc.contractAddress) throw new Error('no contract address');
+    const addr = getAddress(rc.contractAddress), blk = Number(BigInt(rc.blockNumber));
+    if (this.rhCurve()) this.setMeta('rh_curve_v1', this.rhCurve());
+    this.setMeta('rh_curve', addr);
+    this.setMeta('rh_version', '2');
+    this.setMeta('rh_deploy_block', String(blk));
+    this.setMeta('rh_block', String(blk));
+    this.setMeta('rh_qsync_ts', '0');
+    return { ok: true, curve: addr, tx: tx.hash, block: blk, vEth: vEth.toString() };
+  };
+
+  // mainnet smoke test with the ops wallet: launch with taxes, check the mirror, sell everything back, check again
   P.rhSelfTest = async function (b) {
     const w = this.rhSigner(), rpc = (m2, p2) => this.rhRpc(m2, p2), report = {};
-    const dev = B(b.devWei || '500000000000000');                  // 0.0005 ETH
+    const dev = B(b.devWei || '500000000000000');
     const name = 'Rookery Smoke Test', symbol = 'RSMOKE' + randHex(1).toUpperCase();
-    const prep = await this.rhPrepareCreate(null, { name, symbol, description: 'self-test, removed after the check', devBuy: dev.toString() });
+    const prep = await this.rhPrepareCreate(null, { name, symbol, description: 'self-test, removed after the check', devBuy: dev.toString(),
+      quote: 'ETH', taxMarketing: 1, taxBurn: 0.5, taxRewards: 1 });
     const t1 = await w.sendTransaction({ to: prep.tx.to, data: prep.tx.data, value: B(prep.tx.value) });
     await this.rhWait(t1.hash, rpc);
     const s1 = await this.rhSyncTx(t1.hash);
     const m = this.market(s1.market);
-    report.create = { tx: t1.hash, market: s1.market, token: m?.rh_token, applied: s1.applied };
+    report.create = { tx: t1.hash, market: s1.market, token: m?.rh_token, applied: s1.applied, taxes: [m?.tax_mkt, m?.tax_burn, m?.tax_rew] };
     const bal = B(await this.rhWalletBalance(m, w.address));
-    report.walletTokens = bal.toString();
-    report.expectTokens = prep.expectTokens;
-    report.mirrorOk = m && m.reserve_tok === bal.toString();
+    report.walletTokens = bal.toString(); report.expectTokens = prep.expectTokens;
     const ps = await this.rhPrepareTrade({ market: m.id, side: 'sell', amount: bal.toString(), slipBps: 100 });
     const before = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
     const t2 = await w.sendTransaction({ to: ps.tx.to, data: ps.tx.data, value: 0n });
@@ -443,35 +692,21 @@ export function installRhpad(Cls, H) {
     const after = BigInt(await this.rhRpc('eth_getBalance', [w.address, 'latest']));
     const gas = BigInt(rc2.gasUsed) * BigInt(rc2.effectiveGasPrice || 0);
     const m2 = this.market(m.id);
-    report.sell = { tx: t2.hash, ethBack: (after - before + gas).toString(), quoted: ps.quote, gas: gas.toString() };
-    report.afterSell = { sold: m2.reserve_tok, raised: m2.reserve_zro, trades: m2.trades, walletTokens: await this.rhWalletBalance(m2, w.address) };
-    report.pass = !!(report.mirrorOk && bal.toString() === prep.expectTokens && report.sell.ethBack === ps.quote && m2.reserve_tok === '0' && m2.trades === 2);
+    // the creator (= ops wallet here) collects its marketing tax
+    const owed = (await this.rhCall('creatorOwed', [w.address, ZERO]))[0];
+    report.sell = { tx: t2.hash, ethBack: (after - before + gas).toString(), quoted: ps.quote };
+    report.mirror = { trades: m2.trades, mktPaid: m2.mkt_paid, burned: m2.burned, creatorOwed: owed.toString() };
+    report.pass = !!(bal.toString() === prep.expectTokens && report.sell.ethBack === ps.quote && m2.trades === 2 && owed > 0n && B(m2.burned) > 0n);
+    if (owed > 0n) {
+      const t3 = await w.sendTransaction({ to: this.rhCurve(), data: CURVE_IFACE.encodeFunctionData('claimCreator', [ZERO]) });
+      await this.rhWait(t3.hash, rpc);
+      report.claimCreator = t3.hash;
+    }
     if (b.keep !== true) {
       this.sql.exec('DELETE FROM trades WHERE market=?', m.id); this.sql.exec('DELETE FROM markets WHERE id=?', m.id);
       this.sql.exec('DELETE FROM rh_holdings WHERE token=?', m.rh_token);
       report.removedFromLists = true;
     }
     return report;
-  };
-
-  // deploys RookeryCurve from the ops key (owner + keeper); creation bytecode comes from the audited build in rhcurve/
-  P.rhDeploy = async function (b) {
-    if (this.rhCurve() && !b.force) throw new Error('Curve already deployed at ' + this.rhCurve());
-    if (this.meta('rh_deploy_tx') && !b.force) throw new Error('A deploy was already sent: ' + this.meta('rh_deploy_tx') + ' (check it, then set the curve)');
-    const code = String(b.bytecode || '');
-    if (!/^0x[0-9a-fA-F]+$/.test(code) || code.length < 2000) throw new Error('bytecode missing');
-    const R = { weth: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73', factory: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA', npm: '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3' };
-    const vEth = B(b.vEthWei || 0) || BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n;
-    const w = this.rhSigner();
-    const args = AbiCoder.defaultAbiCoder().encode(['address', 'address', 'address', 'address', 'uint256'], [R.weth, R.factory, R.npm, w.address, vEth]);
-    const tx = await w.sendTransaction({ data: code + args.slice(2) });
-    this.setMeta('rh_deploy_tx', tx.hash);       // recorded before waiting: never deploy twice on a flaky RPC
-    const rc = await this.rhWait(tx.hash, (mm, pp) => this.rhRpc(mm, pp));
-    if (!rc.contractAddress) throw new Error('no contract address');
-    const addr = getAddress(rc.contractAddress), blk = Number(BigInt(rc.blockNumber));
-    this.setMeta('rh_curve', addr);
-    this.setMeta('rh_deploy_block', String(blk));
-    this.setMeta('rh_block', String(blk));
-    return { ok: true, curve: addr, tx: tx.hash, block: blk, vEth: vEth.toString() };
   };
 }

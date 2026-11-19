@@ -1039,8 +1039,8 @@ async function viewExplore() {
           <div class="cd"><b id="cdZero">${countdown(nets.zero?.launchAt)}</b><span class="mono mu">${esc(nets.zero?.status || '')}</span></div></div>
         <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
           <div class="cd"><b>TBA</b><span class="mono mu">${esc(nets.giwa?.status || '')}</span></div></div>
-        <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=robinhood]')?.click()"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">by Robinhood · graduates to Uniswap v3</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.robinhood || 0}</b> tokens</span></div>
-          <div class="cd"><b>LIVE</b><span class="mono mu">ETH · on-chain</span></div></a>
+        <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=robinhood]')?.click()"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">by Robinhood · ETH &amp; stock pairs · Uniswap V2</span><span class="net-meta"><i class="dotp live"></i>Pre-market live · on-chain · <b>${nt.robinhood || 0}</b> tokens</span></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">Premarket · on-chain</span></div></a>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">XLM · on-chain</span></div></a>
       </div>
@@ -1275,10 +1275,10 @@ async function viewToken(id) {
       <div class="panel pb side-card">
         <span class="mono mu">${m.network === 'stellar' ? (m.migrated ? 'Taxes on the curve · ended at graduation' : 'Taxes on every curve trade') : 'Taxes on every trade'}</span>
         <div style="margin-top:8px">
-          <div class="tax-row"><span class="tax-dot" style="background:#fff"></span>$臭企鹅 buy &amp; burn (Stinky Penguin)<b>0.5%</b></div>
+          <div class="tax-row"><span class="tax-dot" style="background:#fff"></span>$臭企鹅 buy &amp; burn (Stinky Penguin)<b>${m.rh && m.migrated ? 'curve only' : '0.5%'}</b></div>
           <div class="tax-row"><span class="tax-dot" style="background:#9b9ba3"></span>Marketing (creator)<b>${m.taxes.marketing}%</b></div>
           <div class="tax-row"><span class="tax-dot" style="background:#5c5c64"></span>Burn ${esc(m.symbol)}<b>${m.taxes.burn}%</b></div>
-          <div class="tax-row"><span class="tax-dot" style="background:var(--up)"></span>${m.quote || 'ZRO'} rewards to holders<b>${m.taxes.rewards}%</b></div>
+          <div class="tax-row"><span class="tax-dot" style="background:var(--up)"></span>${m.rh ? '$' + esc(m.symbol) : (m.quote || 'ZRO')} rewards to holders<b>${m.taxes.rewards}%</b></div>
         </div>
         ${Number(m.taxes.marketing) > 0 ? `<p class="mu" style="font-size:11.5px;line-height:1.6;margin-top:10px">Marketing fees are paid to the creator automatically on every trade. Nothing to claim.</p>` : ''}
         ${m.network === 'stellar' ? `<p class="mu" style="font-size:11.5px;line-height:1.6;margin-top:8px;border-left:2px solid var(--line2);padding-left:9px">${m.migrated
@@ -1365,9 +1365,9 @@ async function viewToken(id) {
     $('#bondBar').style.width = Math.max(2.5, m.progress) + '%';
     const left = zNum(B(m.curveTokens) * WEI - B(m.sold));
     $('#bondTxt').innerHTML = m.rh
-      ? (m.migrated ? `<b style="color:var(--tx)">Graduated to Uniswap v3.</b> The pool lives on Robinhood Chain and the LP NFT sits at the dead address, so the liquidity is locked forever.`
-        : m.graduated ? `<b style="color:var(--tx)">Sold out.</b> Graduating into a Uniswap v3 pool on Robinhood Chain right now, LP burned forever.`
-        : `${(left / 1e6).toFixed(1)}M ${esc(m.symbol)} left on the curve. When it sells out, the contract moves the raise into a Uniswap v3 pool on Robinhood Chain and burns the LP.`)
+      ? (m.migrated ? `<b style="color:var(--tx)">Graduated to Uniswap V2.</b> The pool lives on Robinhood Chain and its LP tokens were minted to the dead address, so the liquidity is locked forever. Creator taxes keep applying on Uniswap.`
+        : m.graduated ? `<b style="color:var(--tx)">Sold out.</b> Graduating into a Uniswap V2 pool on Robinhood Chain right now, LP burned forever.`
+        : `${(left / 1e6).toFixed(1)}M ${esc(m.symbol)} left on the curve. When it sells out, the contract moves the raise into a Uniswap V2 pool on Robinhood Chain and burns the LP.`)
       : m.graduated
       ? (m.network === 'stellar'
         ? (m.migrated
@@ -1789,15 +1789,29 @@ async function viewCreate(hatchId) {
     // Robinhood Chain: the token contract is deployed from the creator's wallet in the launch transaction
     const onc = F.network === 'robinhood' && S.rh?.live;
     $('#fsProt').style.display = onc ? 'none' : '';
-    $('#fsTax').style.display = onc ? 'none' : '';
     $('#cFee').textContent = onc ? 'Gas only (~$0.01)' : 'Free';
-    $('#devHint').textContent = onc ? 'Optional first buy in ETH from your wallet, in the same transaction that deploys the token. Bought tokens land in your wallet.'
-      : "Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.";
     if (onc) {
-      $('#pairBox').innerHTML = `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">Ξ</span><div><b>Real ERC-20 from block one</b><small>Deployed from your wallet · trades with ETH on the RookeryCurve contract</small></div></button>
-      <button class="opt" disabled><span class="net-ico all">∞</span><div><b>Graduates to Uniswap v3</b><small>When the curve sells out · LP burned forever</small></div></button>`;
+      const qs = S.rh.quotes || [{ symbol: 'ETH', name: 'Ether', address: '0x0000000000000000000000000000000000000000' }];
+      const cur = qs.find(q => q.address === F.rhQuote) || qs[0];
+      F.rhQuote = cur.address;
+      const opt = (q) => `<option value="${esc(q.address)}" ${q.address === cur.address ? 'selected' : ''}>${esc(q.symbol)} · ${esc(q.name)}${q.usd ? ' · $' + (q.usd >= 100 ? q.usd.toFixed(0) : q.usd.toFixed(2)) : ''}</option>`;
+      const stocks = qs.filter(q => !['ETH', 'USDG'].includes(q.symbol)).sort((a, b) => a.symbol.localeCompare(b.symbol));
+      $('#pairBox').innerHTML = `<div class="rh-pair" style="grid-column:1/-1">
+        <label class="mono mu" style="font-size:11px;letter-spacing:.06em">PAIR WITH</label>
+        <select class="inp" id="rhPair" style="margin-top:6px">
+          <optgroup label="Crypto">${qs.filter(q => ['ETH', 'USDG'].includes(q.symbol)).map(opt).join('')}</optgroup>
+          <optgroup label="Robinhood Stock Tokens (${stocks.length})">${stocks.map(opt).join('')}</optgroup>
+        </select>
+        <small class="mu" style="display:block;margin-top:6px;font-size:11.5px;line-height:1.5">${cur.symbol === 'ETH' ? 'Buyers pay in ETH.' : `Buyers pay in <b>${esc(cur.symbol)}</b> (${esc(cur.name)}); their wallet approves it once.`} The token is a real ERC-20 from block one and graduates to a Uniswap V2 pool with the LP burned.</small></div>`;
+      $('#rhPair').onchange = (e) => { F.rhQuote = e.target.value; paint(); };
       $('#devTxt').textContent = '';
-      $('#devLbl').textContent = 'Amount · ETH';
+      $('#devLbl').textContent = 'Amount · ' + cur.symbol;
+      $('#devHint').textContent = `Optional first buy in ${cur.symbol} from your wallet, in the same transaction that deploys the token. Bought tokens land in your wallet.`;
+      const ql = $$('.qcur'); if (ql[0]) ql[0].textContent = cur.symbol; if (ql[1]) ql[1].textContent = '$' + (F.symbol || 'TOKEN');
+      const tn = $('#taxNote'); tn.style.display = 'block';
+      tn.textContent = 'Robinhood Chain: these taxes apply on the bonding curve AND keep applying on Uniswap after graduation. On the curve marketing is paid in the pair asset; on Uniswap it is paid in your token. Rewards go to holders in your token: they land in wallets on the next transfer or with one claim. Wallet-to-wallet transfers are never taxed.';
+    } else {
+      $('#devHint').textContent = "Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.";
     }
     $('#createGo').textContent = onc ? 'Create from wallet' : (S.me ? 'Create token' : 'Log in to create');
   };
@@ -3228,10 +3242,11 @@ async function route() {
 
 /* ═══════════ ROBINHOOD CHAIN · ON-CHAIN LAUNCHPAD ═══════════
    Tokens are real ERC-20s from the first second. Buys and sells go from the user's wallet straight to the
-   RookeryCurve contract: Rookery only builds the transaction and shows the result. No account needed. */
+   RookeryCurve2 contract (pair: ETH, USDG or a Robinhood Stock Token), and after graduation to the Uniswap V2 pool.
+   Rookery only builds the transactions and shows the result. No account needed. */
 const RHW = {
   CHAIN: 4663,
-  V_TOKEN: 1073000000n * 10n ** 18n,
+  ZERO: '0x0000000000000000000000000000000000000000',
   async connect() {
     const a = await EVMW.account();
     await EVMW.ensureChain(RHW.CHAIN);
@@ -3243,27 +3258,31 @@ const RHW = {
     if (/insufficient funds/i.test(e?.message || '')) return 'Not enough ETH on Robinhood Chain in this wallet (amount + gas)';
     return (e?.message || String(e)).replace(/^.*?reverted:?\s*/i, '').slice(0, 180);
   },
-  async send(from, tx) {
-    const hash = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: tx.to, data: tx.data, value: tx.value }] });
+  async mined(hash) {
+    for (let i = 0; i < 90; i++) {
+      const r = await EVMW.eth().request({ method: 'eth_getTransactionReceipt', params: [hash] }).catch(() => null);
+      if (r) { if (r.status !== '0x1') throw new Error('Approval failed on-chain'); return r; }
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    throw new Error('Approval still pending, try again in a moment');
+  },
+  // optional approve (pair asset / router), then the main transaction, then let Rookery index it
+  async send(from, prep, btn) {
+    if (prep.approve) {
+      if (btn) btn.textContent = 'Approve in your wallet…';
+      const ah = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: prep.approve.to, data: prep.approve.data }] });
+      if (btn) btn.textContent = 'Waiting for approval…';
+      await RHW.mined(ah);
+    }
+    if (btn) btn.textContent = 'Confirm in your wallet…';
+    const hash = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: prep.tx.to, data: prep.tx.data, value: prep.tx.value }] });
     let r = null;
     for (let i = 0; i < 5; i++) { r = await api('/rh/sync', { hash }); if (!r.pending) break; }
     if (r && r.ok === false) throw new Error(r.error || 'Transaction failed');
     return { hash, ...r };
   },
-  // same math as the contract (0.5% fee), for the estimate under the input
-  quote(m, side, amt) {
-    const vE = B(m.vQuote), real = B(m.reserveZro), sold = B(m.sold), k = vE * RHW.V_TOKEN;
-    const x = vE + real, y = RHW.V_TOKEN - sold;
-    if (side === 'buy') {
-      const net = amt - (amt * 50n) / 10000n;
-      const out = y - (k + (x + net) - 1n) / (x + net);
-      const left = B(m.curveTokens) * WEI - sold;
-      return out > left ? left : out;
-    }
-    let g = x - (k + (y + amt) - 1n) / (y + amt);
-    if (g > real) g = real;
-    return g - (g * 50n) / 10000n;
-  },
+  qsym(m) { return m.quote || 'ETH'; },
+  isEth(m) { return !m.rh?.quote || m.rh.quote === RHW.ZERO; },
   async watch(m) {
     try {
       await RHW.connect();
@@ -3275,9 +3294,8 @@ const RHW = {
     try {
       btn.disabled = true;
       const from = await RHW.connect();
-      const prep = await api('/rh/prepare-create', { ...F, devBuy: F.devBuy ? toWei(F.devBuy).toString() : '0' });
-      btn.textContent = 'Confirm in your wallet…';
-      const r = await RHW.send(from, prep.tx);
+      const prep = await api('/rh/prepare-create', { ...F, quote: F.rhQuote || 'ETH', from, devBuy: F.devBuy ? toWei(F.devBuy).toString() : '0' });
+      const r = await RHW.send(from, prep, btn);
       if (!r.market) throw new Error('Launched, indexing… refresh in a few seconds. Tx ' + r.hash.slice(0, 10));
       toast(`<b>$${esc(F.symbol)}</b> is live on Robinhood Chain`);
       location.hash = `#/t/${r.market}`;
@@ -3287,53 +3305,59 @@ const RHW = {
   pane(m) {
     const box = $('#rhPane'); if (!box) return;
     const ex = m.rh.explorer || 'https://robinhoodchain.blockscout.com';
-    const contract = `<div class="st-asset" style="margin-top:12px">
-        <div class="kv"><span>Contract</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(short(m.rh.token))}</b><button class="mini" data-copy="${esc(m.rh.token)}">Copy</button></div>
-        <div style="display:flex;gap:6px;margin-top:6px"><a class="btn sm ghost" style="flex:1" target="_blank" rel="noopener" href="${esc(ex)}/token/${esc(m.rh.token)}">Explorer ↗</a>
-        <button class="btn sm ghost" style="flex:1" id="rhWatch">Add to wallet</button></div></div>`;
-    if (m.migrated || m.graduated) {
+    const Q = RHW.qsym(m), dex = !!(m.migrated && m.rh.pool);
+    const t = m.taxes || {};
+    const taxTxt = (t.marketing || t.burn || t.rewards) ? `Creator taxes ${t.marketing}% marketing · ${t.burn}% burn · ${t.rewards}% rewards${dex ? ' (on Uniswap too)' : ''}.` : 'No creator taxes.';
+    if (m.graduated && !dex) {
       box.innerHTML = `<span class="net-ico rh" style="width:40px;height:40px"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span>
-        <h3 style="font-size:16px;margin:12px 0 6px">${m.migrated ? 'Trading on Uniswap v3' : 'Graduating to Uniswap v3…'}</h3>
-        <p class="mu" style="font-size:13px;line-height:1.55;margin-bottom:10px">${m.migrated
-          ? `$${esc(m.symbol)} sold out its curve. The raise and the reserved supply sit in a full-range Uniswap v3 pool on Robinhood Chain (1% tier) and the LP NFT was sent to the dead address. Your tokens are already in your wallet: trade them in any wallet or DEX that supports Robinhood Chain.`
-          : 'The curve is sold out. The contract is opening the Uniswap v3 pool and burning the LP. This takes a few seconds.'}</p>
-        ${m.rh.pool ? `<a class="btn lg wide" target="_blank" rel="noopener" href="${esc(ex)}/address/${esc(m.rh.pool)}">View the pool ↗</a>` : ''}${contract}
-        <div class="kv" style="margin-top:10px"><span>In your wallet</span><b id="rhBal">—</b></div>`;
-      $('#rhWatch').onclick = () => RHW.watch(m);
-      RHW.paintBal(m);
+        <h3 style="font-size:16px;margin:12px 0 6px">Graduating to Uniswap…</h3>
+        <p class="mu" style="font-size:13px;line-height:1.55">The curve is sold out. The contract is opening the Uniswap V2 pool and sending the LP to the dead address. This takes a few seconds.</p>`;
       return;
     }
-    let side = 'buy', addr = null;
-    box.innerHTML = `<div class="tb-tabs"><button class="buy on" data-rs="buy">Buy</button><button class="sell" data-rs="sell">Sell</button></div>
-      <div class="amt"><input id="rhAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="rhUnit">ETH</span></div>
+    let side = 'buy', addr = null, timer = null;
+    box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span class="mono mu" style="font-size:11px">${dex ? 'UNISWAP V2 · ROBINHOOD CHAIN' : 'BONDING CURVE · ON-CHAIN'}</span><span class="tag robinhood">${esc(m.symbol)}/${esc(Q)}</span></div>
+      <div class="tb-tabs"><button class="buy on" data-rs="buy">Buy</button><button class="sell" data-rs="sell">Sell</button></div>
+      <div class="amt"><input id="rhAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="rhUnit">${esc(Q)}</span></div>
       <div class="quick" id="rhQuick"></div>
       <div class="est" id="rhEst"></div>
       <button class="btn lg wide up" id="rhGo">Buy from wallet</button>
-      <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">On-chain on Robinhood Chain: your wallet signs one transaction with the RookeryCurve contract and the tokens land in that wallet. No account, no deposit. The 0.5% fee goes to the $臭企鹅 buy &amp; burn.</p>
-      ${contract}
-      <div class="kv" style="margin-top:10px"><span>In your wallet</span><b id="rhBal">—</b></div>`;
+      <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">${dex
+        ? `$${esc(m.symbol)} graduated: this trades on its Uniswap V2 pool (LP burned forever) straight from your wallet.`
+        : `Your wallet signs one transaction with the RookeryCurve contract and the tokens land in that wallet. No account, no deposit.`} ${esc(taxTxt)} ${dex ? '' : 'Rookery fee 0.5% → $臭企鹅 buy &amp; burn.'}</p>
+      <div id="rhMine" style="margin-top:10px"></div>
+      <div class="st-asset" style="margin-top:12px">
+        <div class="kv"><span>Contract</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(short(m.rh.token))}</b><button class="mini" data-copy="${esc(m.rh.token)}">Copy</button></div>
+        ${dex ? `<div class="kv"><span>Pool</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(short(m.rh.pool))}</b><button class="mini" data-copy="${esc(m.rh.pool)}">Copy</button></div>` : ''}
+        <div style="display:flex;gap:6px;margin-top:6px"><a class="btn sm ghost" style="flex:1" target="_blank" rel="noopener" href="${esc(ex)}/token/${esc(m.rh.token)}">Explorer ↗</a>
+        <button class="btn sm ghost" style="flex:1" id="rhWatch">Add to wallet</button></div></div>`;
     const amtIn = () => { try { return toWei(($('#rhAmt').value || '0').replace(',', '.')); } catch { return 0n; } };
+    const quickBuy = Q === 'ETH' ? ['0.005', '0.01', '0.05', '0.1'] : Q === 'USDG' ? ['10', '25', '50', '100'] : ['0.05', '0.1', '0.5', '1'];
     const est = () => {
+      clearTimeout(timer);
       const a = amtIn();
       if (a <= 0n) { $('#rhEst').innerHTML = ''; return; }
-      const q = RHW.quote(m, side, a);
-      $('#rhEst').innerHTML = side === 'buy'
-        ? `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(q, 2))} $${esc(m.symbol)}</b></div><div class="kv"><span>Slippage guard</span><b>3%</b></div>`
-        : `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(q, 6))} ETH</b></div><div class="kv"><span>Slippage guard</span><b>3%</b></div>`;
+      $('#rhEst').innerHTML = '<div class="kv"><span>You get ≈</span><b class="mu">…</b></div>';
+      timer = setTimeout(async () => {
+        try {
+          const r = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString() });
+          $('#rhEst').innerHTML = `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(B(r.quote), side === 'buy' ? 2 : 6))} ${side === 'buy' ? '$' + esc(m.symbol) : esc(Q)}</b></div>
+            <div class="kv"><span>Slippage guard</span><b>${dex ? '5' : '3'}%</b></div>`;
+        } catch (e) { $('#rhEst').innerHTML = `<div class="kv"><span class="dn">${esc(e.message)}</span></div>`; }
+      }, 350);
     };
     const quick = () => {
-      $('#rhUnit').textContent = side === 'buy' ? 'ETH' : '$' + m.symbol;
+      $('#rhUnit').textContent = side === 'buy' ? Q : '$' + m.symbol;
       $('#rhGo').textContent = side === 'buy' ? 'Buy from wallet' : 'Sell from wallet';
       $('#rhGo').className = 'btn lg wide ' + (side === 'buy' ? 'up' : 'dn');
-      $('#rhQuick').innerHTML = side === 'buy'
-        ? ['0.005', '0.01', '0.05', '0.1'].map(v => `<button data-v="${v}">${v} ETH</button>`).join('')
+      $('#rhQuick').innerHTML = side === 'buy' ? quickBuy.map(v => `<button data-v="${v}">${v} ${esc(Q)}</button>`).join('')
         : ['25', '50', '100'].map(v => `<button data-p="${v}">${v}%</button>`).join('');
       $$('#rhQuick button').forEach(b => b.onclick = async () => {
         if (b.dataset.v) $('#rhAmt').value = b.dataset.v;
         else {
-          const bal = await RHW.balance(m, addr || await RHW.peek());
-          const part = (bal * BigInt(b.dataset.p)) / 100n;
-          $('#rhAmt').value = (Number(part / 10n ** 12n) / 1e6).toString();
+          const w = await RHW.info(m, addr || await RHW.peek());
+          const part = (B(w.balance) * BigInt(b.dataset.p)) / 100n;
+          $('#rhAmt').value = b.dataset.p === '100' ? weiToStr(part, 18).replace(/,/g, '') : (Number(part / 10n ** 12n) / 1e6).toString();
         }
         est();
       });
@@ -3348,25 +3372,36 @@ const RHW = {
       const btn = $('#rhGo'); btn.disabled = true;
       try {
         addr = await RHW.connect();
-        const prep = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), slipBps: 300 });
-        btn.textContent = 'Confirm in your wallet…';
-        await RHW.send(addr, prep.tx);
-        toast(side === 'buy' ? `Bought $${esc(m.symbol)}: the tokens are in your wallet` : `Sold $${esc(m.symbol)}: the ETH is in your wallet`);
+        const prep = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), from: addr, slipBps: dex ? 500 : 300 });
+        await RHW.send(addr, prep, btn);
+        toast(side === 'buy' ? `Bought $${esc(m.symbol)}: the tokens are in your wallet` : `Sold $${esc(m.symbol)}: the ${esc(Q)} is in your wallet`);
         viewToken(m.id);
       } catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); }
       finally { btn.disabled = false; quick(); }
     };
     quick();
-    RHW.paintBal(m);
+    RHW.paintMine(m);
   },
-  async balance(m, a) {
-    if (!a) return 0n;
-    try { return B((await api(`/rh/balance?market=${encodeURIComponent(m.id)}&address=${a}`)).balance); } catch { return 0n; }
+  async info(m, a) {
+    if (!a) return { balance: '0' };
+    try { return await api(`/rh/wallet?market=${encodeURIComponent(m.id)}&address=${a}`); } catch { return { balance: '0' }; }
   },
-  async paintBal(m) {
+  async paintMine(m) {
     const a = await RHW.peek();
-    const el = $('#rhBal'); if (!el) return;
-    if (!a) { el.innerHTML = '<span class="mu">connect a wallet</span>'; return; }
-    el.textContent = `${weiToStr(await RHW.balance(m, a), 2)} $${m.symbol}`;
+    const el = $('#rhMine'); if (!el) return;
+    if (!a) { el.innerHTML = '<div class="kv"><span>In your wallet</span><b><span class="mu">connect a wallet</span></b></div>'; return; }
+    const w = await RHW.info(m, a);
+    const Q = RHW.qsym(m);
+    const pend = B(w.pendingRewards), owed = B(w.creatorOwed);
+    el.innerHTML = `<div class="kv"><span>In your wallet</span><b>${esc(weiToStr(B(w.balance), 2))} $${esc(m.symbol)}</b></div>
+      ${w.quoteBalance ? `<div class="kv"><span>${esc(Q)} in wallet</span><b>${esc(weiToStr(B(w.quoteBalance), Q === 'ETH' ? 5 : 3))}</b></div>` : ''}
+      ${pend > 0n ? `<div class="kv"><span>Holder rewards</span><b>${esc(weiToStr(pend, 2))} $${esc(m.symbol)} <button class="mini" id="rhClaimR">Claim</button></b></div>` : ''}
+      ${w.isCreator ? `<div class="kv"><span>Your marketing tax</span><b>${esc(weiToStr(owed, Q === 'ETH' ? 6 : 4))} ${esc(Q)} ${owed > 0n ? '<button class="mini" id="rhClaimC">Claim</button>' : ''}</b></div>` : ''}`;
+    const claim = (kind) => async () => {
+      try { const from = await RHW.connect(); await RHW.send(from, await api('/rh/prepare-claim', { market: m.id, kind })); toast('Claimed to your wallet'); RHW.paintMine(m); }
+      catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); }
+    };
+    if ($('#rhClaimR')) $('#rhClaimR').onclick = claim('rewards');
+    if ($('#rhClaimC')) $('#rhClaimC').onclick = claim('creator');
   },
 };
