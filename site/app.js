@@ -1039,8 +1039,8 @@ async function viewExplore() {
           <div class="cd"><b id="cdZero">${countdown(nets.zero?.launchAt)}</b><span class="mono mu">${esc(nets.zero?.status || '')}</span></div></div>
         <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
           <div class="cd"><b>TBA</b><span class="mono mu">${esc(nets.giwa?.status || '')}</span></div></div>
-        <div class="net-card"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">live · Ethereum L2 · ETH pairs</span>
-          <div class="cd"><b>LIVE</b><span class="mono mu">${esc(nets.robinhood?.status || '')}</span></div></div>
+        <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=robinhood]')?.click()"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">by Robinhood · graduates to Uniswap v3</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.robinhood || 0}</b> tokens</span></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">ETH · on-chain</span></div></a>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">XLM · on-chain</span></div></a>
       </div>
