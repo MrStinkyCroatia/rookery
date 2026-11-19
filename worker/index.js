@@ -1,5 +1,9 @@
 // PreLaunch — launchpad for networks that are not live yet (Zero by LayerZero, GIWA).
 // Worker routes /api/* into one Durable Object (SQLite) => every trade is atomic.
+import { installSniper } from './sniper.js';
+import { installStx } from './stx.js';
+import { installRhpad } from './rhpad.js';
+import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
 import { HDNodeWallet, JsonRpcProvider, FallbackProvider, Network, FetchRequest, Wallet, Contract, Interface, Transaction, getAddress, isAddress, verifyMessage } from 'ethers';
@@ -8,6 +12,9 @@ const WEI = 10n ** 18n;
 const ACC = 10n ** 36n;
 const ZRO_TOKEN = '0x6985884C4392D348587B19cb9eAAf157F13271cd'; // same address on all chains below
 const PLATFORM_BPS = 50n; // 0.5% of every trade -> pLAUNCH buy & burn reserve
+
+// ZRO lives on these chains only (Robinhood Chain is ETH-only for now)
+const ZRO_CHAINS = ['ethereum', 'base', 'arbitrum', 'bsc', 'optimism'];
 
 const CHAINS = {
   ethereum: { label: 'Ethereum', chainId: 1, rpc: 'https://ethereum-rpc.publicnode.com', explorer: 'https://etherscan.io', conf: 3n,
@@ -20,11 +27,14 @@ const CHAINS = {
     rpcs: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org', 'https://bsc-dataseed1.defibit.io', 'https://bsc-mainnet.public.blastapi.io'] },
   optimism: { label: 'Optimism', chainId: 10, rpc: 'https://optimism-rpc.publicnode.com', explorer: 'https://optimistic.etherscan.io', conf: 15n,
     rpcs: ['https://optimism-rpc.publicnode.com', 'https://mainnet.optimism.io', 'https://1rpc.io/op', 'https://optimism-mainnet.public.blastapi.io'] },
+  robinhood: { label: 'Robinhood Chain', chainId: 4663, rpc: 'https://rpc.mainnet.chain.robinhood.com', explorer: 'https://robinhoodchain.blockscout.com', conf: 15n,
+    rpcs: ['https://rpc.mainnet.chain.robinhood.com', 'https://robinhood-rpc.publicnode.com', 'https://4663.rpc.thirdweb.com'] },
 };
 
 const NETWORKS = {
   zero: { label: 'Zero', by: 'LayerZero', launchAt: '2026-11-30T00:00:00Z', status: 'Mainnet 30.11' },
   giwa: { label: 'GIWA', by: 'Upbit', launchAt: null, status: 'Testnet · mainnet TBA' },
+  robinhood: { label: 'Robinhood Chain', by: 'Robinhood', launchAt: null, status: 'Live · Ethereum L2', live: true },
   stellar: { label: 'Stellar', by: 'SDF', launchAt: null, status: 'Live · graduates to Aquarius', live: true },
 };
 // Stellar markets: quoted in XLM, graduate at this market cap into an Aquarius pool (LP burned)
@@ -37,7 +47,7 @@ const LIMITS = { maxWithdraw: 5000n * WEI, dailyWithdraw: 20000n * WEI, minBuy: 
 // ETH support: GIWA markets are quoted in ETH; every user gets a separate ETH deposit address (HD child + offset)
 // which we never top up with gas, so our gas never mixes with user deposits.
 const ETH_OFFSET = 1_000_000_000;
-const ETH_CHAINS = ['ethereum', 'base', 'arbitrum'];
+const ETH_CHAINS = ['ethereum', 'base', 'arbitrum', 'robinhood'];
 const MIN_BUY = { zro: WEI / 10n, eth: WEI / 20000n, xlm: WEI };   // ... · 1 XLM      // 0.1 ZRO · 0.00005 ETH
 // points tiers: what they unlock at mainnet. Nothing here is money.
 const TIERS = [
@@ -49,13 +59,13 @@ const TIERS = [
 const SWAP_FEE_BPS = 50n;                                    // 0.5% on instant ETH<->ZRO conversions
 const ASSET_LABEL = { zro: 'ZRO', eth: 'ETH', xlm: 'XLM' };
 // withdrawal network fee: charged in ZRO, deducted from the withdrawn amount
-const NATIVE = { ethereum: 'eth', base: 'eth', arbitrum: 'eth', optimism: 'eth', bsc: 'bnb' };
+const NATIVE = { ethereum: 'eth', base: 'eth', arbitrum: 'eth', optimism: 'eth', bsc: 'bnb', robinhood: 'eth' };
 const WD_GAS = 90_000n;          // ERC-20 transfer + headroom
 const TOPUP_GAS = 21_000n;       // native gas top-up from the hot wallet to a deposit address
 const FEE_MARGIN = 1.5;          // covers L1 data fees on rollups and gas spikes
 const MIN_FEE_ZRO = 0.05;
 // deposit addresses holding at least this much ZRO are swept into the hot wallet, so payouts come from one pool
-const SWEEP_MIN = { ethereum: 10n * WEI, base: 2n * WEI, arbitrum: 2n * WEI, bsc: 2n * WEI, optimism: 2n * WEI };
+const SWEEP_MIN = { ethereum: 10n * WEI, base: 2n * WEI, arbitrum: 2n * WEI, bsc: 2n * WEI, optimism: 2n * WEI, robinhood: 2n * WEI };
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const SCAN_RANGE = 1500n; // blocks per chain per cron tick
@@ -202,6 +212,7 @@ export class Books {
       try { for (const [c, u] of Object.entries(JSON.parse(env.RPC_OVERRIDE))) if (CHAINS[c]) { CHAINS[c].rpcs = [u]; CHAINS[c].rpc = u; } } catch { /* ignore */ }
     }
     this.init();
+    this.rhInit();
     // live push: keep-alive pings are answered by the runtime without waking the object
     try { ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"ping":1}', '{"pong":1}')); } catch { /* older runtime */ }
   }
@@ -319,6 +330,10 @@ export class Books {
     q(`CREATE TABLE IF NOT EXISTS st_drops (id INTEGER PRIMARY KEY AUTOINCREMENT, market TEXT, user_id INTEGER, address TEXT,
        status TEXT, amount TEXT DEFAULT '', txid TEXT DEFAULT '', note TEXT DEFAULT '', tries INTEGER DEFAULT 0, next_try INTEGER DEFAULT 0,
        created INTEGER, updated INTEGER, UNIQUE(market, user_id))`);
+    q(`CREATE TABLE IF NOT EXISTS xb_orders (ref TEXT PRIMARY KEY, user_id INTEGER, from_net TEXT, to_net TEXT, amount_in TEXT, in_usd REAL,
+       out_est TEXT, out_usd REAL, recipient TEXT, refund TEXT, dep_addr TEXT, dep_memo TEXT DEFAULT '', status TEXT, in_tx TEXT DEFAULT '',
+       out_tx TEXT DEFAULT '', out_fmt TEXT DEFAULT '', refund_tx TEXT DEFAULT '', created INTEGER, deadline TEXT, checked INTEGER DEFAULT 0)`);
+    try { q(`ALTER TABLE xb_orders ADD COLUMN tg_state TEXT`); } catch { /* exists */ }
     // one-signature buys from a connected EVM wallet
     q(`CREATE TABLE IF NOT EXISTS orders_evm (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT,
        asset TEXT, amount TEXT, tagged TEXT, tag INTEGER, status TEXT, tokens TEXT DEFAULT '', txid TEXT DEFAULT '',
@@ -387,10 +402,22 @@ export class Books {
       // the Stellar hot key is derived from the same master secret (ed25519 seed = sha256(xprv + label))
       const seed = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(this.env.MASTER_XPRV + ':rookery-stellar-hot-v1')));
       this._st = new StellarIO(this.env.STELLAR_NET === 'mainnet' ? 'mainnet' : 'testnet', Buffer.from(seed), this.env.STELLAR_NET === 'mainnet' ? (this.env.STELLAR_RPC || '') : '');
+      if (this.env.STELLAR_SIM_SOURCE) this._st.simSource = this.env.STELLAR_SIM_SOURCE;   // read-only simulations from any funded account (tests)
     }
     return this._st;
   }
   stNet() { return this.env.STELLAR_NET === 'mainnet' ? 'mainnet' : 'testnet'; }
+  stellarWalletUser(address) {
+    const owner = this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', address).toArray()[0];
+    if (owner) return owner;
+    let uname = 'st_' + address.slice(1, 7).toLowerCase();
+    while (this.sql.exec('SELECT 1 FROM users WHERE username=? COLLATE NOCASE', uname).toArray().length) uname = 'st_' + randHex(3);
+    const idx = Number(this.meta('dep_counter')) + 1;
+    this.setMeta('dep_counter', idx);
+    this.sql.exec(`INSERT INTO users (email,username,pass_hash,salt,dep_index,dep_address,created,stellar_wallet) VALUES (?,?,?,?,?,?,?,?)`,
+      `${address.toLowerCase()}@stellar.local`, uname, '', '', idx, this.depositAddressFor(idx), now(), address);
+    return this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', address).one();
+  }
   stGradUsd() { return Number(this.meta('stellar_grad_usd')) || STELLAR_GRAD_USD; }
   // each market keeps its own target, so a live token can never be re-priced mid-flight
   marketGradUsd(m) { return Number(m?.grad_usd) || this.stGradUsd(); }
@@ -446,7 +473,11 @@ export class Books {
             try {
               const u3 = this.sql.exec('SELECT * FROM users WHERE id=?', it2.user_id).toArray()[0];
               if (u3) {
-                this.trade(u3, { market: it2.market, side: 'buy', amount: amt2.toString() });
+                // buys sent by RookerySniperBot carry its fee: booked into the burn reserve before the curve fills
+                const fb = BigInt(Number(it2.fee_bps || 0)), bf = fb > 0n && fb <= 500n ? (amt2 * fb) / 10000n : 0n;
+                if (bf > 0n) this.snbChargeFee(u3.id, 'xlm', bf);
+                const tr = this.trade(u3, { market: it2.market, side: 'buy', amount: (amt2 - bf).toString() });
+                if (fb > 0n) this.snbAfterChain(u3, it2.market, 'buy', tr, amt2, bf);
                 this.sql.exec(`UPDATE st_intents SET status='done' WHERE id=?`, it2.id);
                 credited.push({ user: it2.user_id, xlm: it.amount, bought: it2.market });
               }
@@ -644,7 +675,9 @@ export class Books {
     // sell on the curve, then send the XLM straight back to the wallet the tokens came from
     try {
       const r = this.trade(u, { market: m.id, side: 'sell', amount: amt.toString() });
-      const xlmOut = B(r.zro);
+      let xlmOut = B(r.zro);
+      const fb = BigInt(Number(intent.fee_bps || 0));
+      if (fb > 0n && fb <= 500n) { const f = (xlmOut * fb) / 10000n; this.snbChargeFee(u.id, 'xlm', f); xlmOut -= f; this.snbAfterChain(u, m.id, 'sell', r, xlmOut, f); }
       this.sql.exec(`UPDATE st_intents SET status='done' WHERE id=?`, intent.id);
       const to = intent.address || it.from;
       let tid;
@@ -1056,7 +1089,7 @@ export class Books {
   async netStatus() {
     if (this._ns && now() - this._ns.ts < 60_000) return this._ns.v;
     const hot = this.hotWallet().address, v = {};
-    await Promise.all(Object.keys(CHAINS).map(async (c) => {
+    await Promise.all(ZRO_CHAINS.map(async (c) => {
       try {
         const gp = await this.gasPrice(c);
         const nat = BigInt(await rpc(c, 'eth_getBalance', [hot, 'latest']));
@@ -1083,7 +1116,7 @@ export class Books {
     } catch { /* fall through and recompute */ }
     const users = this.sql.exec('SELECT dep_address FROM users WHERE dep_address IS NOT NULL').toArray().map(r => r.dep_address);
     const chains = {}, tot = { held: 0, hot: 0, dep: 0 };
-    await Promise.all(Object.keys(CHAINS).map(async (chain) => {
+    await Promise.all(ZRO_CHAINS.map(async (chain) => {
       const C = CHAINS[chain];
       try {
         const hotZro = await this.zroBalanceOf(chain, hot);
@@ -1209,6 +1242,35 @@ export class Books {
     return owed > debt ? owed - debt : 0n;
   }
 
+  /* ───────────── bridge (thin layer, no custody, no own liquidity) ───────────── */
+  xbCfg() {
+    return { feeBps: Number(this.meta('xb_fee_bps') || 100), feeTo: this.meta('xb_fee_to') || '0x408c3d3fd36fdf84888f343417787d8710e76fe8', key: this.env.XB_KEY || '' };
+  }
+  xbOn() { return this.meta('xb_off') !== '1'; }
+  xbView(o) {
+    const Z = XB_NETS[o.to_net], A = XB_NETS[o.from_net];
+    return { ref: o.ref, from: o.from_net, to: o.to_net, amountIn: o.amount_in, sym: A?.sym, toSym: Z?.sym, inUsd: o.in_usd, outEst: o.out_est, outUsd: o.out_usd,
+      out: o.out_fmt, recipient: o.recipient, depositAddress: o.dep_addr, depositMemo: o.dep_memo, status: o.status, created: o.created, deadline: o.deadline,
+      inTx: o.in_tx, outTx: o.out_tx, refundTx: o.refund_tx,
+      inLink: o.in_tx && A ? A.tx + o.in_tx : '', outLink: o.out_tx && Z ? Z.tx + o.out_tx : '', refundLink: o.refund_tx && A ? A.tx + o.refund_tx : '' };
+  }
+  async xbRefresh(o, minGapMs = 5000) {
+    if (XB_DONE.includes(o.status) || now() - (o.checked || 0) < minGapMs) return o;
+    try {
+      const r = await xbStatus(this.xbCfg(), o.dep_addr, o.dep_memo);
+      this.sql.exec(`UPDATE xb_orders SET status=?, out_tx=CASE WHEN ?!='' THEN ? ELSE out_tx END, in_tx=CASE WHEN ?!='' THEN ? ELSE in_tx END,
+        out_fmt=CASE WHEN ?!='' THEN ? ELSE out_fmt END, refund_tx=CASE WHEN ?!='' THEN ? ELSE refund_tx END, checked=? WHERE ref=?`,
+        r.status, r.outTx, r.outTx, r.inTx, r.inTx, r.amountOutFmt, r.amountOutFmt, r.refundTx, r.refundTx, now(), o.ref);
+    } catch { this.sql.exec('UPDATE xb_orders SET checked=? WHERE ref=?', now(), o.ref); }
+    return this.sql.exec('SELECT * FROM xb_orders WHERE ref=?', o.ref).one();
+  }
+  async xbCron() {
+    const rows = this.sql.exec(`SELECT * FROM xb_orders WHERE status NOT IN ('SUCCESS','REFUNDED','FAILED') AND created>? AND checked<? ORDER BY checked LIMIT 10`,
+      now() - 48 * 3600e3, now() - 30e3).toArray();
+    for (const o of rows) await this.xbRefresh(o, 0);
+    return { checked: rows.length };
+  }
+
   /* ───────────── one-signature wallet buys ───────────── */
   evmOrdersOn() { return this.meta('evm_orders') === '1'; }
   evmOrderExpire() {
@@ -1236,7 +1298,7 @@ export class Books {
     const id = this.sql.exec(`INSERT INTO orders_evm (user_id,market,asset,amount,tagged,tag,status,created,expires)
       VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`, user.id, m.id, asset, amt.toString(), tagged.toString(), tag, 'open', now(), now() + ORDER_TTL_MS).one().id;
     const q = this.view(m);
-    const chains = (asset === 'eth' ? ETH_CHAINS : Object.keys(CHAINS))
+    const chains = (asset === 'eth' ? ETH_CHAINS : ZRO_CHAINS)
       .map(c => ({ key: c, label: CHAINS[c].label, chainId: CHAINS[c].chainId, explorer: CHAINS[c].explorer }));
     return { id, market: m.id, asset, amount: tagged.toString(), base: amt.toString(), tag,
       to, token: asset === 'zro' ? ZRO_TOKEN : null, chains, expires: now() + ORDER_TTL_MS,
@@ -1320,7 +1382,10 @@ export class Books {
     const span = stGrad - startMc;
     const progress = !stGrad ? curveProgress : m.migrated ? 100 : span <= 0 ? curveProgress
       : Math.max(0, Math.min(99.9, Math.round(((priceZro * Number(m.supply) * usd - startMc) / span) * 10000) / 100));
-    const holders = this.sql.exec(`SELECT COUNT(*) c FROM balances WHERE asset=? AND amount!='0'`, 't:' + m.id).one().c;
+    const holders = m.rh_token
+      ? this.sql.exec(`SELECT COUNT(*) c FROM rh_holdings WHERE token=? AND bal!='0' AND address NOT IN (?,?,?)`, m.rh_token,
+        String(this.rhCurve()).toLowerCase(), String(m.rh_pool || ''), '0x000000000000000000000000000000000000dead').one().c
+      : this.sql.exec(`SELECT COUNT(*) c FROM balances WHERE asset=? AND amount!='0'`, 't:' + m.id).one().c;
     const ch = (ms) => {
       const r = this.sql.exec('SELECT price FROM trades WHERE market=? AND ts<=? ORDER BY id DESC LIMIT 1', m.id, now() - ms).toArray()[0]
         || this.sql.exec('SELECT price FROM trades WHERE market=? ORDER BY id ASC LIMIT 1', m.id).toArray()[0];
@@ -1343,6 +1408,7 @@ export class Books {
         net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer,
         gradUsd: Number(m.grad_usd) || ((m.graduated || m.migrated) ? Math.round(Number(B(m.v_wei || 0)) / 1e18 * 14.397 * this.xlmUsd()) : this.stGradUsd()),
         job: m.graduated && !m.migrated ? (this.sql.exec('SELECT status, error FROM stellar_jobs WHERE market=?', m.id).toArray()[0] || null) : null } : null,
+      rh: m.rh_token ? { token: m.rh_token, pool: m.rh_pool || null, curve: this.rhCurve(), creator: m.rh_creator, explorer: 'https://robinhoodchain.blockscout.com' } : null,
       maxBuyBps: m.max_buy_bps, maxBuyUntil: m.max_buy_until,
       taxes: { platform: 0.5, marketing: m.tax_mkt / 100, burn: m.tax_burn / 100, rewards: m.tax_rew / 100 },
       rewardsPaidUsd: (Number(B(m.rewards_paid)) / 1e18) * usd,
@@ -1490,7 +1556,7 @@ export class Books {
     const symbol = String(b.symbol || '').trim().replace(/^\$/, '').slice(0, 12);
     if (name.length < 2) throw new Error('Name is too short');
     if (!symbol) throw new Error('Ticker is required');
-    const network = b.network === 'giwa' ? 'giwa' : b.network === 'stellar' ? 'stellar' : 'zero';
+    const network = ['giwa', 'stellar', 'robinhood'].includes(b.network) ? b.network : 'zero';
     const at = Number(b.launchAt);
     if (!isFinite(at)) throw new Error('Pick a launch time');
     if (at < now() + 5 * 60e3) throw new Error('Pick a time at least 5 minutes from now');
@@ -1550,6 +1616,7 @@ export class Books {
     let res, res_graduated = false;
     {
       let m = this.market(market);
+      if (m.rh_token) throw new Error('This token lives on Robinhood Chain: buy and sell it from your wallet');
       if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : 'Token migrated to mainnet');
       // bonded Stellar tokens keep trading on the Rookery pool; only the graduation itself freezes the book
       if (m.network === 'stellar' && m.graduated && this.sql.exec('SELECT 1 FROM stellar_jobs WHERE market=?', m.id).toArray().length)
@@ -1755,12 +1822,13 @@ export class Books {
     const symbol = String(b.symbol || '').trim().replace(/^\$/, '').slice(0, 12);
     if (name.length < 2) throw new Error('Name is too short');
     if (!symbol) throw new Error('Ticker is required');
-    const network = b.network === 'giwa' ? 'giwa' : b.network === 'stellar' ? 'stellar' : 'zero';
+    const network = ['giwa', 'stellar', 'robinhood'].includes(b.network) ? b.network : 'zero';
+    if (network === 'robinhood' && this.rhLive()) throw new Error('Robinhood Chain tokens are launched from your wallet: the contract goes on-chain right away');
     // double-submit guard: the same creator can't launch the same name twice within 2 minutes
     const dup = this.sql.exec(`SELECT id FROM markets WHERE creator_id=? AND lower(trim(name))=lower(?) AND created>? ORDER BY created DESC LIMIT 1`,
       user.id, name, now() - 120_000).toArray()[0];
     if (dup) { const e = new Error(`You just launched "${name}". Wait 2 minutes before creating another token with the same name.`); e.existing = dup.id; throw e; }
-    const quote = network === 'giwa' ? 'ETH' : network === 'stellar' ? 'XLM' : 'ZRO';
+    const quote = network === 'giwa' || network === 'robinhood' ? 'ETH' : network === 'stellar' ? 'XLM' : 'ZRO';
     // same starting market cap in USD as a ZRO market: 3,150 ZRO worth of ETH as the virtual reserve
     let vWei = quote === 'ETH' ? BigInt(Math.round(Number(CURVE.vZro) * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n : null;
     if (quote === 'XLM') {
@@ -1795,6 +1863,7 @@ export class Books {
     this.award(user.id, 'hatch', 500, id);
     let dev = null;
     if (B(b.devBuy) > 0n) dev = this.trade(user, { market: id, side: 'buy', amount: b.devBuy, pay: b.devPay });
+    if (this.snbOn()) this.ctx.waitUntil(this.snbOnLaunch(id).catch(() => {}));
     return { ok: true, id, dev };
   }
 
@@ -1807,7 +1876,7 @@ export class Books {
   // manual "check deposits" button: same engine as the cron, for one user
   async checkDeposits(user) {
     const found = [];
-    for (const chain of Object.keys(CHAINS)) {
+    for (const chain of ZRO_CHAINS) {
       try { found.push(...(await this.scanChain(chain, [user])).map(f => ({ chain: f.chain, amount: f.amount }))); } catch { /* next tick */ }
     }
     return found;
@@ -2027,7 +2096,7 @@ export class Books {
   async sweepDeposits() {
     const hot = new Wallet(this.hotWallet().privateKey);
     const done = [];
-    for (const chain of Object.keys(CHAINS)) {
+    for (const chain of ZRO_CHAINS) {
       try {
         const busy = new Set(this.sql.exec(`SELECT src_user FROM out_pending WHERE chain=? AND COALESCE(asset,'zro')='zro'`, chain).toArray().map(r => r.src_user));
         const cands = this.sql.exec(`SELECT d.user_id, d.last, u.dep_index, u.dep_address FROM deposit_seen d JOIN users u ON u.id=d.user_id WHERE d.chain=?`, chain)
@@ -2190,7 +2259,7 @@ export class Books {
     this.ensureEthAddresses();
     const ethUsers = this.sql.exec('SELECT * FROM users WHERE eth_dep_address IS NOT NULL').toArray();
     await Promise.all([
-      ...Object.keys(CHAINS).map(async (chain) => {
+      ...ZRO_CHAINS.map(async (chain) => {
         try { credited.push(...(await this.scanChain(chain, users))); }
         catch (e) { errors[chain] = String(e.message || e).slice(0, 160); this.setMeta('scan_err_' + chain, errors[chain]); }
       }),
@@ -2205,7 +2274,7 @@ export class Books {
 
   /* ───────────── ETH: deposit addresses, detection, sweeps, withdrawals ───────────── */
   ethReserve(chain) {
-    const d = { ethereum: 5n * WEI / 1000n, base: 2n * WEI / 1000n, arbitrum: 2n * WEI / 1000n }[chain] || 0n;
+    const d = { ethereum: 5n * WEI / 1000n, base: 2n * WEI / 1000n, arbitrum: 2n * WEI / 1000n, robinhood: 2n * WEI / 1000n }[chain] || 0n;
     const o = this.meta('eth_reserve_' + chain);
     return o !== null && o !== '' ? B(o) : d;
   }
@@ -2331,7 +2400,7 @@ export class Books {
     return fee;
   }
   async withdrawEth(user, { chain, to, amount }, ctx = {}) {
-    if (!ETH_CHAINS.includes(chain)) throw new Error('ETH withdrawals are available on Ethereum, Base and Arbitrum');
+    if (!ETH_CHAINS.includes(chain)) throw new Error('ETH withdrawals are available on Ethereum, Base, Arbitrum and Robinhood Chain');
     if (!isAddress(to)) throw new Error('Invalid destination address');
     const amt = B(amount);
     if (amt <= 0n) throw new Error('Enter an amount');
@@ -2423,6 +2492,42 @@ export class Books {
     return { sent: rows.length };
   }
 
+  // bridge transfers for the owner chat: success, refunds, failures and anything stuck
+  async ownerBridgeFeed(dry = false) {
+    const chat = this.meta('tg_owner_chat');
+    if (!dry && (!chat || !this.env.TG_BOT_TOKEN)) return { off: true };
+    const t = now();
+    const rows = this.sql.exec(`SELECT o.*, u.username FROM xb_orders o LEFT JOIN users u ON u.id=o.user_id WHERE ${dry ? '1=1' : `(
+        (o.status IN ('SUCCESS','REFUNDED','FAILED','INCOMPLETE_DEPOSIT') AND COALESCE(o.tg_state,'')!=o.status)
+        OR (o.status IN ('KNOWN_DEPOSIT_TX','PROCESSING') AND (o.in_tx!='' OR o.status='PROCESSING') AND o.created<? AND COALESCE(o.tg_state,'')=''))`}
+      ORDER BY o.created ${dry ? 'DESC LIMIT 8' : 'LIMIT 20'}`, ...(dry ? [] : [t - 30 * 60e3])).toArray();
+    if (!rows.length) return { sent: 0 };
+    const host = this.meta('public_host') || 'rookery.stinkypenguin.xyz';
+    const usd = (v) => '$' + Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const lines = rows.map(o => {
+      const A = XB_NETS[o.from_net] || {}, Z = XB_NETS[o.to_net] || {};
+      const who = o.username ? `<a href="https://${host}/#/u/${encodeURIComponent(o.username)}">${escH(o.username)}</a>` : 'guest';
+      const f6 = (x) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: 6 });
+      const route = `<b>${f6(o.amount_in)} ${escH(A.sym || '')}</b> ${escH(A.label || o.from_net)} → <b>${o.out_fmt ? f6(o.out_fmt) : '≈' + f6(o.out_est)} ${escH(Z.sym || '')}</b> ${escH(Z.label || o.to_net)} (${usd(o.in_usd)})`;
+      const inL = o.in_tx && A.tx ? ` · <a href="${A.tx}${o.in_tx}">in</a>` : '';
+      const outL = o.out_tx && Z.tx ? ` · <a href="${Z.tx}${o.out_tx}">out</a>` : '';
+      const refL = o.refund_tx && A.tx ? ` · <a href="${A.tx}${o.refund_tx}">refund</a>` : '';
+      const to = `\nto <code>${escH(String(o.recipient).slice(0, 10))}…</code> · ${who}`;
+      if (o.status === 'SUCCESS') return `🌉 <b>Bridge delivered</b> · ${route}${inL}${outL}${to}\nfee earned ≈ ${usd(o.in_usd * this.xbCfg().feeBps / 20000)}`;
+      if (o.status === 'REFUNDED') return `↩️ <b>Bridge refunded</b> · ${route}${inL}${refL}${to}`;
+      if (o.status === 'FAILED') return `❌ <b>Bridge failed</b> · ${route}${inL}${to}\n<i>funds go back to the refund address automatically, check it</i>`;
+      if (o.status === 'INCOMPLETE_DEPOSIT') return `⚠️ <b>Bridge underpaid</b> · ${route}${inL}${to}\n<i>the payment was smaller than the order, it will be refunded</i>`;
+      return `⏳ <b>Bridge slow (30+ min)</b> · ${route}${inL}${to}\nstatus: ${escH(o.status)}`;
+    });
+    if (dry) return { preview: lines };
+    let buf = '';
+    const flush = async () => { if (buf) { await this.tg('sendMessage', { chat_id: chat, text: buf, parse_mode: 'HTML', disable_web_page_preview: true }); buf = ''; } };
+    for (const l of lines) { if ((buf + '\n\n' + l).length > 3800) await flush(); buf = buf ? buf + '\n\n' + l : l; }
+    await flush();
+    for (const o of rows) this.sql.exec('UPDATE xb_orders SET tg_state=? WHERE ref=?', ['SUCCESS', 'REFUNDED', 'FAILED', 'INCOMPLETE_DEPOSIT'].includes(o.status) ? o.status : 'SLOW', o.ref);
+    return { sent: rows.length };
+  }
+
   /* ───────────── Telegram buybot ───────────── */
   async tg(method, body) {
     if (!this.env.TG_BOT_TOKEN) return null;
@@ -2432,6 +2537,7 @@ export class Books {
   }
   tgNet(m) {
     if (m.network === 'giwa') return 'GIWA by Upbit (pre-mainnet)';
+    if (m.network === 'robinhood') return 'Robinhood Chain';
     if (m.network === 'stellar') return m.migrated ? 'Stellar · on Aquarius' : `Stellar · graduates to Aquarius at ${usdTxt(m.stellar?.gradUsd || 46000)}`;
     return 'Zero by LayerZero (pre-mainnet)';
   }
@@ -2644,6 +2750,29 @@ export class Books {
     const p = url.pathname.replace(/^\/api/, '');
     const method = req.method;
     try {
+      if (p.startsWith('/snb/hook/')) {
+        const secret = this.meta('snb_secret');
+        if (!secret || p !== '/snb/hook/' + secret || req.headers.get('x-telegram-bot-api-secret-token') !== secret) return json({ ok: false }, 403);
+        const upd = await req.json().catch(() => null);
+        if (upd) {
+          // Telegram re-delivers an update it thinks timed out: handle each update id once, and answer at once
+          this.snbInit();
+          const uid = Number(upd.update_id || 0);
+          if (uid && this.sql.exec('SELECT 1 FROM snb_upd WHERE id=?', uid).toArray().length) return json({ ok: true, dup: true });
+          if (uid) { this.sql.exec('INSERT OR IGNORE INTO snb_upd (id,ts) VALUES (?,?)', uid, now()); this.sql.exec('DELETE FROM snb_upd WHERE ts<?', now() - 864e5); }
+          const job = this.snbUpdate(upd, this.meta('public_host') || url.host).catch((e) => console.log('snb', e?.stack || e));
+          if (this.env.SNB_SYNC) await job; else this.ctx.waitUntil(job);
+        }
+        return json({ ok: true });
+      }
+      if (method === 'GET' && p.startsWith('/snb/login/')) {
+        this.snbInit();
+        const tok = p.split('/')[3] || '';
+        const t = this.sql.exec(`SELECT * FROM snb_tokens WHERE token=? AND kind='login' AND expires>?`, tok, now()).toArray()[0];
+        if (!t) return new Response('This login link expired. Open the bot and tap Open Rookery again.', { status: 410 });
+        this.sql.exec('DELETE FROM snb_tokens WHERE token=?', tok);
+        return new Response(null, { status: 302, headers: { location: '/#/wallet', 'set-cookie': this.newSession(t.user_id) } });
+      }
       if (p.startsWith('/tg/')) {
         const secret = this.meta('tg_secret');
         if (!secret || p !== '/tg/' + secret || req.headers.get('x-telegram-bot-api-secret-token') !== secret) return json({ ok: false }, 403);
@@ -2678,9 +2807,19 @@ export class Books {
           timed('burn', this.serial(() => this.burnTick()).catch(() => null)),
           timed('points', this.serial(() => this.dailyHoldPoints()).catch(() => null)),
           timed('stellar', this.wserial(() => this.stellarCron()).catch(e => ({ error: String(e?.message || e) }))),
+          timed('bridge', this.xbCron().catch(e => ({ error: String(e?.message || e) }))),
+          timed('rh', this.rhScan().catch(e => ({ error: String(e?.message || e) }))),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
+        await this.ownerBridgeFeed().catch(() => null);
+        if (this.snbOn()) {
+          try { this.snbInit(); this.stxInit(); if (this.sql.exec('SELECT COUNT(*) c FROM snb_terms').one().c + this.sql.exec(`SELECT COUNT(*) c FROM snb_watch WHERE status='armed'`).one().c) await this.snbArm(); } catch { /* next minute */ }
+          await this.stxNewPools().catch(() => null);
+          await this.lumenNewLaunches().catch(() => null);
+          try { this.snbRefSettle(); } catch { /* next minute */ }
+          await this.stxSweepOwed().catch(() => null);
+        }
         // heartbeat for the health check: when the cron last finished and what each stage reported
         this.setMeta('cron_last', String(now()));
         this.setMeta('cron_report', JSON.stringify({ scanErrors: scan?.errors || (scan?.error ? { all: scan.error } : {}), credited: (scan?.credited || []).length,
@@ -2705,7 +2844,7 @@ export class Books {
           volumeUsd: volUsd,
           plaunchBurnZro: burn.toString(), plaunchBurnUsd: (Number(burn) / 1e18) * usd,
           markets: this.sql.exec('SELECT COUNT(*) c FROM markets').one().c,
-          netTokens: (() => { const o = { zero: 0, giwa: 0, stellar: 0 }; for (const r of this.sql.exec('SELECT network, COUNT(*) c FROM markets GROUP BY network').toArray()) o[r.network] = r.c; return o; })(),
+          netTokens: (() => { const o = { zero: 0, giwa: 0, stellar: 0, robinhood: 0 }; for (const r of this.sql.exec('SELECT network, COUNT(*) c FROM markets GROUP BY network').toArray()) o[r.network] = r.c; return o; })(),
           traders: this.sql.exec('SELECT COUNT(*) c FROM users').one().c,
           networks: NETWORKS, chains: Object.fromEntries(Object.entries(CHAINS).map(([k, v]) => [k, { label: v.label, explorer: v.explorer, chainId: v.chainId }])),
           walletBuy: this.evmOrdersOn(), zroToken: ZRO_TOKEN, stellarSendNow: this.stSendNowOn(),
@@ -2722,7 +2861,8 @@ export class Books {
         const m = this.market(id);
         const trades = this.sql.exec(`SELECT t.*, u.username, u.id uid FROM trades t LEFT JOIN users u ON u.id=t.user_id
           WHERE market=? ORDER BY t.id DESC LIMIT 400`, id).toArray().reverse();
-        const holders = this.sql.exec(`SELECT b.amount, u.username, u.id uid FROM balances b JOIN users u ON u.id=b.user_id
+        const holders = m?.rh_token ? this.rhHolders(m, 50).map(h => ({ amount: h.amount, username: h.username || (h.tag ? h.tag : h.address.slice(0, 6) + '…' + h.address.slice(-4)),
+          uid: h.username ? this.sql.exec('SELECT id FROM users WHERE username=?', h.username).toArray()[0]?.id : null, address: h.address, tag: h.tag })) : this.sql.exec(`SELECT b.amount, u.username, u.id uid FROM balances b JOIN users u ON u.id=b.user_id
           WHERE b.asset=? AND b.amount!='0'`, 't:' + id).toArray()
           .sort((a, b) => (B(b.amount) > B(a.amount) ? 1 : -1)).slice(0, 50)
           .map(h => ({ username: h.username, uid: h.uid, amount: h.amount, creator: h.uid === m.creator_id, pct: Number((B(h.amount) * 1000000n) / (B(m.supply) * WEI)) / 10000 }));
@@ -2738,7 +2878,7 @@ export class Books {
         } : null;
         return json({
           market: this.view(m, usd), zroUsd: usd,
-          trades: trades.map(t => ({ side: t.side, zro: t.zro, tokens: t.tokens, price: t.price, usd: t.usd, ts: t.ts, username: t.username, uid: t.uid, badges: bm.get(t.uid) || [] })),
+          trades: trades.map(t => ({ side: t.side, zro: t.zro, tokens: t.tokens, price: t.price, usd: t.usd, ts: t.ts, username: t.username, uid: t.uid, tx: t.txid || undefined, badges: bm.get(t.uid) || [] })),
           holders: holders.map(h => ({ ...h, badges: bm.get(h.uid) || [] })),
           comments: comments.map(c => ({ ...c, badges: bm.get(c.uid) || [] })), me,
           burned: m.burned,
@@ -2914,8 +3054,7 @@ export class Books {
         if (amt < WEI) throw new Error('Minimum is 1 XLM');
         const from = String(b.address || '').trim();
         if (!/^G[A-Z2-7]{55}$/.test(from)) throw new Error('Connect your Stellar wallet first');
-        const owner = user || this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', from).toArray()[0];
-        if (!owner) throw new Error('Sign in with this wallet to buy');
+        const owner = user || this.stellarWalletUser(from);   // no account needed: the wallet signs the payment
         this.sql.exec('DELETE FROM st_intents WHERE status=? AND expires<?', 'open', now());
         this.sql.exec('INSERT INTO st_intents (user_id,market,amount,status,created,expires) VALUES (?,?,?,?,?,?)', owner.id, m.id, amt.toString(), 'open', now(), now() + 30 * 60e3);
         const id = this.sql.exec('SELECT last_insert_rowid() id').one().id;
@@ -2933,8 +3072,7 @@ export class Books {
         if (m.migrated) throw new Error('This token trades on Aquarius now');
         const from = String(b.address || '').trim();
         if (!/^G[A-Z2-7]{55}$/.test(from)) throw new Error('Connect your Stellar wallet first');
-        const owner = user || this.sql.exec('SELECT * FROM users WHERE stellar_wallet=?', from).toArray()[0];
-        if (!owner) throw new Error('Sign in with this wallet to sell');
+        const owner = user || this.stellarWalletUser(from);   // no account needed
         const amt = B(b.amount);
         if (amt < 100_000_000_000n) throw new Error('Enter an amount');
         const st = await this.stellar();
@@ -2942,6 +3080,18 @@ export class Books {
         const id = this.sql.exec('SELECT last_insert_rowid() id').one().id;
         const xdrB64 = await st.buildTokenPaymentXdr({ from, to: st.hotAddress, code: m.st_code, issuer: m.st_issuer, amount: Math.floor(Number(amt / 100_000_000_000n)) / 1e7, memo: 's' + id });
         return json({ ok: true, id, memo: 's' + id, xdr: xdrB64 });
+      }
+      if (method === 'GET' && p === '/stellar/wallet') {
+        // a wallet-first view: holdings of a Stellar address, no login needed
+        const m = this.market(String(url.searchParams.get('market') || ''));
+        const address = String(url.searchParams.get('address') || '');
+        if (!m || m.network !== 'stellar' || !m.st_issuer || !/^G[A-Z2-7]{55}$/.test(address)) throw new Error('bad request');
+        const st = await this.stellar();
+        const tb = await st.tokenBalance(address, m.st_code, m.st_issuer);
+        let xlm = null;
+        try { const a = await st.account(address); xlm = Number(a?.balances?.find(b => b.asset_type === 'native')?.balance || 0); } catch { /* new wallet */ }
+        return json({ ok: true, market: m.id, symbol: m.symbol, code: m.st_code, trust: !!(tb && tb.balance !== null),
+          wallet: tb?.balance || 0, xlm, migrated: !!m.migrated, sellable: !m.migrated, xlmUsd: this.xlmUsd() });
       }
       if (method === 'POST' && p === '/stellar/prep-trust') {
         const b = await req.json();
@@ -2960,6 +3110,58 @@ export class Books {
         const h = await st.tokenBalance(address, m.st_code, m.st_issuer);
         const q = user ? this.sql.exec('SELECT pending, note FROM st_out WHERE user_id=? AND market=?', user.id, m.id).toArray()[0] : null;
         return json({ ok: true, wallet: h ? h.balance : null, trust: !!(h && h.balance !== null), queued: q ? q.pending : '0', note: q?.note || '', sendNow: this.stSendNowOn() });
+      }
+      if (method === 'GET' && p === '/rh/config') return json(await this.rhConfig());
+      if (method === 'POST' && p === '/rh/prepare-create') return json(await this.rhPrepareCreate(user, await req.json().catch(() => ({}))));
+      if (method === 'POST' && p === '/rh/prepare-trade') return json(await this.rhPrepareTrade(await req.json().catch(() => ({}))));
+      if (method === 'POST' && p === '/rh/sync') { const b = await req.json().catch(() => ({})); return json(await this.rhSyncTx(String(b.hash || ''))); }
+      if (method === 'GET' && p === '/rh/balance') {
+        const m = this.market(url.searchParams.get('market') || '');
+        return json({ ok: true, balance: await this.rhWalletBalance(m, url.searchParams.get('address') || '') });
+      }
+      if (method === 'GET' && p === '/bridge/config') {
+        const nets = Object.fromEntries(Object.entries(XB_NETS).map(([k, v]) => [k, { label: v.label, sym: v.sym, name: v.name, dec: v.dec, kind: v.kind, chainId: v.chainId || null, txp: v.tx, minUsd: v.minUsd || 0, minUsdFrom: v.minUsdFrom || 0 }]));
+        return json({ ok: true, on: this.xbOn(), nets, soon: XB_SOON, ourFeePct: this.xbCfg().feeBps / 200 });
+      }
+      if (method === 'POST' && p === '/bridge/quote') {
+        const b = await req.json();
+        return json({ ok: true, quote: await xbQuote(this.xbCfg(), { from: b.from, to: b.to, amount: String(b.amount || ''), recipient: b.recipient, refund: b.refund, dry: true }) });
+      }
+      if (method === 'POST' && p === '/bridge/order') {
+        if (!this.xbOn()) throw new Error('The bridge is paused for a moment');
+        const b = await req.json();
+        const q = await xbQuote(this.xbCfg(), { from: b.from, to: b.to, amount: String(b.amount || ''), recipient: String(b.recipient || '').trim(), refund: String(b.refund || '').trim(), dry: false });
+        if (!q.depositAddress) throw new Error('No route for this amount right now, try a different amount');
+        const ref = [...crypto.getRandomValues(new Uint8Array(12))].map(x => x.toString(16).padStart(2, '0')).join('');
+        this.sql.exec(`INSERT INTO xb_orders (ref,user_id,from_net,to_net,amount_in,in_usd,out_est,out_usd,recipient,refund,dep_addr,dep_memo,status,created,deadline)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, ref, user?.id || null, b.from, b.to, q.amountInFmt, q.inUsd, q.amountOutFmt, q.outUsd,
+          String(b.recipient).trim(), String(b.refund).trim(), q.depositAddress, q.depositMemo, 'PENDING_DEPOSIT', now(), q.deadline);
+        const out = { ...this.xbView(this.sql.exec('SELECT * FROM xb_orders WHERE ref=?', ref).one()), amountInUnits: q.amountIn, seconds: q.seconds, feesUsd: q.feesUsd };
+        if (b.from === 'stellar' && /^G[A-Z2-7]{55}$/.test(String(b.fromAddress || ''))) {
+          try { out.xdr = await xbStellarXdr({ from: b.fromAddress, to: q.depositAddress, amountFmt: q.amountInFmt, memo: q.depositMemo }); } catch (e) { out.xdrError = e.message; }
+        }
+        return json({ ok: true, order: out });
+      }
+      if (method === 'POST' && p === '/bridge/submit') {
+        const b = await req.json();
+        const o = this.sql.exec('SELECT * FROM xb_orders WHERE ref=?', String(b.ref || '')).toArray()[0];
+        if (!o) throw new Error('Transfer not found');
+        let tx = String(b.txHash || '').trim();
+        if (b.xdr) tx = (await xbStellarSubmit(String(b.xdr))).hash;
+        if (!/^(0x)?[0-9a-fA-F]{64}$|^[1-9A-HJ-NP-Za-km-z]{60,100}$/.test(tx)) throw new Error('Bad transaction hash');
+        this.sql.exec(`UPDATE xb_orders SET in_tx=?, status=CASE WHEN status='PENDING_DEPOSIT' THEN 'KNOWN_DEPOSIT_TX' ELSE status END WHERE ref=?`, tx, o.ref);
+        await xbSubmit(this.xbCfg(), o.dep_addr, tx, o.dep_memo);
+        return json({ ok: true, txid: tx });
+      }
+      if (method === 'GET' && p === '/bridge/status') {
+        const o = this.sql.exec('SELECT * FROM xb_orders WHERE ref=?', url.searchParams.get('ref') || '').toArray()[0];
+        if (!o) throw new Error('Transfer not found');
+        return json({ ok: true, order: this.xbView(await this.xbRefresh(o)) });
+      }
+      if (method === 'GET' && p === '/bridge/orders') {
+        const refs = String(url.searchParams.get('refs') || '').split(',').filter(r => /^[0-9a-f]{24}$/.test(r)).slice(0, 30);
+        const rows = this.sql.exec(`SELECT * FROM xb_orders WHERE user_id=? OR ref IN (${refs.map(() => '?').join(',') || "''"}) ORDER BY created DESC LIMIT 20`, user?.id || -1, ...refs).toArray();
+        return json({ ok: true, orders: rows.map(o => this.xbView(o)) });
       }
       if (method === 'POST' && p === '/stellar/submit') {
         const b = await req.json();
@@ -3018,7 +3220,7 @@ export class Books {
       if (method === 'GET' && p === '/wallet/fees') {
         const out = {};
         const st = await this.netStatus();
-        for (const c of Object.keys(CHAINS)) { try { const f = await this.withdrawFee(c); out[c] = { zro: f.zro, usd: f.usd, ...st[c] }; } catch { out[c] = null; } }
+        for (const c of ZRO_CHAINS) { try { const f = await this.withdrawFee(c); out[c] = { zro: f.zro, usd: f.usd, ...st[c] }; } catch { out[c] = null; } }
         const eth = {}, hotA = this.hotWallet().address;
         await Promise.all(ETH_CHAINS.map(async (c) => {
           try {
@@ -3197,7 +3399,7 @@ export class Books {
         if (p === '/admin/health') { // fast: no per-address chain reads
           const t = now(), ago = (k) => { const v = Number(this.meta(k) || 0); return v ? Math.round((t - v) / 1000) : null; };
           const chains = {};
-          for (const c of Object.keys(CHAINS)) chains[c] = { lastScanOkSec: ago('scan_ok_' + c), scanBlock: this.meta('balblk_' + c), lastError: this.meta('scan_err_' + c) };
+          for (const c of ZRO_CHAINS) chains[c] = { lastScanOkSec: ago('scan_ok_' + c), scanBlock: this.meta('balblk_' + c), lastError: this.meta('scan_err_' + c) };
           for (const c of ETH_CHAINS) chains['eth@' + c] = { lastScanOkSec: ago('scan_ok_eth@' + c), scanBlock: this.meta('balblk_eth@' + c), lastError: this.meta('scan_err_eth@' + c) };
           let tg = null;
           try { const w = await this.tg('getWebhookInfo', {}); tg = w?.result ? { url: !!w.result.url, pending: w.result.pending_update_count, lastError: w.result.last_error_message || null, lastErrorAgoSec: w.result.last_error_date ? Math.round(t / 1000 - w.result.last_error_date) : null } : w; } catch (e) { tg = { error: String(e.message) }; }
@@ -3276,6 +3478,33 @@ export class Books {
         if (p === '/admin/recover') { try { return json({ ok: true, recovered: await this.wserial(() => this.recoverWithdrawals()) }); } catch (e) { return json({ ok: false, error: String(e.stack || e) }); } }
         if (p === '/admin/sweep') return json({ ok: true, swept: await this.wserial(() => this.sweepDeposits()) });
         if (p === '/admin/scan') return json({ ok: true, scan: await this.scanDeposits() });
+        if (p === '/admin/rh') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          if (b.action === 'fund') return json({ ok: true, ...(await this.rhFund(b)) });
+          if (b.action === 'deploy') return json({ ok: true, ...(await this.rhDeploy(b)) });
+          if (b.action === 'scan') return json({ ok: true, scan: await this.rhScan() });
+          if (b.action === 'selftest') return json({ ok: true, ...(await this.rhSelfTest(b)) });
+          // our own smoke-test token: drop it from Rookery's lists (it stays on-chain; seen events are never re-applied)
+          if (b.action === 'forget') {
+            const m = this.market(String(b.market || ''));
+            if (!m?.rh_token) throw new Error('not a Robinhood on-chain market');
+            this.sql.exec('DELETE FROM trades WHERE market=?', m.id); this.sql.exec('DELETE FROM markets WHERE id=?', m.id);
+            this.sql.exec('DELETE FROM rh_holdings WHERE token=?', m.rh_token);
+            return json({ ok: true, forgot: m.id });
+          }
+          if (b.action === 'set') { if (b.curve !== undefined) this.setMeta('rh_curve', b.curve); if (b.block !== undefined) this.setMeta('rh_block', String(b.block)); if (b.off !== undefined) this.setMeta('rh_onchain_off', b.off ? '1' : ''); }
+          return json({ ok: true, ...(await this.rhStatus()) });
+        }
+        if (p === '/admin/bridge') {
+          const b = await req.json().catch(() => ({}));
+          if (b.on === true || b.on === false) this.setMeta('xb_off', b.on ? '' : '1');
+          if (b.feeBps !== undefined) this.setMeta('xb_fee_bps', String(Math.max(0, Math.min(400, Math.round(Number(b.feeBps) || 0)))));
+          if (b.feeTo) this.setMeta('xb_fee_to', String(b.feeTo).toLowerCase());
+          if (b.refresh) await this.xbCron();
+          return json({ ok: true, on: this.xbOn(), ...this.xbCfg(), key: !!this.env.XB_KEY,
+            volumeUsd: this.sql.exec(`SELECT COALESCE(SUM(in_usd),0) v FROM xb_orders WHERE status='SUCCESS'`).one().v,
+            orders: this.sql.exec('SELECT * FROM xb_orders ORDER BY created DESC LIMIT 30').toArray() });
+        }
         if (p === '/admin/evm-orders') {
           const b = await req.json().catch(() => ({}));
           if (b.on === true || b.on === false) this.setMeta('evm_orders', b.on ? '1' : '');
@@ -3289,7 +3518,7 @@ export class Books {
           const users = this.sql.exec('SELECT id, username, dep_address FROM users WHERE dep_address IS NOT NULL').toArray();
           const hot = this.hotWallet().address;
           const chains = {};
-          await Promise.all(Object.keys(CHAINS).map(async (chain) => {
+          await Promise.all(ZRO_CHAINS.map(async (chain) => {
             const c = { addrs: [] };
             try {
               const head = BigInt(await rpc(chain, 'eth_blockNumber', []));
@@ -3366,6 +3595,32 @@ export class Books {
             trades: this.sql.exec('SELECT market,side,zro,tokens,ts FROM trades WHERE user_id=? ORDER BY id', u.id).toArray(),
             seen: this.sql.exec('SELECT chain,last FROM deposit_seen WHERE user_id=?', u.id).toArray() });
         }
+        if (p === '/admin/snb') {
+          this.snbInit();
+          const b = await req.json().catch(() => ({}));
+          if (b.feeBps !== undefined) this.setMeta('snb_fee_bps', String(Math.max(0, Math.min(300, Math.round(Number(b.feeBps) || 0)))));
+          const out = { ok: true };
+          if (b.setup) {
+            if (!this.env.SNIPER_BOT_TOKEN) throw new Error('Set the SNIPER_BOT_TOKEN secret first');
+            let secret = this.meta('snb_secret'); if (!secret) { secret = randHex(16); this.setMeta('snb_secret', secret); }
+            const host = b.host || this.meta('public_host') || url.host;
+            out.webhook = await this.tgS('setWebhook', { url: `https://${host}/api/snb/hook/${secret}`, secret_token: secret, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
+            const me = await this.tgS('getMe', {}); if (me?.result?.username) this.setMeta('snb_bot', me.result.username); out.bot = me?.result?.username;
+            out.commands = await this.tgS('setMyCommands', { commands: [
+              { command: 'start', description: 'Main menu' }, { command: 'positions', description: 'Your bags and live PnL' },
+              { command: 'sniper', description: 'Auto-buy new launches' }, { command: 'wallet', description: 'Your Stellar wallet: export / import' }, { command: 'referral', description: 'Invite friends, earn 25% of their fees' }, { command: 'deposit', description: 'Top up XLM, ZRO or ETH' },
+              { command: 'withdraw', description: 'Send XLM out: /withdraw 25 G…' }, { command: 'help', description: 'How it works' }] });
+            await this.tgS('setMyShortDescription', { short_description: 'Trade and snipe any Stellar token: SDEX, AMM pools, Aquarius and Rookery. Your own wallet, live PnL.' });
+            await this.tgS('setMyDescription', { description: 'RookerySniperBot: the Stellar trading terminal by Rookery, the Stinky Penguin launchpad.\n\n• Trade any Stellar token with the best route across SDEX, AMM pools, Aquarius and the Rookery curve\n• Your own Stellar wallet: export or import any time\n• Snipe launches, new pools and tokens the moment they get liquidity\n• Live Position Terminal with PnL after every buy\n\nParody project, not financial advice.' });
+          }
+          if (b.tick) out.tick = await this.snbTick();
+          out.fees = Object.fromEntries(['xlm', 'zro', 'eth'].map(a => [a, Number(B(this.meta('snb_fees_' + a))) / 1e18]));
+          out.users = this.sql.exec('SELECT COUNT(*) c FROM snb_users').one().c;
+          out.trades24h = this.sql.exec('SELECT COUNT(*) c FROM snb_log WHERE ts>?', now() - 864e5).one().c;
+          out.live = this.sql.exec('SELECT COUNT(*) c FROM snb_terms').one().c;
+          out.feeBps = Number(this.snbFeeBps()); out.on = this.snbOn(); out.botName = this.snbBot(); if (b.hook) out.hook = '/api/snb/hook/' + this.meta('snb_secret');
+          return json(out);
+        }
         if (p === '/admin/tg/setup') {
           if (!this.env.TG_BOT_TOKEN) throw new Error('Set the TG_BOT_TOKEN secret first');
           let secret = this.meta('tg_secret'); if (!secret) { secret = randHex(16); this.setMeta('tg_secret', secret); }
@@ -3437,7 +3692,7 @@ export class Books {
             return json({ ok: !!r?.ok, error: r?.description || null });
           }
           if (b.action === 'off') { this.setMeta('tg_owner_chat', ''); return json({ ok: true }); }
-          if (b.action === 'preview') return json({ ok: true, ...(await this.ownerFeed(true)) });
+          if (b.action === 'preview') return json({ ok: true, ...(await this.ownerFeed(true)), bridge: (await this.ownerBridgeFeed(true)).preview || [] });
           return json({ ok: true, linked: !!this.meta('tg_owner_chat'), queued: this.sql.exec(`SELECT COUNT(*) c FROM transfers WHERE tg_notified IS NULL AND kind IN ('deposit','withdrawal')`).one().c });
         }
         if (p === '/admin/stellar/send-now') {
@@ -3594,6 +3849,13 @@ export class Books {
         return json({ ok: true, live: this.evmOrdersOn(), orders: this.sql.exec(`SELECT id,market,asset,amount,tagged,status,tokens,note,created,expires
           FROM orders_evm WHERE user_id=? ORDER BY id DESC LIMIT 10`, user.id).toArray() });
       }
+      if (method === 'POST' && p === '/snb/link') {
+        this.snbInit();
+        const tok = randHex(12);
+        this.sql.exec('INSERT INTO snb_tokens (token,kind,user_id,expires) VALUES (?,?,?,?)', tok, 'link', user.id, now() + 15 * 60e3);
+        const linked = this.sql.exec('SELECT 1 FROM snb_users WHERE user_id=?', user.id).toArray().length > 0;
+        return json({ ok: true, url: `https://t.me/${this.snbBot()}?start=L${tok}`, linked });
+      }
       if (method === 'POST' && p === '/wallet/withdraw') { const body = await req.json(); return json(await this.wserial(() => this.withdrawTimed(user, body))); }
       if (method === 'POST' && p === '/rewards/claim') {
         const b = await req.json();
@@ -3620,3 +3882,7 @@ async function merkleRoot(leaves) {
   }
   return level[0];
 }
+
+installSniper(Books, { B, WEI, now, escH, randHex, qa, burnKey });
+installStx(Books, { B, WEI, now });
+installRhpad(Books, { B, WEI, now, randHex, CHAINS });

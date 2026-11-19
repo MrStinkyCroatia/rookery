@@ -69,8 +69,10 @@ const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '';
 const initials = (s) => esc(String(s || '?').replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || '?');
 const timg = (m, cls = '') => `<div class="timg ${cls}">${m.image ? `<img src="${esc(m.image)}" alt="" loading="lazy">` : initials(m.symbol)}</div>`;
 const avatar = (u, url) => `<div class="av">${url ? `<img src="${esc(url)}" alt="">` : initials(u)}</div>`;
-const netTag = (n) => `<span class="tag ${n}">${n === 'giwa' ? '<img src="/assets/giwa.png" alt="">GIWA' : n === 'stellar' ? '<img src="/assets/chains/stellar.svg" alt="">STELLAR' : 'ZERO'}</span>`;
-const netName = (n) => (n === 'giwa' ? 'GIWA' : n === 'stellar' ? 'Stellar' : 'Zero');
+const netTag = (n) => `<span class="tag ${n}">${n === 'giwa' ? '<img src="/assets/giwa.png" alt="">GIWA' : n === 'stellar' ? '<img src="/assets/chains/stellar.svg" alt="">STELLAR' : n === 'robinhood' ? '<img src="/assets/chains/robinhood.png" alt="">ROBINHOOD' : 'ZERO'}</span>`;
+const netName = (n) => (n === 'giwa' ? 'GIWA' : n === 'stellar' ? 'Stellar' : n === 'robinhood' ? 'Robinhood Chain' : 'Zero');
+const netCur = (n) => (n === 'giwa' || n === 'robinhood' ? 'eth' : n === 'stellar' ? 'xlm' : 'zro');
+const netLong = (n) => (n === 'zero' ? 'Zero · LayerZero' : n === 'giwa' ? 'GIWA · Upbit' : n === 'stellar' ? 'Stellar · on-chain' : n === 'robinhood' ? 'Robinhood Chain · L2' : 'All networks');
 
 /* ───────── api ───────── */
 async function api(path, body, method) {
@@ -232,18 +234,19 @@ const STW = {
     if (kind === 'sep43') { const r = await window.stellar.signMessage(message, { address }); return r.signedMessage || r.signature; }
     throw new Error('This wallet cannot sign a message');
   },
-  async signTx(kind, address, xdr) {
+  async signTx(kind, address, xdr, net) {
+    const MAIN = net ? net === 'mainnet' : S.stats?.stellar?.net === 'mainnet';
     if (kind === 'freighter') {
       const api = window.freighterApi || window.freighter;
-      const r = await api.signTransaction(xdr, { address, network: S.stats?.stellar?.net === 'mainnet' ? 'PUBLIC' : 'TESTNET' });
+      const r = await api.signTransaction(xdr, { address, network: MAIN ? 'PUBLIC' : 'TESTNET' });
       const out = r?.signedTxXdr || r?.signedXDR;
       if (!out) throw new Error(r?.error || 'Wallet did not sign the payment');
       return out;
     }
-    if (kind === 'albedo') { const r = await window.albedo.tx({ xdr, pubkey: address, network: S.stats?.stellar?.net === 'mainnet' ? 'public' : 'testnet' }); return r.signed_envelope_xdr; }
+    if (kind === 'albedo') { const r = await window.albedo.tx({ xdr, pubkey: address, network: MAIN ? 'public' : 'testnet' }); return r.signed_envelope_xdr; }
     if (kind === 'xbull') { const r = await window.xBullSDK.signXDR(xdr, { publicKey: address }); return r.signedXDR || r; }
     if (kind === 'rabet') { const r = await window.rabet.sign(xdr, address); return r.xdr || r; }
-    if (kind === 'sep43') { const r = await window.stellar.signTransaction(xdr, { address, networkPassphrase: S.stats?.stellar?.net === 'mainnet' ? 'Public Global Stellar Network ; September 2015' : 'Test SDF Network ; September 2015' }); return r.signedTxXdr || r; }
+    if (kind === 'sep43') { const r = await window.stellar.signTransaction(xdr, { address, networkPassphrase: MAIN ? 'Public Global Stellar Network ; September 2015' : 'Test SDF Network ; September 2015' }); return r.signedTxXdr || r; }
     throw new Error('This wallet cannot sign a transaction');
   },
   async loginWc() {
@@ -313,7 +316,7 @@ const STW = {
 // the header price pill follows the network picked in the menu: ZRO / ETH / XLM
 function paintPx() {
   const st = S.stats; if (!st) return;
-  const a = S.net === 'giwa' ? 'eth' : S.net === 'stellar' ? 'xlm' : 'zro';
+  const a = netCur(S.net);
   const px = a === 'eth' ? st.ethUsd : a === 'xlm' ? st.xlmUsd : st.zroUsd;
   const ico = $('#pxIco'), lbl = $('#pxLbl'), p = $('#zroPx'), ch = $('#zroCh');
   if (!ico || !lbl || !p) return;
@@ -325,6 +328,7 @@ function paintPx() {
 async function loadStats() {
   try {
     S.stats = await api('/stats');
+    if (!S.rh) api('/rh/config').then(c => { S.rh = c; }).catch(() => {});
     paintPx();
     liveNum($('#burnPx'), S.stats.burnReserveUsd ?? S.stats.plaunchBurnUsd, fmtUsd);
     fitHeader();
@@ -389,7 +393,7 @@ document.addEventListener('click', (e) => {
 function initNet() {
   const set = (n) => {
     S.net = n; localStorage.setItem('pl_net', n);
-    $('#netLabel').textContent = n === 'zero' ? 'Zero · LayerZero' : n === 'giwa' ? 'GIWA · Upbit' : n === 'stellar' ? 'Stellar · on-chain' : 'All networks';
+    $('#netLabel').textContent = netLong(n);
     $$('#netMenu .mi[data-net]').forEach(b => b.classList.toggle('on', b.dataset.net === n));
     paintPx();
   };
@@ -594,7 +598,7 @@ function openAnnounce() {
     <p class="mu" style="font-size:13px;margin-bottom:16px">People see the countdown, tap “Notify me”, and get pinged the moment it goes live. Launching later fills this in for you.</p>
     <div class="f2"><div class="f"><label>Name</label><input class="inp" id="hName" maxlength="32" placeholder="Stinky Penguin"></div>
       <div class="f"><label>Ticker</label><input class="inp" id="hSym" maxlength="12" placeholder="PENGU"></div></div>
-    <div class="f"><label>Network</label><select class="inp" id="hNet"><option value="zero">Zero · by LayerZero</option><option value="giwa">GIWA · by Upbit</option></select></div>
+    <div class="f"><label>Network</label><select class="inp" id="hNet"><option value="zero">Zero · by LayerZero</option><option value="giwa">GIWA · by Upbit</option><option value="robinhood">Robinhood Chain · live</option></select></div>
     <div class="f"><label>Description (optional)</label><textarea class="inp" id="hDesc" maxlength="300" placeholder="One line about why this one matters"></textarea></div>
     <div class="f"><label>Hatches in</label>
       <div class="choice" id="hQuick">${[['1 hour', 60], ['6 hours', 360], ['24 hours', 1440], ['3 days', 4320]].map(([l, m]) => `<button class="opt hq" data-m="${m}"><div><b>${l}</b></div></button>`).join('')}</div></div>
@@ -1027,7 +1031,7 @@ async function viewExplore() {
       <div>
         <span class="kicker"><img src="/assets/penguin/mark.webp" alt="" style="width:12px;height:17px;filter:invert(1)">The Stinky Penguin launchpad · trade with ZRO, ETH or XLM</span>
         <h1>Hatch before<br><span>the chain does.</span></h1>
-        <p class="lead">Create and trade tokens on a bonding curve. Zero and GIWA tokens migrate 1:1 the day mainnet opens; Stellar tokens graduate on-chain into Aquarius at ${gradK()} with the LP burned.</p>
+        <p class="lead">Create and trade tokens on a bonding curve. Zero and GIWA tokens migrate 1:1 the day mainnet opens, Robinhood Chain tokens trade live in ETH; Stellar tokens graduate on-chain into Aquarius at ${gradK()} with the LP burned.</p>
         <div class="hero-cta"><a class="btn lg" href="#/create">Create a token</a><a class="btn lg ghost" href="#/docs">How it works</a></div>
       </div>
       <div class="nets">
@@ -1035,6 +1039,8 @@ async function viewExplore() {
           <div class="cd"><b id="cdZero">${countdown(nets.zero?.launchAt)}</b><span class="mono mu">${esc(nets.zero?.status || '')}</span></div></div>
         <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
           <div class="cd"><b>TBA</b><span class="mono mu">${esc(nets.giwa?.status || '')}</span></div></div>
+        <div class="net-card"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">live · Ethereum L2 · ETH pairs</span>
+          <div class="cd"><b>LIVE</b><span class="mono mu">${esc(nets.robinhood?.status || '')}</span></div></div>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">XLM · on-chain</span></div></a>
       </div>
@@ -1066,6 +1072,7 @@ async function viewExplore() {
       <button data-n="zero" class="${S.net === 'zero' ? 'on' : ''}">Zero</button>
       <button data-n="giwa" class="${S.net === 'giwa' ? 'on' : ''}">GIWA</button>
       <button data-n="stellar" class="${S.net === 'stellar' ? 'on' : ''}">Stellar</button>
+      <button data-n="robinhood" class="${S.net === 'robinhood' ? 'on' : ''}">Robinhood</button>
     </div>
     <div class="bar-row">
       <div class="seg" id="sort">
@@ -1240,7 +1247,8 @@ async function viewToken(id) {
         <a class="btn lg wide" target="_blank" rel="noopener" href="https://aqua.network/pools/${esc(m.stellar?.pool || '')}/">Trade on Aquarius ↗</a>
         <a class="btn lg wide ghost" style="margin-top:8px" href="#/wallet">Withdraw to my Stellar wallet</a>` : '<div class="prog big"><i style="width:70%"></i></div>'}
       </div>` : ''}
-      <div class="panel pb" ${m.network === 'stellar' && (m.migrated || m.stellar?.job) ? 'style="display:none"' : ''}>
+      ${m.rh ? `<div class="panel pb rh-pane" id="rhPane"></div>` : ''}
+      <div class="panel pb" ${(m.network === 'stellar' && (m.migrated || m.stellar?.job)) || m.rh ? 'style="display:none"' : ''}>
         <div class="tb-tabs"><button class="buy on" data-side="buy">Buy</button><button class="sell" data-side="sell">Sell</button></div>
         <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button></div>
         <div class="amt"><input id="amt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="unit"></span></div>
@@ -1291,6 +1299,7 @@ async function viewToken(id) {
       </div>
     </aside>
   </section>`;
+  if (m.rh) RHW.pane(m);
 
   /* chart */
   const LW = window.LightweightCharts;
@@ -1355,7 +1364,11 @@ async function viewToken(id) {
     if ($('#bondLbl')) $('#bondLbl').textContent = m.network === 'stellar' ? `Progress to ${gradK(m.stellar?.gradUsd || 46000)} · Aquarius` : 'Bonding curve';
     $('#bondBar').style.width = Math.max(2.5, m.progress) + '%';
     const left = zNum(B(m.curveTokens) * WEI - B(m.sold));
-    $('#bondTxt').innerHTML = m.graduated
+    $('#bondTxt').innerHTML = m.rh
+      ? (m.migrated ? `<b style="color:var(--tx)">Graduated to Uniswap v3.</b> The pool lives on Robinhood Chain and the LP NFT sits at the dead address, so the liquidity is locked forever.`
+        : m.graduated ? `<b style="color:var(--tx)">Sold out.</b> Graduating into a Uniswap v3 pool on Robinhood Chain right now, LP burned forever.`
+        : `${(left / 1e6).toFixed(1)}M ${esc(m.symbol)} left on the curve. When it sells out, the contract moves the raise into a Uniswap v3 pool on Robinhood Chain and burns the LP.`)
+      : m.graduated
       ? (m.network === 'stellar'
         ? (m.migrated
           ? `<b style="color:var(--tx)">Graduated to Aquarius.</b> The pool lives on Stellar with its LP burned forever. Trade it on <a href="https://aqua.network/pools/${esc(m.stellar?.pool || '')}/" target="_blank" rel="noopener" style="text-decoration:underline">Aquarius</a> or withdraw your tokens to a Stellar wallet.`
@@ -1388,6 +1401,66 @@ async function viewToken(id) {
     }
     const maxw = m.maxBuyBps > 0 && Date.now() < m.maxBuyUntil;
     if (maxw && !$('#maxw')) $('#est').insertAdjacentHTML('beforebegin', `<div id="maxw" class="warn" style="margin:12px 0 0">Launch protection: max ${(m.maxBuyBps / 100).toFixed(2)}% of supply per wallet for ${Math.ceil((m.maxBuyUntil - Date.now()) / 60000)} more min.</div>`);
+  }
+
+  /* trade straight from a Stellar wallet, no account: the wallet signature is the login */
+  if ($('#stWal') && !S.me?.stellarWallet && m.network === 'stellar' && !m.migrated && m.stellar?.issuer) {
+    const box = $('#stWal');
+    let kind = null, addr = '';
+    const panel = (h) => {
+      const bal = Number(h.wallet || 0);
+      box.innerHTML = `<div class="st-guest">
+        <div class="kv"><span>Wallet <span class="mono">${esc(short(addr))}</span></span><b>${h.trust ? esc(bal.toLocaleString('en-US', { maximumFractionDigits: 2 })) + ' $' + esc(m.symbol) : 'no trustline'}</b></div>
+        ${h.xlm !== null ? `<div class="kv"><span>XLM in wallet</span><b>${esc(Number(h.xlm).toLocaleString('en-US', { maximumFractionDigits: 2 }))}</b></div>` : ''}
+        ${!h.trust ? `<button class="btn sm wide" id="stGTrust" style="margin-top:8px">Add trustline for ${esc(m.stellar.code)}</button>`
+          : bal > 0 ? `<div style="display:flex;gap:6px;margin-top:8px">
+            <input id="stGAmt" class="inp" inputmode="decimal" placeholder="Amount" style="flex:1;min-width:0">
+            <button class="btn sm ghost" id="stGMax">Max</button><button class="btn sm" id="stGSell">Sell from wallet</button></div>
+            <div class="mu" style="font-size:11px;margin-top:4px">One signature, no login. The XLM comes back to this wallet.</div>`
+          : `<div class="mu" style="font-size:11.5px;margin-top:6px">No ${esc(m.symbol)} in this wallet yet. Buy here with the wallet and the tokens land in it.</div>`}
+        <div class="mu" style="font-size:11px;margin-top:8px">Trading works without an account: your wallet signs, Rookery never holds the tokens.</div>
+      </div>`;
+      const g = (id) => document.getElementById(id);
+      if (g('stGTrust')) g('stGTrust').onclick = async () => {
+        try {
+          const p = await api('/stellar/prep-trust', { market: m.id, address: addr });
+          const signed = await STW.signTx(kind, addr, p.xdr);
+          await api('/stellar/submit', { xdr: signed });
+          toast('Trustline added'); setTimeout(() => repaint(), 4000);
+        } catch (e) { toast(esc(e.message || e), 'bad'); }
+      };
+      if (g('stGMax')) g('stGMax').onclick = () => { g('stGAmt').value = String(bal); };
+      if (g('stGSell')) g('stGSell').onclick = async () => {
+        const v = Number(g('stGAmt').value || 0);
+        if (!(v > 0) || v > bal) return toast('Enter an amount you hold in the wallet', 'bad');
+        const b = g('stGSell'); b.disabled = true; b.textContent = 'Waiting for your wallet…';
+        try {
+          const p = await api('/stellar/prep-sell', { market: m.id, amount: toWei(String(v)), address: addr });
+          const signed = await STW.signTx(kind, addr, p.xdr);
+          await api('/stellar/submit', { xdr: signed });
+          toast('Tokens sent. The sale runs on the curve and the XLM comes back to your wallet in about a minute.');
+          setTimeout(() => repaint(), 9000);
+        } catch (e) { toast(esc(e.message || e), 'bad'); }
+        finally { if (g('stGSell')) { g('stGSell').disabled = false; g('stGSell').textContent = 'Sell from wallet'; } }
+      };
+    };
+    const repaint = async () => {
+      if (!addr) return;
+      try { panel(await api(`/stellar/wallet?market=${encodeURIComponent(m.id)}&address=${encodeURIComponent(addr)}`)); }
+      catch (e) { box.innerHTML = `<div class="mu" style="font-size:11.5px">${esc(e.message)}</div>`; }
+    };
+    box.innerHTML = `<div class="st-guest">
+      <div style="font-size:12.5px;line-height:1.55">Trade this token from your own Stellar wallet. <b>No account needed.</b></div>
+      <button class="btn sm wide" id="stGConnect" style="margin-top:8px">Connect wallet</button>
+      <div class="mu" style="font-size:11px;margin-top:6px">Freighter, xBull, Albedo or Rabet.</div></div>`;
+    $('#stGConnect').onclick = async () => {
+      try {
+        kind = await STW.detect();
+        if (!kind) throw new Error('No Stellar wallet found. Install Freighter, xBull, Albedo or Rabet.');
+        addr = await STW.connect(kind);
+        await repaint();
+      } catch (e) { toast(esc(e.message || e), 'bad'); }
+    };
   }
 
   /* the holder's own Stellar wallet: balance there, tokens on their way, trustline and sell-from-wallet */
@@ -1557,7 +1630,7 @@ async function viewToken(id) {
       body.innerHTML = `<div class="pb">
         <p style="font-size:14px;line-height:1.7;color:var(--tx2);white-space:pre-wrap">${esc(m.description || 'No description.')}</p>
         <hr class="sep">
-        <div class="kv"><span>Network</span><b>${m.network === 'giwa' ? 'GIWA (Upbit) · pre-mainnet' : m.network === 'stellar' ? `Stellar · ${m.migrated ? 'on Aquarius' : 'graduates at ' + fmtUsd(m.stellar?.gradUsd || 46000)}` : 'Zero (LayerZero) · pre-mainnet'}</b></div>
+        <div class="kv"><span>Network</span><b>${m.network === 'giwa' ? 'GIWA (Upbit) · pre-mainnet' : m.network === 'robinhood' ? 'Robinhood Chain · live' : m.network === 'stellar' ? `Stellar · ${m.migrated ? 'on Aquarius' : 'graduates at ' + fmtUsd(m.stellar?.gradUsd || 46000)}` : 'Zero (LayerZero) · pre-mainnet'}</b></div>
         ${m.stellar?.issuer ? `<div class="kv"><span>Stellar asset</span><b><a class="mono" style="letter-spacing:0" target="_blank" rel="noopener" href="${m.stellar.explorer}/asset/${esc(m.stellar.code)}-${esc(m.stellar.issuer)}">${esc(m.stellar.code)} · ${short(m.stellar.issuer)} ↗</a></b></div>
         <div class="kv"><span>Aquarius pool</span><b><a class="mono" style="letter-spacing:0" target="_blank" rel="noopener" href="${m.stellar.explorer}/contract/${esc(m.stellar.pool)}">${short(m.stellar.pool)} ↗</a> · LP burned</b></div>` : ''}
         <div class="kv"><span>Pair</span><b>${esc(m.symbol)} / ${esc(Q)}</b></div>
@@ -1619,7 +1692,7 @@ async function viewCreate(hatchId) {
   app.innerHTML = `
   <section class="wrap page">
     <div id="hatchNote"></div>
-    <div class="page-h"><div><h1>Create a token</h1><p>Hatch a token for a network before its mainnet. Free to create. Zero tokens trade in ZRO and migrate 1:1 at mainnet, GIWA tokens in ETH, Stellar tokens in XLM and graduate on-chain into Aquarius. 0.5% of every trade burns $臭企鹅.</p></div></div>
+    <div class="page-h"><div><h1>Create a token</h1><p>Hatch a token for a network before its mainnet. Free to create. Zero tokens trade in ZRO and migrate 1:1 at mainnet, GIWA and Robinhood Chain tokens in ETH, Stellar tokens in XLM and graduate on-chain into Aquarius. 0.5% of every trade burns $臭企鹅.</p></div></div>
     <div class="create">
       <div>
         <div class="fs"><h3>Token</h3><p class="hint">Name, ticker, picture and story. You can't change these later.</p>
@@ -1638,6 +1711,7 @@ async function viewCreate(hatchId) {
             <button class="opt" data-n="zero"><span class="net-ico">Ø</span><div><b>Zero</b><small>LayerZero · mainnet 30.11</small></div></button>
             <button class="opt" data-n="giwa"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><b>GIWA</b><small>Upbit L2 · mainnet TBA</small></div></button>
             <button class="opt" data-n="stellar"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><b>Stellar</b><small>Live · graduates to Aquarius</small></div></button>
+            <button class="opt" data-n="robinhood"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><b>Robinhood Chain</b><small>Live · Ethereum L2 · ETH pair</small></div></button>
           </div>
           <div class="choice" style="margin-top:10px" id="pairBox"></div>
         </div>
@@ -1650,12 +1724,12 @@ async function viewCreate(hatchId) {
           </div>
         </div>
 
-        <div class="fs"><h3>Launch protection</h3><p class="hint">Limit how much one wallet can hold right after launch, so snipers can't take the supply.</p>
+        <div class="fs" id="fsProt"><h3>Launch protection</h3><p class="hint">Limit how much one wallet can hold right after launch, so snipers can't take the supply.</p>
           <div class="slider"><span class="l">Max per wallet<small>% of supply</small></span><input type="range" min="0" max="5" step="0.25" data-k="maxBuyPct" value="1"><span class="v" id="v_maxBuyPct"></span></div>
           <div class="slider"><span class="l">For the first<small>minutes</small></span><input type="range" min="0" max="240" step="5" data-k="maxBuyMinutes" value="30"><span class="v" id="v_maxBuyMinutes"></span></div>
         </div>
 
-        <div class="fs"><h3>Taxes</h3><p class="hint">Applied to every buy and sell on top of Rookery's 0.5% $臭企鹅 burn. Max 5% each, 10% total.</p>
+        <div class="fs" id="fsTax"><h3>Taxes</h3><p class="hint">Applied to every buy and sell on top of Rookery's 0.5% $臭企鹅 burn. Max 5% each, 10% total.</p>
           <p class="hint" id="taxNote" style="display:none;border-left:2px solid var(--line2);padding-left:9px">Stellar tokens: these taxes apply on the Rookery curve. After graduation the token trades on Aquarius, where a Stellar asset cannot charge a transfer fee, so trading there is tax-free.</p>
           <div class="slider"><span class="l">Marketing<small><span class="qcur">ZRO</span> to you</small></span><input type="range" min="0" max="5" step="0.25" data-k="taxMarketing" value="1"><span class="v" id="v_taxMarketing"></span></div>
           <div class="slider"><span class="l">Burn<small>of the token</small></span><input type="range" min="0" max="5" step="0.25" data-k="taxBurn" value="0.5"><span class="v" id="v_taxBurn"></span></div>
@@ -1663,7 +1737,7 @@ async function viewCreate(hatchId) {
           <div class="split" id="split"></div><div class="mu" style="font-size:12px" id="splitTxt"></div>
         </div>
 
-        <div class="fs"><h3>Dev buy</h3><p class="hint">Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.</p>
+        <div class="fs"><h3>Dev buy</h3><p class="hint" id="devHint">Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.</p>
           <div class="f" style="max-width:280px"><label id="devLbl">Amount · ZRO</label><input class="inp" data-k="devBuy" inputmode="decimal" placeholder="0"></div>
           <div class="mu" style="font-size:12.5px" id="devTxt"></div>
         </div>
@@ -1673,7 +1747,7 @@ async function viewCreate(hatchId) {
         <div class="mono mu" style="margin-bottom:10px">Preview</div>
         <div id="prev"></div>
         <div class="panel pb" style="margin-top:14px">
-          <div class="kv"><span>Creation fee</span><b>Free</b></div>
+          <div class="kv"><span>Creation fee</span><b id="cFee">Free</b></div>
           <div class="kv"><span>Supply</span><b>1,000,000,000</b></div>
           <div class="kv"><span>Starting market cap</span><b id="startMc"></b></div>
           <div class="kv"><span>Bonds at</span><b id="bondMc"></b></div>
@@ -1697,7 +1771,7 @@ async function viewCreate(hatchId) {
       : c ? (Number(c.vZro) / Number(c.vTok)) * 1e9 * zu : 0;
     $('#startMc').textContent = fmtUsd(startMc);
     $('#bondMc').textContent = F.network === 'stellar' ? fmtUsd(S.stats?.stellar?.gradUsd || 46000) : c ? fmtUsd(Number(c.vZro) * endMult * zu) : '—';
-    const pq = F.network === 'giwa' ? 'eth' : F.network === 'stellar' ? 'xlm' : 'zro';
+    const pq = netCur(F.network);
     $$('.qcur').forEach(e => (e.textContent = ASSET[pq].label));
     const tn = $('#taxNote'); if (tn) tn.style.display = F.network === 'stellar' ? 'block' : 'none';
     $('#pairBox').innerHTML = pq === 'xlm'
@@ -1712,6 +1786,20 @@ async function viewCreate(hatchId) {
       network: F.network, creator: S.me?.username || 'you', created: Date.now(), mcapUsd: startMc, change24h: 0, progress: 0,
       holders: 0, trades: 0, graduated: false,
     }).replace('<a class="card" href="#/t/">', '<div class="card" style="cursor:default">').replace(/<\/a>\s*$/, '</div>');
+    // Robinhood Chain: the token contract is deployed from the creator's wallet in the launch transaction
+    const onc = F.network === 'robinhood' && S.rh?.live;
+    $('#fsProt').style.display = onc ? 'none' : '';
+    $('#fsTax').style.display = onc ? 'none' : '';
+    $('#cFee').textContent = onc ? 'Gas only (~$0.01)' : 'Free';
+    $('#devHint').textContent = onc ? 'Optional first buy in ETH from your wallet, in the same transaction that deploys the token. Bought tokens land in your wallet.'
+      : "Optional first buy from your balance in the token's pair currency, in the same transaction as the launch.";
+    if (onc) {
+      $('#pairBox').innerHTML = `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">Ξ</span><div><b>Real ERC-20 from block one</b><small>Deployed from your wallet · trades with ETH on the RookeryCurve contract</small></div></button>
+      <button class="opt" disabled><span class="net-ico all">∞</span><div><b>Graduates to Uniswap v3</b><small>When the curve sells out · LP burned forever</small></div></button>`;
+      $('#devTxt').textContent = '';
+      $('#devLbl').textContent = 'Amount · ETH';
+    }
+    $('#createGo').textContent = onc ? 'Create from wallet' : (S.me ? 'Create token' : 'Log in to create');
   };
   $$('[data-k]').forEach(el => el.oninput = () => { F[el.dataset.k] = el.value; paint(); });
   $$('#netPick .opt').forEach(b => b.onclick = () => { F.network = b.dataset.n; paint(); });
@@ -1722,6 +1810,7 @@ async function viewCreate(hatchId) {
     catch (err) { toast(esc(err.message), 'bad'); }
   };
   $('#createGo').onclick = async () => {
+    if (F.network === 'robinhood' && S.rh?.live) return RHW.create(F);
     if (!S.me) return needLogin();
     $('#cErr').textContent = '';
     try {
@@ -1869,6 +1958,14 @@ async function viewWallet() {
       </div>
     </div>
     <div class="panel pb" style="margin-top:18px;display:flex;align-items:center;gap:16px;flex-wrap:wrap" id="linkBox"></div>
+    <div class="panel pb snb-card" style="margin-top:18px">
+      <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:240px">
+        <div class="snb-ico">⌁</div>
+        <div><b style="font-size:15px">RookerySniperBot</b> <span class="mono mu" style="font-size:10.5px;letter-spacing:.1em;margin-left:6px">TELEGRAM</span>
+          <p class="mu" style="font-size:13px;margin:3px 0 0">Trade and snipe every Rookery token from Telegram with this same balance. Live PnL terminal after every buy.</p></div>
+      </div>
+      <button class="btn" id="snbGo">Connect Telegram</button>
+    </div>
     <div class="panel" style="margin-top:18px">
       <div class="panel-h"><h3>Holdings</h3><div class="pnl-sum" id="pnlSum"></div></div><div id="hold"></div>
     </div>
@@ -1958,6 +2055,11 @@ async function viewWallet() {
       <td class="r mu">${ago(t.ts)}</td></tr>`; }).join('') : `<tr><td colspan="6"><div class="empty" style="border:0">No transfers yet.</div></td></tr>`;
   };
   $$('#assetSel button').forEach(b => b.onclick = () => { asset = b.dataset.a; localStorage.setItem('pl_wallet_asset', asset); paintAsset(); });
+  $('#snbGo').onclick = async () => {
+    const w = window.open('', '_blank');
+    try { const r = await api('/snb/link', {}); if (w) w.location = r.url; else location.href = r.url; }
+    catch (e) { if (w) w.close(); toast(esc(e.message), 'bad'); }
+  };
   $('#copy').onclick = () => { navigator.clipboard.writeText(addrOf()); toast('Address copied'); };
   $('#copyMemo').onclick = () => { navigator.clipboard.writeText(me.stellarDeposit?.memo || ''); toast('Memo copied'); };
   $('#wAsset').onchange = () => { wAsset = $('#wAsset').value; $('#wAmt').value = ''; paintFee(); };
@@ -2154,23 +2256,23 @@ const TXW = {
         const ico = done ? '<span style="color:#3ddc97">✓</span>' : live ? '<span class="txw-spin">◌</span>' : bad ? '<span style="color:#ff5c5c">✕</span>' : '<span class="mu">·</span>';
         return `<div style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.45;${!done && !live && !bad ? 'opacity:.55' : ''}"><span style="width:14px;text-align:center">${ico}</span><span>${label}</span></div>`;
       };
-      const txLink = t.tx ? ` · <a href="${esc(t.explorer)}/tx/${esc(t.tx)}" target="_blank" rel="noopener" style="text-decoration:underline">view tx ↗</a>` : '';
-      const head = t.stage === 'filled' ? 'Bought' : end ? 'Not completed' : 'Buying';
+      const txLink = t.tx ? ` · <a href="${esc(t.txp ? t.txp + t.tx : t.explorer + '/tx/' + t.tx)}" target="_blank" rel="noopener" style="text-decoration:underline">view tx ↗</a>` : '';
+      const head = t.kind === 'bridge' ? (t.stage === 'filled' ? 'Bridged' : end ? 'Not completed' : 'Bridging') : (t.stage === 'filled' ? 'Bought' : end ? 'Not completed' : 'Buying');
       return `<div style="background:#0f0f11;border:1px solid ${t.stage === 'filled' ? '#1f6b4b' : end ? '#6b2a2a' : '#26262c'};border-radius:14px;padding:12px 14px;box-shadow:0 12px 32px rgba(0,0,0,.5)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <b style="font-size:13.5px">${head} $${esc(t.symbol)}</b>
+          <b style="font-size:13.5px">${head} ${t.kind === 'bridge' ? esc(t.symbol) : '$' + esc(t.symbol)}</b>
           <span class="mono mu txw-time" data-start="${t.started}" data-end="${t.ended || ''}" style="margin-left:auto;font-size:11.5px">${TXW.mmss((t.ended || Date.now()) - t.started)}</span>
           <button data-x="${t.id}" title="Hide" style="background:none;border:0;color:inherit;opacity:.6;cursor:pointer;font-size:15px;padding:0 0 0 4px">×</button>
         </div>
-        ${step(0, `Switch wallet to ${esc(t.chain)}`)}
-        ${step(1, `Approve ${esc(t.amount)} ${esc(t.unit)} in your wallet`)}
-        ${step(2, `Payment confirming on ${esc(t.chain)}${txLink}<br><span class="mu" style="font-size:11.5px">usually about a minute</span>`)}
-        ${step(3, t.stage === 'filled' ? `Received <b>${esc(t.tokens || '')} $${esc(t.symbol)}</b>` : `Tokens land in your Rookery wallet`)}
-        ${t.stage === 'filled' ? `<div style="margin-top:8px;font-size:12px;color:#3ddc97">All good. <a href="#/wallet" style="text-decoration:underline;color:inherit">Open wallet</a></div>` : ''}
+        ${step(0, t.labels?.[0] || `Switch wallet to ${esc(t.chain)}`)}
+        ${step(1, t.labels?.[1] || `Approve ${esc(t.amount)} ${esc(t.unit)} in your wallet`)}
+        ${step(2, (t.labels?.[2] || `Payment confirming on ${esc(t.chain)}`) + `${txLink}<br><span class="mu" style="font-size:11.5px">${t.kind === 'bridge' ? 'usually 1–3 minutes' : 'usually about a minute'}</span>`)}
+        ${step(3, t.stage === 'filled' ? (t.done || `Received <b>${esc(t.tokens || '')} $${esc(t.symbol)}</b>`) : (t.labels?.[3] || `Tokens land in your Rookery wallet`))}
+        ${t.stage === 'filled' ? `<div style="margin-top:8px;font-size:12px;color:#3ddc97">All good. ${t.kind === 'bridge' ? (t.outLink ? `<a href="${esc(t.outLink)}" target="_blank" rel="noopener" style="text-decoration:underline;color:inherit">View delivery ↗</a>` : '') : `<a href="#/wallet" style="text-decoration:underline;color:inherit">Open wallet</a>`}</div>` : ''}
         ${end && t.stage !== 'filled' ? `<div class="mu" style="margin-top:8px;font-size:11.5px;line-height:1.5">${esc(t.note || 'Nothing was charged.')}</div>` : ''}
       </div>`;
     }).join('');
-    d.querySelectorAll('[data-x]').forEach(b => b.onclick = () => TXW.drop(Number(b.dataset.x)));
+    d.querySelectorAll('[data-x]').forEach(b => b.onclick = () => TXW.drop(/^-?\d+$/.test(b.dataset.x) ? Number(b.dataset.x) : b.dataset.x));
     if (!document.getElementById('txwStyle')) {
       const st = document.createElement('style');
       st.id = 'txwStyle';
@@ -2215,7 +2317,7 @@ const TXW = {
   },
   resume() {
     TXW.render();
-    for (const t of TXW.load()) if (t.stage === 'sent') TXW.watch(t.id);
+    for (const t of TXW.load()) if (t.stage === 'sent') (t.kind === 'bridge' ? BRG.watch(t.id) : TXW.watch(t.id));
     // finished cards from an earlier visit only need to be seen once
     for (const t of TXW.load()) if (['filled', 'cancelled'].includes(t.stage) && Date.now() - (t.ended || 0) > 10 * 60e3) TXW.drop(t.id);
     if (!TXW._timer) TXW._timer = setInterval(TXW.tick, 1000);
@@ -2229,6 +2331,9 @@ const EVM_ADD = {
   42161: { chainName: 'Arbitrum One', rpcUrls: ['https://arb1.arbitrum.io/rpc'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://arbiscan.io'] },
   56: { chainName: 'BNB Chain', rpcUrls: ['https://bsc-dataseed.bnbchain.org'], nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 }, blockExplorerUrls: ['https://bscscan.com'] },
   10: { chainName: 'Optimism', rpcUrls: ['https://mainnet.optimism.io'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://optimistic.etherscan.io'] },
+  137: { chainName: 'Polygon', rpcUrls: ['https://polygon-rpc.com'], nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 }, blockExplorerUrls: ['https://polygonscan.com'] },
+  43114: { chainName: 'Avalanche C-Chain', rpcUrls: ['https://api.avax.network/ext/bc/C/rpc'], nativeCurrency: { name: 'Avalanche', symbol: 'AVAX', decimals: 18 }, blockExplorerUrls: ['https://snowtrace.io'] },
+  4663: { chainName: 'Robinhood Chain', rpcUrls: ['https://rpc.mainnet.chain.robinhood.com'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: ['https://robinhoodchain.blockscout.com'] },
 };
 const EVMW = {
   hex: (n) => '0x' + BigInt(n).toString(16),
@@ -2425,6 +2530,252 @@ async function walletSignIn(link = false) {
     if (e?.code === 4001) toast('Signature cancelled', 'bad'); else toast(esc(e.message || 'Wallet sign-in failed'), 'bad');
     return false;
   }
+}
+
+/* ═══════════ BRIDGE ═══════════ */
+const BR_ICON = { stellar: '/assets/chains/stellar.svg', ethereum: '/assets/chains/ethereum.svg', base: '/assets/chains/base.svg', bsc: '/assets/chains/binance.svg',
+  robinhood: '/assets/chains/robinhood.png', giwa: '/assets/giwa.png' };
+const BR_LETTER = { arbitrum: ['A', '#28a0f0'], optimism: ['OP', '#ff0420'], polygon: ['P', '#8247e5'], avalanche: ['A', '#e84142'], solana: ['S', '#14f195'],
+  bitcoin: ['₿', '#f7931a'], tron: ['T', '#ff060a'], zero: ['Z', '#ffffff'] };
+const BR_TOKICON = { XLM: '/assets/chains/stellar.svg', ETH: '/assets/chains/ethereum.svg', BNB: '/assets/chains/binance.svg' };
+const BR_ORDER = ['stellar', 'ethereum', 'base', 'arbitrum', 'optimism', 'robinhood', 'bsc', 'polygon', 'avalanche', 'solana', 'bitcoin', 'tron', 'zero', 'giwa'];
+const BR_SOON_LABEL = { zero: 'Zero', giwa: 'GIWA' };
+function brIco(src, letter, size = 20) {
+  if (src) return `<img src="${src}" alt="" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;background:#fff;flex:none">`;
+  const [l, c] = letter || ['?', '#888'];
+  return `<span style="width:${size}px;height:${size}px;border-radius:50%;background:${c};color:#000;display:inline-grid;place-items:center;font:800 ${Math.round(size * (l.length > 1 ? 0.4 : 0.55))}px Inter,sans-serif;flex:none">${l}</span>`;
+}
+const brNetIco = (k, sz) => brIco(BR_ICON[k], BR_LETTER[k], sz);
+const brTokIco = (sym, net, sz) => BR_TOKICON[sym] ? brIco(BR_TOKICON[sym], null, sz) : brNetIco(net, sz);
+function brDrop(host, items, value, onPick) {
+  const cur = items.find(i => i.key === value) || items[0];
+  host.innerHTML = `<button type="button" class="br-dd">${cur.icon}<span>${esc(cur.label)}</span><span class="mu" style="margin-left:auto">▾</span></button>
+    <div class="br-ls" hidden>${items.map(i => `<button type="button" class="br-it${i.disabled ? ' off' : ''}${i.key === value ? ' on' : ''}" data-k="${esc(i.key)}" ${i.disabled ? 'disabled' : ''}>
+      ${i.icon}<span>${esc(i.label)}${i.sub ? `<small class="mu">${esc(i.sub)}</small>` : ''}</span>${i.tag ? `<em class="br-soon">${esc(i.tag)}</em>` : ''}</button>`).join('')}</div>`;
+  const btn = host.querySelector('.br-dd'), ls = host.querySelector('.br-ls');
+  btn.onclick = (e) => { e.stopPropagation(); document.querySelectorAll('.br-ls').forEach(x => { if (x !== ls) x.hidden = true; }); ls.hidden = !ls.hidden; };
+  ls.querySelectorAll('.br-it:not(.off)').forEach(b => b.onclick = (e) => { e.stopPropagation(); ls.hidden = true; onPick(b.dataset.k); });
+}
+document.addEventListener('click', () => document.querySelectorAll('.br-ls').forEach(x => { x.hidden = true; }));
+const BR_STATUS = { PENDING_DEPOSIT: 'waiting for payment', KNOWN_DEPOSIT_TX: 'payment seen', PROCESSING: 'bridging', SUCCESS: 'delivered',
+  INCOMPLETE_DEPOSIT: 'payment too small', REFUNDED: 'refunded', FAILED: 'not completed' };
+
+const BRG = {
+  refs() { try { return JSON.parse(localStorage.getItem('pl_xb') || '[]'); } catch { return []; } },
+  keep(ref) { const r = [ref, ...BRG.refs().filter(x => x !== ref)].slice(0, 30); localStorage.setItem('pl_xb', JSON.stringify(r)); },
+  async watch(id) {
+    if (BRG._w?.[id]) return;
+    (BRG._w = BRG._w || {})[id] = true;
+    const ref = String(id).replace(/^x/, '');
+    const t0 = TXW.get(id)?.started || Date.now();
+    while (Date.now() - t0 < 6 * 3600e3) {
+      await new Promise(r => setTimeout(r, 6000));
+      const t = TXW.get(id);
+      if (!t || t.stage !== 'sent') break;
+      try {
+        const { order: o } = await api('/bridge/status?ref=' + ref);
+        if (o.status === 'SUCCESS') {
+          TXW.set(id, { stage: 'filled', ended: Date.now(), outLink: o.outLink, done: `Received <b>${esc(o.out || o.outEst)} ${esc(o.toSym)}</b> on ${esc(BRG.cfg?.nets?.[o.to]?.label || o.to)}` });
+          toast(`Bridged: <b>${esc(o.out || o.outEst)} ${esc(o.toSym)}</b> delivered`);
+          if (location.hash.startsWith('#/bridge')) BRG.history();
+          break;
+        }
+        if (o.status === 'REFUNDED' || o.status === 'FAILED') {
+          TXW.set(id, { stage: 'failed', ended: Date.now(), note: o.status === 'REFUNDED' ? 'Could not complete, the payment was refunded to your address.' : 'Could not complete. If you paid, it is refunded automatically.' });
+          if (location.hash.startsWith('#/bridge')) BRG.history();
+          break;
+        }
+      } catch { /* keep watching */ }
+    }
+    delete BRG._w[id];
+  },
+  async history() {
+    const box = $('#brHist'); if (!box) return;
+    let rows = [];
+    try { rows = (await api('/bridge/orders?refs=' + BRG.refs().join(','))).orders || []; } catch { return; }
+    if (!rows.length) { box.innerHTML = `<p class="mu" style="font-size:12.5px;margin:0">No transfers yet.</p>`; return; }
+    const N = BRG.cfg?.nets || {};
+    box.innerHTML = rows.map(o => `<div class="br-row">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${brNetIco(o.from, 16)}<b>${esc(o.amountIn)} ${esc(o.sym)}</b>
+        <span class="mu">→</span>${brNetIco(o.to, 16)}<b>${esc(o.out || ('≈ ' + o.outEst))} ${esc(o.toSym)}</b></div>
+      <div class="mu" style="font-size:11.5px;display:flex;gap:8px;flex-wrap:wrap"><span>${new Date(o.created).toLocaleString()}</span><span>to ${esc(short(o.recipient))}</span>
+        <span style="color:${o.status === 'SUCCESS' ? '#3ddc97' : ['FAILED', 'REFUNDED', 'INCOMPLETE_DEPOSIT'].includes(o.status) ? '#ff5c5c' : 'inherit'}">${esc(BR_STATUS[o.status] || o.status.toLowerCase())}</span>
+        ${o.outLink ? `<a href="${esc(o.outLink)}" target="_blank" rel="noopener" style="text-decoration:underline">delivery ↗</a>` : ''}
+        ${o.refundLink ? `<a href="${esc(o.refundLink)}" target="_blank" rel="noopener" style="text-decoration:underline">refund ↗</a>` : ''}
+        ${o.status === 'PENDING_DEPOSIT' ? `<button class="br-link" data-pay="${esc(o.ref)}">payment details</button>` : ''}</div></div>`).join('');
+    box.querySelectorAll('[data-pay]').forEach(b => b.onclick = () => { const o = rows.find(r => r.ref === b.dataset.pay); if (o) BRG.manual(o); });
+  },
+  manual(o, onSent) {
+    const N = BRG.cfg?.nets || {};
+    EVMW.box(`<div class="mono mu" style="margin-bottom:10px">Send ${esc(o.sym)} on ${esc(N[o.from]?.label || o.from)}</div>
+      <div class="kv"><span>Amount</span><b>${esc(o.amountIn)} ${esc(o.sym)}</b><button class="mini" data-copy="${esc(o.amountIn)}">Copy</button></div>
+      <div class="kv"><span>To</span><b class="mono" style="font-size:11px;word-break:break-all">${esc(o.depositAddress)}</b><button class="mini" data-copy="${esc(o.depositAddress)}">Copy</button></div>
+      ${o.depositMemo ? `<div class="kv"><span>Memo</span><b class="mono">${esc(o.depositMemo)}</b><button class="mini" data-copy="${esc(o.depositMemo)}">Copy</button></div>
+        <p style="font-size:12px;margin:8px 0 0;color:#ffb84d">The memo is required. Without it the payment cannot be matched.</p>` : ''}
+      <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">Send exactly this amount, once. This address is for this transfer only. If anything goes wrong, the payment is refunded to your address.</p>
+      <input id="brTx" class="inp" style="width:100%;margin-top:10px;font-size:12px" placeholder="Transaction hash (optional, speeds it up)">
+      <button class="btn sm wide" id="brSent" style="margin-top:10px">I've sent it</button>`);
+    document.querySelectorAll('#evmBox [data-copy]').forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); toast('Copied'); });
+    document.getElementById('brSent').onclick = async () => {
+      const h = document.getElementById('brTx').value.trim();
+      if (h) { try { await api('/bridge/submit', { ref: o.ref, txHash: h }); } catch { /* the network finds it anyway */ } }
+      EVMW.close();
+      const id = 'x' + o.ref;
+      if (!TXW.get(id)) BRG.card(o);
+      TXW.set(id, { stage: 'sent', tx: h || '' });
+      BRG.watch(id); onSent?.();
+    };
+  },
+  card(o) {
+    const N = BRG.cfg?.nets || {};
+    const id = 'x' + o.ref;
+    TXW.set(id, { kind: 'bridge', symbol: `${o.amountIn} ${o.sym} → ${N[o.to]?.label || o.to}`, chain: N[o.from]?.label, explorer: '', txp: N[o.from]?.txp || '',
+      labels: [`Connect your wallet on ${esc(N[o.from]?.label || '')}`, `Send ${esc(o.amountIn)} ${esc(o.sym)}`, `Payment confirming on ${esc(N[o.from]?.label || '')}`,
+        `Delivering ≈ ${esc(o.outEst)} ${esc(o.toSym)} to ${esc(short(o.recipient))}`],
+      stage: 'switch', started: Date.now() });
+    if (!TXW._timer) TXW._timer = setInterval(TXW.tick, 1000);
+    return id;
+  },
+};
+
+async function viewBridge() {
+  document.title = 'Bridge — Rookery';
+  app.innerHTML = `<div class="wrap page"><div class="br-wrap">
+    <div style="margin-bottom:14px"><h1 style="font-size:28px;margin:0 0 4px">Bridge</h1>
+      <p class="mu" style="margin:0;font-size:13.5px">Move XLM between Stellar and other networks. Send it to yourself or to any wallet.</p></div>
+    <div class="panel pb br-card" id="brCard"><div class="mu" style="font-size:13px">Loading…</div></div>
+    <div class="panel pb" style="margin-top:14px"><span class="mono mu">Your transfers</span><div id="brHist" style="margin-top:10px"></div></div>
+  </div></div>`;
+  let cfg;
+  try { cfg = await api('/bridge/config'); } catch (e) { $('#brCard').innerHTML = `<div class="mu">${esc(e.message)}</div>`; return; }
+  BRG.cfg = cfg;
+  const N = cfg.nets, soon = cfg.soon;
+  const st = { from: 'base', to: 'stellar', amount: '', addr: '', refund: '', q: null, qErr: '' };
+  const kindOf = (k) => N[k]?.kind;
+  const myAddr = (k) => kindOf(k) === 'stellar' ? (S.me?.stellarWallet || '') : kindOf(k) === 'evm' ? (S.me?.wallet || '') : '';
+  const netItems = () => BR_ORDER.map(k => ({ key: k, label: N[k]?.label || BR_SOON_LABEL[k], icon: brNetIco(k, 20), disabled: soon.includes(k) || !N[k], tag: soon.includes(k) ? 'Soon' : '' }));
+  const tokItems = (k) => [{ key: N[k].sym, label: N[k].sym, sub: N[k].name, icon: brTokIco(N[k].sym, k, 20) }];
+  const fix = (side) => {
+    const other = side === 'from' ? 'to' : 'from';
+    if ((st[side] === 'stellar') === (st[other] === 'stellar')) st[other] = st[side] === 'stellar' ? 'base' : 'stellar';
+    if (!st.addrTouched) st.addr = myAddr(st.to);
+    if (!st.refundTouched) st.refund = '';
+  };
+  const walletPays = () => kindOf(st.from) === 'evm' || kindOf(st.from) === 'stellar';
+  const paint = () => {
+    const A = N[st.from], Z = N[st.to];
+    $('#brCard').innerHTML = `
+      <div class="br-box"><div class="br-lbl"><span class="mono mu">From</span><span class="mu" id="brUsd"></span></div>
+        <div class="br-sel"><div class="br-dhost" id="brFN"></div><div class="br-dhost" id="brFT"></div></div>
+        <input id="brAmt" class="br-amt" inputmode="decimal" placeholder="0.0" value="${esc(st.amount)}" autocomplete="off"></div>
+      <div style="display:grid;place-items:center;margin:-6px 0"><button type="button" class="br-flip" id="brFlip" title="Swap direction">⇅</button></div>
+      <div class="br-box"><div class="br-lbl"><span class="mono mu">To</span><span class="mu" id="brOutUsd"></span></div>
+        <div class="br-sel"><div class="br-dhost" id="brTN"></div><div class="br-dhost" id="brTT"></div></div>
+        <div class="br-out" id="brOut">—</div></div>
+      <div class="br-box" style="padding-bottom:10px"><div class="br-lbl"><span class="mono mu">Destination wallet</span>
+        <button type="button" class="br-link" id="brMine">${myAddr(st.to) ? 'Use my wallet' : ''}</button></div>
+        <input id="brAddr" class="inp" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12.5px" placeholder="${esc(Z.label)} address" value="${esc(st.addr)}" autocomplete="off" spellcheck="false">
+        <div class="mu" style="font-size:11.5px;margin-top:5px">Your own wallet or anyone else's. Double-check it: transfers cannot be reversed.</div>
+        <div class="br-lbl" style="margin:12px 0 6px"><span class="mono mu">Refund address on ${esc(A.label)}</span></div>
+        <input id="brRef" class="inp" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12.5px" placeholder="${walletPays() ? 'Optional' : esc(A.label) + ' address you pay from'}" value="${esc(st.refund)}" autocomplete="off" spellcheck="false">
+        <div class="mu" style="font-size:11.5px;margin-top:5px">Only used if the transfer cannot complete.</div></div>
+      <div class="br-det" id="brDet"></div>
+      <button class="btn lg wide" id="brGo" disabled>Enter an amount</button>
+      ${cfg.on ? '' : '<div class="mu" style="font-size:12px;text-align:center;margin-top:8px">The bridge is paused for a moment.</div>'}`;
+    brDrop($('#brFN'), netItems(), st.from, (k) => { st.from = k; st.refundTouched = false; fix('from'); paint(); quote(); });
+    brDrop($('#brFT'), tokItems(st.from), A.sym, () => {});
+    brDrop($('#brTN'), netItems(), st.to, (k) => { st.to = k; st.addrTouched = false; fix('to'); paint(); quote(); });
+    brDrop($('#brTT'), tokItems(st.to), Z.sym, () => {});
+    $('#brAmt').oninput = () => { st.amount = $('#brAmt').value.replace(',', '.').replace(/[^0-9.]/g, ''); quote(); };
+    $('#brAddr').oninput = () => { st.addr = $('#brAddr').value.trim(); st.addrTouched = true; paintGo(); };
+    $('#brRef').oninput = () => { st.refund = $('#brRef').value.trim(); st.refundTouched = true; paintGo(); };
+    $('#brMine').onclick = () => { st.addr = myAddr(st.to); st.addrTouched = false; $('#brAddr').value = st.addr; paintGo(); };
+    $('#brFlip').onclick = () => { [st.from, st.to] = [st.to, st.from]; st.amount = ''; st.addrTouched = st.refundTouched = false; fix('from'); paint(); quote(); };
+    paintQuote();
+  };
+  const RX = { stellar: /^G[A-Z2-7]{55}$/, evm: /^0x[0-9a-fA-F]{40}$/, solana: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/, btc: /^(bc1[02-9ac-hj-np-z]{11,71}|[13][1-9A-HJ-NP-Za-km-z]{25,34})$/, tron: /^T[1-9A-HJ-NP-Za-km-z]{33}$/ };
+  const okAddr = (k, a) => RX[kindOf(k)]?.test(a || '') || false;
+  const paintGo = () => {
+    const g = $('#brGo'); if (!g) return;
+    const q = st.q;
+    const needRefund = !walletPays() && !okAddr(st.from, st.refund);
+    const ready = cfg.on && q && okAddr(st.to, st.addr) && !needRefund && (!st.refund || okAddr(st.from, st.refund));
+    g.disabled = !ready;
+    g.textContent = !cfg.on ? 'Paused' : !Number(st.amount) ? 'Enter an amount' : st.qErr ? st.qErr : !q ? 'Getting the best price…'
+      : !okAddr(st.to, st.addr) ? `Enter a ${N[st.to].label} address` : needRefund || (st.refund && !okAddr(st.from, st.refund)) ? `Enter your ${N[st.from].label} refund address`
+      : `Bridge ${st.amount} ${N[st.from].sym} → ${N[st.to].label}`;
+  };
+  const paintQuote = () => {
+    const q = st.q, Z = N[st.to];
+    $('#brOut').innerHTML = q ? `${esc(Number(q.amountOutFmt).toLocaleString('en-US', { maximumFractionDigits: Z.dec > 8 ? 8 : Z.dec }))} <span class="mu" style="font-size:15px">${esc(Z.sym)}</span>` : '—';
+    $('#brUsd').textContent = q ? '≈ ' + fmtUsd(q.inUsd) : '';
+    $('#brOutUsd').textContent = q ? '≈ ' + fmtUsd(q.outUsd) : '';
+    $('#brDet').innerHTML = q ? `
+      <div class="kv"><span>Rate</span><b>1 ${esc(N[st.from].sym)} ≈ ${(Number(q.amountOutFmt) / Number(q.amountInFmt)).toLocaleString('en-US', { maximumFractionDigits: 6 })} ${esc(Z.sym)}</b></div>
+      <div class="kv"><span>Fees</span><b>≈ ${fmtUsd(q.feesUsd)} <span class="mu" style="font-weight:500">incl. ${cfg.ourFeePct}% Rookery fee</span></b></div>
+      <div class="kv"><span>Arrives in</span><b>about ${Math.max(1, Math.round(q.seconds / 60))}–${Math.max(3, Math.round(q.seconds / 60) + 2)} min</b></div>
+      ${q.outUsd / q.inUsd < 0.96 ? `<div style="font-size:12px;color:#ffb84d;margin-top:6px">Network fees are high for this amount. A larger transfer gets a better rate.</div>` : ''}` : '';
+    paintGo();
+  };
+  let qt, qn = 0;
+  const quote = () => {
+    clearTimeout(qt); st.q = null; st.qErr = '';
+    if (!Number(st.amount)) { paintQuote(); return; }
+    paintQuote();
+    const my = ++qn;
+    qt = setTimeout(async () => {
+      try { const r = await api('/bridge/quote', { from: st.from, to: st.to, amount: st.amount }); if (my === qn) st.q = r.quote; }
+      catch (e) { if (my === qn) st.qErr = e.message; }
+      if (my === qn) paintQuote();
+    }, 450);
+  };
+  const go = async () => {
+    const g = $('#brGo'); g.disabled = true; g.textContent = 'Preparing…';
+    let id;
+    try {
+      const A = N[st.from];
+      let refund = st.refund, fromAddress = '', kind = null, evmFrom = '';
+      if (A.kind === 'evm') {
+        if (!window.ethereum) throw new Error('No EVM wallet found. Install MetaMask, Rabby or Coinbase Wallet, or pick a refund address and pay by hand.');
+        evmFrom = await EVMW.account();
+        if (!okAddr(st.from, refund)) refund = evmFrom;
+      } else if (A.kind === 'stellar') {
+        kind = await STW.detect();
+        if (kind) { fromAddress = await STW.connect(kind); if (!okAddr(st.from, refund)) refund = fromAddress; }
+        else if (!okAddr(st.from, refund)) throw new Error('Enter your Stellar refund address, then pay from any Stellar wallet');
+      }
+      const { order } = await api('/bridge/order', { from: st.from, to: st.to, amount: st.amount, recipient: st.addr, refund, fromAddress });
+      BRG.keep(order.ref);
+      if (A.kind === 'evm') {
+        id = BRG.card(order);
+        await EVMW.ensureChain(A.chainId);
+        TXW.set(id, { stage: 'sign' });
+        const tx = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from: evmFrom, to: order.depositAddress, value: EVMW.hex(order.amountInUnits) }] });
+        TXW.set(id, { stage: 'sent', tx });
+        api('/bridge/submit', { ref: order.ref, txHash: tx }).catch(() => {});
+        BRG.watch(id);
+      } else if (A.kind === 'stellar' && kind && order.xdr) {
+        id = BRG.card(order);
+        TXW.set(id, { stage: 'sign' });
+        const signed = await STW.signTx(kind, fromAddress, order.xdr, 'mainnet');
+        const r = await api('/bridge/submit', { ref: order.ref, xdr: signed });
+        TXW.set(id, { stage: 'sent', tx: r.txid });
+        BRG.watch(id);
+      } else {
+        BRG.manual(order, () => BRG.history());
+      }
+      st.amount = ''; st.q = null; paint(); BRG.history();
+    } catch (e) {
+      EVMW.close();
+      if (id) TXW.set(id, { stage: 'failed', ended: Date.now(), note: e?.code === 4001 ? 'Cancelled in the wallet. Nothing was sent.' : String(e.message || 'Not sent') });
+      if (e?.code === 4001) toast('Cancelled in the wallet. Nothing was sent.', 'bad'); else toast(esc(e.message || 'Bridge failed'), 'bad');
+      paintGo();
+    }
+  };
+  fix('from');
+  paint();
+  $('#brCard').addEventListener('click', (e) => { if (e.target.id === 'brGo') go(); });
+  BRG.history();
 }
 
 /* ═══════════ AUTH ═══════════ */
@@ -2824,7 +3175,7 @@ async function route() {
   // on-chain launchpads: the UI takes the selected chain's colour
   if (typeof ocTheme === 'function') {
     ocTheme(a === 'chain' ? b : null);
-    if (a !== 'chain') $('#netLabel').textContent = S.net === 'zero' ? 'Zero · LayerZero' : S.net === 'giwa' ? 'GIWA · Upbit' : S.net === 'stellar' ? 'Stellar · on-chain' : 'All networks';
+    if (a !== 'chain') $('#netLabel').textContent = netLong(S.net);
     if (a === 'stellar') $('#netLabel').textContent = 'Stellar · on-chain';
     document.documentElement.classList.toggle('st-page', a === 'stellar');
   }
@@ -2840,6 +3191,7 @@ async function route() {
     else if (a === 'u') await viewProfile(decodeURIComponent(b || ''));
     else if (a === 'login' || a === 'signup') viewAuth(a);
     else if (a === 'docs') viewDocs();
+    else if (a === 'bridge') await viewBridge();
     else if (a === 'proofs') await viewProofs(b);
     else if (a === 'chain' && typeof ocRoute === 'function') await ocRoute(b, c, d);
     else if (a === 'stellar' && typeof stRoute === 'function') await stRoute(b, c);
@@ -2873,3 +3225,148 @@ async function route() {
   window.addEventListener('hashchange', route);
   route();
 })();
+
+/* ═══════════ ROBINHOOD CHAIN · ON-CHAIN LAUNCHPAD ═══════════
+   Tokens are real ERC-20s from the first second. Buys and sells go from the user's wallet straight to the
+   RookeryCurve contract: Rookery only builds the transaction and shows the result. No account needed. */
+const RHW = {
+  CHAIN: 4663,
+  V_TOKEN: 1073000000n * 10n ** 18n,
+  async connect() {
+    const a = await EVMW.account();
+    await EVMW.ensureChain(RHW.CHAIN);
+    return a;
+  },
+  async peek() { try { const [a] = await EVMW.eth().request({ method: 'eth_accounts' }); return a || null; } catch { return null; } },
+  errMsg(e) {
+    if (e?.code === 4001 || /rejected|denied/i.test(e?.message || '')) return 'Cancelled in your wallet';
+    if (/insufficient funds/i.test(e?.message || '')) return 'Not enough ETH on Robinhood Chain in this wallet (amount + gas)';
+    return (e?.message || String(e)).replace(/^.*?reverted:?\s*/i, '').slice(0, 180);
+  },
+  async send(from, tx) {
+    const hash = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: tx.to, data: tx.data, value: tx.value }] });
+    let r = null;
+    for (let i = 0; i < 5; i++) { r = await api('/rh/sync', { hash }); if (!r.pending) break; }
+    if (r && r.ok === false) throw new Error(r.error || 'Transaction failed');
+    return { hash, ...r };
+  },
+  // same math as the contract (0.5% fee), for the estimate under the input
+  quote(m, side, amt) {
+    const vE = B(m.vQuote), real = B(m.reserveZro), sold = B(m.sold), k = vE * RHW.V_TOKEN;
+    const x = vE + real, y = RHW.V_TOKEN - sold;
+    if (side === 'buy') {
+      const net = amt - (amt * 50n) / 10000n;
+      const out = y - (k + (x + net) - 1n) / (x + net);
+      const left = B(m.curveTokens) * WEI - sold;
+      return out > left ? left : out;
+    }
+    let g = x - (k + (y + amt) - 1n) / (y + amt);
+    if (g > real) g = real;
+    return g - (g * 50n) / 10000n;
+  },
+  async watch(m) {
+    try {
+      await RHW.connect();
+      await EVMW.eth().request({ method: 'wallet_watchAsset', params: { type: 'ERC20', options: { address: m.rh.token, symbol: m.symbol.slice(0, 11), decimals: 18 } } });
+    } catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); }
+  },
+  async create(F) {
+    const btn = $('#createGo'); const label = btn.textContent; $('#cErr').textContent = '';
+    try {
+      btn.disabled = true;
+      const from = await RHW.connect();
+      const prep = await api('/rh/prepare-create', { ...F, devBuy: F.devBuy ? toWei(F.devBuy).toString() : '0' });
+      btn.textContent = 'Confirm in your wallet…';
+      const r = await RHW.send(from, prep.tx);
+      if (!r.market) throw new Error('Launched, indexing… refresh in a few seconds. Tx ' + r.hash.slice(0, 10));
+      toast(`<b>$${esc(F.symbol)}</b> is live on Robinhood Chain`);
+      location.hash = `#/t/${r.market}`;
+    } catch (e) { $('#cErr').textContent = RHW.errMsg(e); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  },
+  pane(m) {
+    const box = $('#rhPane'); if (!box) return;
+    const ex = m.rh.explorer || 'https://robinhoodchain.blockscout.com';
+    const contract = `<div class="st-asset" style="margin-top:12px">
+        <div class="kv"><span>Contract</span><b class="mono" style="font-size:11px;letter-spacing:0">${esc(short(m.rh.token))}</b><button class="mini" data-copy="${esc(m.rh.token)}">Copy</button></div>
+        <div style="display:flex;gap:6px;margin-top:6px"><a class="btn sm ghost" style="flex:1" target="_blank" rel="noopener" href="${esc(ex)}/token/${esc(m.rh.token)}">Explorer ↗</a>
+        <button class="btn sm ghost" style="flex:1" id="rhWatch">Add to wallet</button></div></div>`;
+    if (m.migrated || m.graduated) {
+      box.innerHTML = `<span class="net-ico rh" style="width:40px;height:40px"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span>
+        <h3 style="font-size:16px;margin:12px 0 6px">${m.migrated ? 'Trading on Uniswap v3' : 'Graduating to Uniswap v3…'}</h3>
+        <p class="mu" style="font-size:13px;line-height:1.55;margin-bottom:10px">${m.migrated
+          ? `$${esc(m.symbol)} sold out its curve. The raise and the reserved supply sit in a full-range Uniswap v3 pool on Robinhood Chain (1% tier) and the LP NFT was sent to the dead address. Your tokens are already in your wallet: trade them in any wallet or DEX that supports Robinhood Chain.`
+          : 'The curve is sold out. The contract is opening the Uniswap v3 pool and burning the LP. This takes a few seconds.'}</p>
+        ${m.rh.pool ? `<a class="btn lg wide" target="_blank" rel="noopener" href="${esc(ex)}/address/${esc(m.rh.pool)}">View the pool ↗</a>` : ''}${contract}
+        <div class="kv" style="margin-top:10px"><span>In your wallet</span><b id="rhBal">—</b></div>`;
+      $('#rhWatch').onclick = () => RHW.watch(m);
+      RHW.paintBal(m);
+      return;
+    }
+    let side = 'buy', addr = null;
+    box.innerHTML = `<div class="tb-tabs"><button class="buy on" data-rs="buy">Buy</button><button class="sell" data-rs="sell">Sell</button></div>
+      <div class="amt"><input id="rhAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="rhUnit">ETH</span></div>
+      <div class="quick" id="rhQuick"></div>
+      <div class="est" id="rhEst"></div>
+      <button class="btn lg wide up" id="rhGo">Buy from wallet</button>
+      <p class="mu" style="font-size:11.5px;line-height:1.5;margin:10px 0 0">On-chain on Robinhood Chain: your wallet signs one transaction with the RookeryCurve contract and the tokens land in that wallet. No account, no deposit. The 0.5% fee goes to the $臭企鹅 buy &amp; burn.</p>
+      ${contract}
+      <div class="kv" style="margin-top:10px"><span>In your wallet</span><b id="rhBal">—</b></div>`;
+    const amtIn = () => { try { return toWei(($('#rhAmt').value || '0').replace(',', '.')); } catch { return 0n; } };
+    const est = () => {
+      const a = amtIn();
+      if (a <= 0n) { $('#rhEst').innerHTML = ''; return; }
+      const q = RHW.quote(m, side, a);
+      $('#rhEst').innerHTML = side === 'buy'
+        ? `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(q, 2))} $${esc(m.symbol)}</b></div><div class="kv"><span>Slippage guard</span><b>3%</b></div>`
+        : `<div class="kv"><span>You get ≈</span><b>${esc(weiToStr(q, 6))} ETH</b></div><div class="kv"><span>Slippage guard</span><b>3%</b></div>`;
+    };
+    const quick = () => {
+      $('#rhUnit').textContent = side === 'buy' ? 'ETH' : '$' + m.symbol;
+      $('#rhGo').textContent = side === 'buy' ? 'Buy from wallet' : 'Sell from wallet';
+      $('#rhGo').className = 'btn lg wide ' + (side === 'buy' ? 'up' : 'dn');
+      $('#rhQuick').innerHTML = side === 'buy'
+        ? ['0.005', '0.01', '0.05', '0.1'].map(v => `<button data-v="${v}">${v} ETH</button>`).join('')
+        : ['25', '50', '100'].map(v => `<button data-p="${v}">${v}%</button>`).join('');
+      $$('#rhQuick button').forEach(b => b.onclick = async () => {
+        if (b.dataset.v) $('#rhAmt').value = b.dataset.v;
+        else {
+          const bal = await RHW.balance(m, addr || await RHW.peek());
+          const part = (bal * BigInt(b.dataset.p)) / 100n;
+          $('#rhAmt').value = (Number(part / 10n ** 12n) / 1e6).toString();
+        }
+        est();
+      });
+      est();
+    };
+    $$('[data-rs]').forEach(b => b.onclick = () => { side = b.dataset.rs; $$('[data-rs]').forEach(x => x.classList.toggle('on', x === b)); $('#rhAmt').value = ''; quick(); });
+    $('#rhAmt').oninput = est;
+    $('#rhWatch').onclick = () => RHW.watch(m);
+    $('#rhGo').onclick = async () => {
+      const a = amtIn();
+      if (a <= 0n) return toast('Enter an amount', 'bad');
+      const btn = $('#rhGo'); btn.disabled = true;
+      try {
+        addr = await RHW.connect();
+        const prep = await api('/rh/prepare-trade', { market: m.id, side, amount: a.toString(), slipBps: 300 });
+        btn.textContent = 'Confirm in your wallet…';
+        await RHW.send(addr, prep.tx);
+        toast(side === 'buy' ? `Bought $${esc(m.symbol)}: the tokens are in your wallet` : `Sold $${esc(m.symbol)}: the ETH is in your wallet`);
+        viewToken(m.id);
+      } catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); }
+      finally { btn.disabled = false; quick(); }
+    };
+    quick();
+    RHW.paintBal(m);
+  },
+  async balance(m, a) {
+    if (!a) return 0n;
+    try { return B((await api(`/rh/balance?market=${encodeURIComponent(m.id)}&address=${a}`)).balance); } catch { return 0n; }
+  },
+  async paintBal(m) {
+    const a = await RHW.peek();
+    const el = $('#rhBal'); if (!el) return;
+    if (!a) { el.innerHTML = '<span class="mu">connect a wallet</span>'; return; }
+    el.textContent = `${weiToStr(await RHW.balance(m, a), 2)} $${m.symbol}`;
+  },
+};
