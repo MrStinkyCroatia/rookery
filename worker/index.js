@@ -3484,6 +3484,19 @@ export class Books {
         if (p === '/admin/recover') { try { return json({ ok: true, recovered: await this.wserial(() => this.recoverWithdrawals()) }); } catch (e) { return json({ ok: false, error: String(e.stack || e) }); } }
         if (p === '/admin/sweep') return json({ ok: true, swept: await this.wserial(() => this.sweepDeposits()) });
         if (p === '/admin/scan') return json({ ok: true, scan: await this.scanDeposits() });
+        // one-time export of the EVM hot wallet key (the master secret is write-only; the key is derived here)
+        // default: sent to the owner's private Telegram chat, never printed in a response
+        if (p === '/admin/hotkey') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          const w = this.hotWallet(), chat = this.meta('tg_owner_chat');
+          if (b.to === 'telegram') {
+            if (!chat || !this.env.TG_BOT_TOKEN) return json({ error: 'no owner chat configured' });
+            await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
+              text: `<b>Hot wallet key</b>\n<code>${w.address}</code>\n<code>${w.privateKey}</code>\n\nSave it offline and delete this message. Anyone with this key can move every deposit on the four EVM chains.` });
+            return json({ ok: true, sent: true, address: w.address });
+          }
+          return json({ ok: true, address: w.address, key: w.privateKey, note: 'shown once: store it offline' });
+        }
         if (p === '/admin/rh') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
           if (b.action === 'fund') return json({ ok: true, ...(await this.rhFund(b)) });
