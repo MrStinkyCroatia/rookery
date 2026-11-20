@@ -3650,8 +3650,26 @@ export class Books {
           out.users = this.sql.exec('SELECT COUNT(*) c FROM snb_users').one().c;
           out.trades24h = this.sql.exec('SELECT COUNT(*) c FROM snb_log WHERE ts>?', now() - 864e5).one().c;
           out.live = this.sql.exec('SELECT COUNT(*) c FROM snb_terms').one().c;
+          // who actually traded vs who only opened the bot
+          out.tradesTotal = this.sql.exec('SELECT COUNT(*) c FROM snb_log').one().c;
+          out.traders = this.sql.exec('SELECT COUNT(DISTINCT user_id) c FROM snb_log').one().c;
+          out.traders7d = this.sql.exec('SELECT COUNT(DISTINCT user_id) c FROM snb_log WHERE ts>?', now() - 7 * 864e5).one().c;
+          out.lastTrade = this.sql.exec('SELECT MAX(ts) t FROM snb_log').one().t || 0;
+          out.new7d = this.sql.exec('SELECT COUNT(*) c FROM snb_users WHERE created>?', now() - 7 * 864e5).one().c;
+          out.top = this.sql.exec(`SELECT l.user_id, u.username, u.tg_id, COUNT(*) n, MAX(l.ts) last FROM snb_log l
+            LEFT JOIN snb_users u ON u.user_id=l.user_id GROUP BY l.user_id ORDER BY n DESC LIMIT 6`).toArray();
           out.feeBps = Number(this.snbFeeBps()); out.on = this.snbOn(); out.botName = this.snbBot(); if (b.hook) out.hook = '/api/snb/hook/' + this.meta('snb_secret');
           return json(out);
+        }
+        if (p === '/admin/snbstats') {
+          this.snbInit();
+          return json({ ok: true,
+            tradesTotal: this.sql.exec('SELECT COUNT(*) c FROM snb_log').one().c,
+            traders: this.sql.exec('SELECT COUNT(DISTINCT user_id) c FROM snb_log').one().c,
+            traders7d: this.sql.exec('SELECT COUNT(DISTINCT user_id) c FROM snb_log WHERE ts>?', now() - 7 * 864e5).one().c,
+            users: this.sql.exec('SELECT COUNT(*) c FROM snb_users').one().c,
+            new7d: this.sql.exec('SELECT COUNT(*) c FROM snb_users WHERE created>?', now() - 7 * 864e5).one().c,
+            lastTrade: this.sql.exec('SELECT MAX(ts) t FROM snb_log').one().t || 0 });
         }
         if (p === '/admin/tg/setup') {
           if (!this.env.TG_BOT_TOKEN) throw new Error('Set the TG_BOT_TOKEN secret first');
