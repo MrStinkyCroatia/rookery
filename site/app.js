@@ -1574,9 +1574,11 @@ async function viewToken(id) {
       go.textContent = S.me ? 'Sell' : 'Log in to trade';
     }
   }
-  $$('.tb-tabs button').forEach(b => b.onclick = () => {
+  // the wallet panel on Robinhood Chain tokens has its own tabs (data-rs); never bind over them
+  const tabBtns = $$('.tb-tabs button').filter(b => !(b.closest && b.closest('#rhPane')));
+  tabBtns.forEach(b => b.onclick = () => {
     side = b.dataset.side;
-    $$('.tb-tabs button').forEach(x => x.classList.toggle('on', x === b));
+    tabBtns.forEach(x => x.classList.toggle('on', x === b));
     paintPay();
     go.className = `btn lg wide ${side === 'buy' ? 'up' : 'dn'}`;
     $('#qbRow').style.display = side === 'buy' ? '' : 'none';
