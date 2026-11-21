@@ -3479,9 +3479,10 @@ document.addEventListener('click', async (e) => {
   } catch (err) { toast(esc(err.message), 'bad'); }
   finally { b.disabled = false; }
 });
-function ltcPaintAddr() {
+function ltcPaintAddr(tries = 0) {
   const el = $('#ltcAddrBox'); if (!el) return;
   const a = S.me?.ltcAddress;
+  if (!a && tries < 8) { setTimeout(() => { const e2 = $('#ltcAddrBox'); if (e2 && !e2.innerText.trim()) ltcPaintAddr(tries + 1); }, 600); }
   el.innerHTML = a
     ? `<div class="st-asset"><div class="kv"><span>Your deposit address (Litecoin, segwit)</span><b class="mono" style="font-size:11px;letter-spacing:0;word-break:break-all">${esc(a)}</b><button class="mini" data-copy="${esc(a)}">Copy</button></div>
        <p class="mu" style="font-size:12px;line-height:1.5;margin:8px 0 0">One address, always yours — send any amount whenever you want, no expiry. Credited 1:1 in LTC as soon as the transaction confirms.</p></div>`
@@ -3501,4 +3502,10 @@ async function ltcPaintList() {
   } catch { /* ignore */ }
 }
 ltcPaintAddr();
+// the wallet view can mount before or after the account arrives: paint as soon as the box shows up empty
+let ltcMo = null;
+new MutationObserver(() => {
+  if (ltcMo) return;
+  ltcMo = setTimeout(() => { ltcMo = null; const el = $('#ltcAddrBox'); if (el && el.innerText.trim() === '') ltcPaintAddr(); }, 150);
+}).observe(document.body, { childList: true, subtree: true });
 setInterval(() => { if ($('#ltcList') && S.me) { ltcPaintList(); ltcPaintAddr(); } }, 8000);
