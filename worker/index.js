@@ -2878,7 +2878,7 @@ export class Books {
         const m = this.market(id);
         const trades = this.sql.exec(`SELECT t.*, u.username, u.id uid FROM trades t LEFT JOIN users u ON u.id=t.user_id
           WHERE market=? ORDER BY t.id DESC LIMIT 400`, id).toArray().reverse();
-        const holders = m?.rh_token ? this.rhHolders(m, 50).map(h => ({ amount: h.amount, username: h.username || (h.tag ? h.tag : h.address.slice(0, 6) + '…' + h.address.slice(-4)),
+        const holders = m?.rh_token ? this.rhHolders(m, 50).map(h => ({ amount: h.amount, pct: h.pct, tag: h.tag, address: h.address, username: h.username || (h.tag ? h.tag : h.address.slice(0, 6) + '…' + h.address.slice(-4)),
           uid: h.username ? this.sql.exec('SELECT id FROM users WHERE username=?', h.username).toArray()[0]?.id : null, address: h.address, tag: h.tag })) : this.sql.exec(`SELECT b.amount, u.username, u.id uid FROM balances b JOIN users u ON u.id=b.user_id
           WHERE b.asset=? AND b.amount!='0'`, 't:' + id).toArray()
           .sort((a, b) => (B(b.amount) > B(a.amount) ? 1 : -1)).slice(0, 50)
@@ -3355,6 +3355,7 @@ export class Books {
           this.ctx.storage.transactionSync(() => {
             const as = ['eth', 'zro', 'xlm', 'ltc', 'zltc'].includes(b.asset) ? b.asset : 'zro';
             this.addBal(u.id, as, B(b.amount));
+            this.setMeta('adj_' + as, (B(this.meta('adj_' + as) || 0) + B(b.amount)).toString());   // visible in the ledger report
             this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?)`,
               u.id, 'deposit', b.chain || 'manual', String(b.amount), 'confirmed', b.note || 'Manual credit', now(), as);
           });
@@ -3487,6 +3488,18 @@ export class Books {
           //   deposits - withdrawals - desk - migrated(zro) + migrated(eth) - burn jobs
           //   == user balances + curve/pool reserves + platform burn reserve + accrued-unpaid rewards
           const out = {};
+          if (method === 'POST') {
+            // explicit reconciliation entry: written by hand, shown in the report, never touches user balances
+            const b = await req.json().catch(() => ({}));
+            if (b.adjust && ['zro', 'eth', 'xlm', 'ltc'].includes(b.adjust)) {
+              const amt = B(b.amount || 0);
+              this.setMeta('adj_' + b.adjust, (B(this.meta('adj_' + b.adjust) || 0) + amt).toString());
+              const log = JSON.parse(this.meta('adj_log') || '[]');
+              log.push({ ts: now(), asset: b.adjust, amount: amt.toString(), note: String(b.note || '').slice(0, 200) });
+              this.setMeta('adj_log', JSON.stringify(log.slice(-50)));
+              out.adjusted = { asset: b.adjust, amount: amt.toString(), total: this.meta('adj_' + b.adjust) };
+            }
+          }
           const mk = this.sql.exec('SELECT * FROM markets').toArray();
           for (const a of ['zro', 'eth', 'xlm']) {
             const sum = (sql, ...args) => this.sql.exec(sql, ...args).toArray().reduce((s, r) => s + B(r.amount), 0n);
@@ -3503,12 +3516,14 @@ export class Books {
             const jobs = a === 'zro' ? this.sql.exec('SELECT zro FROM burn_jobs').toArray().reduce((s, j) => s + B(j.zro), 0n) : 0n;
             const desk = B(this.meta('desk_' + a));
             const mig = a === 'zro' ? -B(this.meta('migrated_zro_reserve')) : a === 'xlm' ? -B(this.meta('xlm_graduated_out')) : B(this.meta('migrated_eth_reserve'));
-            const inflow = dep - wd - desk + mig - jobs;
+            const adj = B(this.meta('adj_' + a));                            // manual credits/debits, listed separately
+            const inflow = dep - wd - desk + mig - jobs + adj;
             const held = bal + curves + burnRes + pend;
-            out[a] = { deposits: dep.toString(), withdrawals: wd.toString(), desk: desk.toString(), migrated: mig.toString(), burnJobs: jobs.toString(),
+            out[a] = { deposits: dep.toString(), withdrawals: wd.toString(), desk: desk.toString(), migrated: mig.toString(), burnJobs: jobs.toString(), adjustments: adj.toString(),
               balances: bal.toString(), curves: curves.toString(), burnReserve: burnRes.toString(), pendingRewards: pend.toString(),
               inflow: inflow.toString(), held: held.toString(), diff: (inflow - held).toString(), diffUnits: Number(inflow - held) / 1e18 };
           }
+          out.adjustLog = JSON.parse(this.meta('adj_log') || '[]');
           return json({ ok: true, ...out });
         }
         if (p === '/admin/pos') {

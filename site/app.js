@@ -340,6 +340,7 @@ async function loadStats() {
 async function loadMe() {
   try { S.me = await api('/me'); } catch { S.me = null; }
   paintAcct();
+  try { if (typeof ltcPaintAddr === 'function' && $('#ltcAddrBox')) ltcPaintAddr(); } catch { /* wallet view not open */ }
 }
 function paintAcct() {
   const el = $('#acct');
@@ -1623,7 +1624,7 @@ async function viewToken(id) {
         ${burnedPct > 0 ? `<div class="row holder"><span class="mu">—</span><span class="who"><b>Burned</b></span><span style="text-align:right">${fmtT(m.burned)}</span><span style="text-align:right">${burnedPct.toFixed(2)}%</span></div>` : ''}
         ${d.holders.map((x, i) => `<div class="row holder"><span class="mu">${i + 1}</span>
           <span class="who"><a href="#/u/${encodeURIComponent(x.username)}">${esc(x.username)}</a>${badgeHTML(x.badges)}${x.creator ? '<span class="tag">DEV</span>' : ''}</span>
-          <span style="text-align:right">${fmtT(x.amount)}</span><span style="text-align:right">${x.pct.toFixed(2)}%<div class="pct-bar"><i style="width:${Math.min(100, x.pct * 5)}%"></i></div></span></div>`).join('')}
+          <span style="text-align:right">${fmtT(x.amount)}</span><span style="text-align:right">${Number(x.pct || 0).toFixed(2)}%<div class="pct-bar"><i style="width:${Math.min(100, Number(x.pct || 0) * 5)}%"></i></div></span></div>`).join('')}
       </div>`;
     } else if (tab === 'comments') {
       body.innerHTML = `${S.me ? `<div class="cmt-form"><textarea id="cBody" placeholder="Say something about ${esc(m.symbol)}…" maxlength="500"></textarea><button class="btn" id="cGo">Post</button></div>`
