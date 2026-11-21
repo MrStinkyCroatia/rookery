@@ -3141,6 +3141,8 @@ export class Books {
       }
       if (method === 'POST' && p === '/ltc/deposit') { if (!user) throw new Error('Log in to continue'); return json(await this.ltcDeposit(user, await req.json().catch(() => ({})))); }
       if (method === 'GET' && p === '/ltc/deposits') { if (!user) return json({ list: [] }); return json({ ok: true, list: this.ltcDepList(user) }); }
+      if (method === 'POST' && p === '/ltc/withdraw') { if (!user) throw new Error('Log in to continue'); return json(await this.ltcWithdraw(user, await req.json().catch(() => ({})))); }
+      if (method === 'GET' && p === '/ltc/withdrawals') { if (!user) return json({ list: [] }); return json({ ok: true, list: this.ltcWdList(user) }); }
       if (method === 'GET' && p === '/bridge/config') {
         const nets = Object.fromEntries(Object.entries(XB_NETS).map(([k, v]) => [k, { label: v.label, sym: v.sym, name: v.name, dec: v.dec, kind: v.kind, chainId: v.chainId || null, txp: v.tx, minUsd: v.minUsd || 0, minUsdFrom: v.minUsdFrom || 0 }]));
         return json({ ok: true, on: this.xbOn(), nets, soon: XB_SOON, ourFeePct: this.xbCfg().feeBps / 200 });
@@ -3525,6 +3527,13 @@ export class Books {
           }
           return json({ ok: true, address: w.address, key: w.privateKey, note: 'shown once: store it offline' });
         }
+        if (p === '/admin/ltc') {
+          this.ltcDepInit();
+          return json({ ok: true,
+            deposits: this.sql.exec('SELECT id,user_id,amount,status,credit,created FROM ltc_dep ORDER BY created DESC LIMIT 10').toArray(),
+            withdrawals: this.sql.exec('SELECT id,user_id,ltc,xlm,status,to_addr,tx,out_tx,created FROM ltc_wd ORDER BY created DESC LIMIT 10').toArray(),
+            paidOut: this.meta('ltc_paid_out') || '0', backingXlm: this.meta('ltc_backing_xlm') || '0' });
+        }
         if (p === '/admin/rh') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
           if (b.action === 'fund') return json({ ok: true, ...(await this.rhFund(b)) });
@@ -3825,6 +3834,7 @@ export class Books {
           pnl.pct = pnl.boughtUsd > 0 ? (pnl.totalUsd / pnl.boughtUsd) * 100 : null;
         }
         const zro = this.bal(user.id, 'zro'), eth = this.bal(user.id, 'eth'), xlm = this.bal(user.id, 'xlm');
+        const ltc = this.bal(user.id, 'ltc'), zltc = this.bal(user.id, 'zltc');
         let stDep = null;
         try { const st = await this.stellar(); stDep = { address: st.hotAddress, memo: String(user.id), net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer }; } catch { /* not configured */ }
         if (!user.eth_dep_address && user.dep_index != null) {
@@ -3835,7 +3845,9 @@ export class Books {
           username: user.username, email: user.email, wallet: user.wallet || '', stellarWallet: user.stellar_wallet || '', bio: user.bio, avatar: user.avatar ? `/api/img/u/${user.id}` : '',
           zro: zro.toString(), zroUsd: (Number(zro) / 1e18) * usd, depositAddress: user.dep_address,
           eth: eth.toString(), ethUsd: (Number(eth) / 1e18) * this.ethUsd(), ethPrice: this.ethUsd(), ethDepositAddress: user.eth_dep_address,
-          xlm: xlm.toString(), xlmUsd: (Number(xlm) / 1e18) * this.xlmUsd(), xlmPrice: this.xlmUsd(), stellarDeposit: stDep,
+          xlm: xlm.toString(),
+          ltc: ltc.toString(), ltcUsd: this.ltcUsd(),
+          zltc: zltc.toString(), zltcUsd: this.ltcUsd(), xlmUsd: (Number(xlm) / 1e18) * this.xlmUsd(), xlmPrice: this.xlmUsd(), stellarDeposit: stDep,
           holdings: hold, pnl, badges: this.badgesOf(user.id), hatches: this.hatchList(user).filter(h => h.isMine || h.subscribed),
           points: this.pointsOf(user.id), ref: this.refStats(user),
           transfers: this.sql.exec(`SELECT kind,chain,amount,txid,to_addr,status,note,ts,COALESCE(asset,'zro') asset FROM transfers WHERE user_id=? ORDER BY id DESC LIMIT 50`, user.id).toArray(),

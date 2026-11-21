@@ -1962,6 +1962,13 @@ async function viewWallet() {
         <button class="btn" id="ltcGo">Get deposit address</button></div>
       <div id="ltcOut" style="margin-top:10px"></div>
       <div id="ltcList" class="mu" style="font-size:12px;margin-top:8px"></div>
+      <hr class="sep">
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px"><b style="font-size:14px">Withdraw LTC</b><span class="mu" style="font-size:12px">paid out through the same bridge, min 0.01 LTC</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input class="inp" id="ltcWAmt" inputmode="decimal" placeholder="0.01" style="max-width:150px">
+        <input class="inp" id="ltcWTo" placeholder="Your Litecoin address (ltc1… or L…)" style="flex:1;min-width:240px">
+        <button class="btn ghost" id="ltcWGo">Withdraw</button></div>
+      <div id="ltcWOut" style="margin-top:8px"></div>
     </div>
     <div class="wallet">
       <div class="panel pb">
@@ -3455,12 +3462,31 @@ document.addEventListener('click', async (e) => {
   } catch (err) { toast(esc(err.message), 'bad'); }
   finally { b.disabled = false; }
 });
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest && e.target.closest('#ltcWGo');
+  if (!b) return;
+  e.preventDefault();
+  if (!S.me) return toast('Log in to withdraw', 'bad');
+  const amt = $('#ltcWAmt')?.value || '', to = ($('#ltcWTo')?.value || '').trim();
+  b.disabled = true;
+  try {
+    const r = await api('/ltc/withdraw', { amount: amt, to });
+    $('#ltcWOut').innerHTML = `<div class="kv"><span>Sent ${esc(r.xlm)} XLM through the bridge</span><b>≈ ${esc(r.expects || '')} LTC</b></div><p class="mu" style="font-size:12px;margin:6px 0 0">Arrives at ${esc(r.address)} in a few minutes. If the bridge fails, the LTC comes back to your balance automatically.</p>`;
+    ltcPaintList();
+  } catch (err) { toast(esc(err.message), 'bad'); }
+  finally { b.disabled = false; }
+});
 async function ltcPaintList() {
   const el = $('#ltcList'); if (!el || !S.me) return;
   try {
     const d = await api('/ltc/deposits');
-    const rows = (d.list || []);
-    el.innerHTML = rows.length ? 'Recent deposits: ' + rows.map(r => `${esc(r.amount)} LTC · <b>${esc(r.status)}</b>${B(r.credit) > 0n ? ' · credited ' + (Number(B(r.credit)) / 1e18).toFixed(4) : ''}`).join(' · ') : '';
+    const rows = (d.list || []).map(r => `${esc(r.amount)} LTC · <b>${esc(r.status)}</b>${B(r.credit) > 0n ? ' · credited ' + (Number(B(r.credit)) / 1e18).toFixed(4) : ''}`);
+    const w = await api('/ltc/withdrawals');
+    const wd = (w.list || []).map(x => `${x.ltc ? (Number(B(x.ltc)) / 1e18).toFixed(4) : '0'} LTC · ${esc(x.status)}`);
+    const parts = [];
+    if (rows.length) parts.push('Recent deposits: ' + rows.join(' · '));
+    if (wd.length) parts.push('withdrawals: ' + wd.join(' · '));
+    el.innerHTML = parts.join(' — ');
   } catch { /* ignore */ }
 }
 setInterval(() => { if ($('#ltcList') && S.me) ltcPaintList(); }, 8000);
