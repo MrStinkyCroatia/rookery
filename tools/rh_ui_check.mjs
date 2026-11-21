@@ -22,7 +22,8 @@ await cmd('Page.enable'); await cmd('Runtime.enable');
 await cmd('Emulation.setDeviceMetricsOverride', { width: 1400, height: 1100, deviceScaleFactor: 1, mobile: false });
 await cmd('Page.navigate', { url: BASE + '/?nocache=' + Date.now() + '#/create' });
 await sleep(6000);
-await ev(`document.querySelector('#netPick [data-n="robinhood"]').click()`);
+const NET = process.env.NET || 'robinhood';
+await ev(`document.querySelector('#netPick [data-n="${NET}"]').click()`);
 await sleep(800);
 const r = await ev(`(() => ({ rhLive: !!(window.S && S.rh && S.rh.live), appJs: [...document.scripts].map(s => s.src).find(s => /app\\.js/.test(s)),
   btn: document.querySelector('#createGo')?.textContent, fee: document.querySelector('#cFee')?.textContent,

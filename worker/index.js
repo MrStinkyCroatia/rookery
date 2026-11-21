@@ -36,6 +36,7 @@ const NETWORKS = {
   giwa: { label: 'GIWA', by: 'Upbit', launchAt: null, status: 'Testnet · mainnet TBA' },
   robinhood: { label: 'Robinhood Chain', by: 'Robinhood', launchAt: null, status: 'Live · Ethereum L2', live: true },
   stellar: { label: 'Stellar', by: 'SDF', launchAt: null, status: 'Live · graduates to Aquarius', live: true },
+  litvm: { label: 'LitVM', by: 'Litecoin', launchAt: null, status: 'Pre-market · Litecoin EVM', live: true },
 };
 // Stellar markets: quoted in XLM, graduate at this market cap into an Aquarius pool (LP burned)
 const STELLAR_GRAD_USD = 46000;
@@ -48,7 +49,7 @@ const LIMITS = { maxWithdraw: 5000n * WEI, dailyWithdraw: 20000n * WEI, minBuy: 
 // which we never top up with gas, so our gas never mixes with user deposits.
 const ETH_OFFSET = 1_000_000_000;
 const ETH_CHAINS = ['ethereum', 'base', 'arbitrum', 'robinhood'];
-const MIN_BUY = { zro: WEI / 10n, eth: WEI / 20000n, xlm: WEI };   // ... · 1 XLM      // 0.1 ZRO · 0.00005 ETH
+const MIN_BUY = { zro: WEI / 10n, eth: WEI / 20000n, xlm: WEI, ltc: WEI / 1000n, zltc: WEI / 1000n };   // ... · 1 XLM      // 0.1 ZRO · 0.00005 ETH
 // points tiers: what they unlock at mainnet. Nothing here is money.
 const TIERS = [
   { id: 'egg', min: 0, label: 'Egg', perk: 'everyone starts here' },
@@ -198,7 +199,7 @@ const json = (data, status = 200, headers = {}) =>
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 const randHex = (n) => hex(crypto.getRandomValues(new Uint8Array(n)));
 const B = (v) => BigInt(v ?? 0);
-const qa = (m) => (m.quote === 'ETH' ? 'eth' : m.quote === 'XLM' ? 'xlm' : 'zro'); // a market's quote asset (ledger key)
+const qa = (m) => (m.quote === 'ETH' ? 'eth' : m.quote === 'XLM' ? 'xlm' : m.quote === 'ZKLTC' ? 'zltc' : m.quote === 'LTC' ? 'ltc' : 'zro'); // a market's quote asset (ledger key)
 const vQuote = (m) => (m.v_wei ? B(m.v_wei) : B(m.v_zro) * WEI);       // virtual quote reserve of the curve, in wei
 const burnKey = (a) => (a === 'eth' ? 'plaunch_burn_eth' : a === 'xlm' ? 'plaunch_burn_xlm' : 'plaunch_burn');
 const now = () => Date.now();
@@ -989,7 +990,10 @@ export class Books {
   zroUsd() { return Number(this.meta('zro_usd') || 1.5); }
   ethUsd() { return Number(this.meta('eth_usd') || 3000); }
   xlmUsd() { return Number(this.meta('xlm_usd') || 0.14); }
-  usdOf(a) { return a === 'eth' ? this.ethUsd() : a === 'xlm' ? this.xlmUsd() : this.zroUsd(); }
+  // LTC and its LitVM form zkLTC trade 1:1 on the Litecoin side, so one price drives both
+  ltcUsd() { return Number(this.meta('ltc_usd') || 120); }
+  zltcUsd() { return this.ltcUsd(); }
+  usdOf(a) { return a === 'eth' ? this.ethUsd() : a === 'xlm' ? this.xlmUsd() : a === 'ltc' || a === 'zltc' ? this.ltcUsd() : this.zroUsd(); }
   async refreshSecondary() {
     const set = (k, v) => { if (v > 0 && isFinite(v)) { this.setMeta(k, v); this.setMeta(k + '_ts', now()); return true; } return false; };
     const first = async (k, fns) => { for (const f of fns) { try { if (set(k, await f())) { this.setMeta(k + '_src', f.name || ''); return; } } catch {} } };
@@ -1009,6 +1013,12 @@ export class Books {
         async function coinbase() { return Number((await get('https://api.coinbase.com/v2/prices/XLM-USD/spot')).data.amount); },
         async function kraken() { const j = await get('https://api.kraken.com/0/public/Ticker?pair=XLMUSD'); return Number(Object.values(j.result)[0].c[0]); },
       ]),
+      // LTC (LitVM pairs are quoted in zkLTC, which is LTC 1:1)
+      first('ltc_usd', [async function okx() { return Number((await get('https://www.okx.com/api/v5/market/ticker?instId=LTC-USDT')).data[0].last); }]),
+      first('ltc_usd_b', [
+        async function coinbase() { return Number((await get('https://api.coinbase.com/v2/prices/LTC-USD/spot')).data.amount); },
+        async function kraken() { const j = await get('https://api.kraken.com/0/public/Ticker?pair=LTCUSD'); return Number(Object.values(j.result)[0].c[0]); },
+      ]),
       // ZRO, independent second source (primary comes from refreshPrice, usually OKX)
       first('zro_usd_b', [
         async function kucoin() { return Number((await get('https://api.kucoin.com/api/v1/market/stats?symbol=ZRO-USDT')).data.last); },
@@ -1021,14 +1031,15 @@ export class Books {
   // prices for instant conversions: two independent sources per asset, fresh, and agreeing within 2%
   swapPx() {
     const t = now(), out = {};
-    for (const [a, k] of [['eth', 'eth_usd'], ['zro', 'zro_usd']]) {
+    for (const [a, k] of [['eth', 'eth_usd'], ['zro', 'zro_usd'], ['ltc', 'ltc_usd']]) {
       const p1 = Number(this.meta(k)), p2 = Number(this.meta(k + '_b'));
-      const t1 = a === 'zro' ? Number(this.meta('zro_ts')) : Number(this.meta('eth_usd_ts'));
+      const t1 = a === 'zro' ? Number(this.meta('zro_ts')) : Number(this.meta(k + '_ts'));
       const t2 = Number(this.meta(k + '_b_ts'));
       if (!(p1 > 0 && p2 > 0) || t - t1 > 180_000 || t - t2 > 180_000) throw new Error('Live prices are updating, try again in a few seconds');
       if (Math.abs(p1 - p2) / Math.min(p1, p2) > 0.02) throw new Error('Price sources disagree right now, instant conversion is paused for a moment');
       out[a] = (p1 + p2) / 2;
     }
+    out.zltc = out.ltc;                 // zkLTC is LTC 1:1 on the LitVM side
     return out;
   }
   // instant ETH<->ZRO conversion inside the ledger (runs inside the caller's transaction)
@@ -1581,7 +1592,7 @@ export class Books {
     this.ctx.storage.transactionSync(() => {
       const m0 = this.market(market), q = qa(m0);
       const via = pay && pay !== q ? pay : null;
-      if (via && !['eth', 'zro'].includes(via)) throw new Error('Unsupported payment asset');
+      if (via && !['eth', 'zro', 'ltc', 'zltc'].includes(via)) throw new Error('Unsupported payment asset');
       if (via && q === 'xlm') throw new Error('Stellar tokens are bought and sold in XLM');
       if (via === 'xlm') throw new Error('XLM can only be used for Stellar tokens');
       if (side === 'buy' && via) {
@@ -1823,15 +1834,16 @@ export class Books {
     const symbol = String(b.symbol || '').trim().replace(/^\$/, '').slice(0, 12);
     if (name.length < 2) throw new Error('Name is too short');
     if (!symbol) throw new Error('Ticker is required');
-    const network = ['giwa', 'stellar', 'robinhood'].includes(b.network) ? b.network : 'zero';
+    const network = ['giwa', 'stellar', 'robinhood', 'litvm'].includes(b.network) ? b.network : 'zero';
     if (network === 'robinhood' && this.rhLive()) throw new Error('Robinhood Chain tokens are launched from your wallet: the contract goes on-chain right away');
     // double-submit guard: the same creator can't launch the same name twice within 2 minutes
     const dup = this.sql.exec(`SELECT id FROM markets WHERE creator_id=? AND lower(trim(name))=lower(?) AND created>? ORDER BY created DESC LIMIT 1`,
       user.id, name, now() - 120_000).toArray()[0];
     if (dup) { const e = new Error(`You just launched "${name}". Wait 2 minutes before creating another token with the same name.`); e.existing = dup.id; throw e; }
-    const quote = network === 'giwa' || network === 'robinhood' ? 'ETH' : network === 'stellar' ? 'XLM' : 'ZRO';
+    const quote = network === 'giwa' || network === 'robinhood' ? 'ETH' : network === 'stellar' ? 'XLM' : network === 'litvm' ? 'ZKLTC' : 'ZRO';
     // same starting market cap in USD as a ZRO market: 3,150 ZRO worth of ETH as the virtual reserve
-    let vWei = quote === 'ETH' ? BigInt(Math.round(Number(CURVE.vZro) * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n : null;
+    let vWei = quote === 'ETH' ? BigInt(Math.round(Number(CURVE.vZro) * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n
+      : quote === 'ZKLTC' ? BigInt(Math.round(Number(CURVE.vZro) * this.zroUsd() / this.ltcUsd() * 1e9)) * 1_000_000_000n : null;
     if (quote === 'XLM') {
       // virtual XLM reserve chosen so the curve's final price = STELLAR_GRAD_USD market cap at today's XLM price
       const vT = Number(CURVE.vTok), tEnd = vT - Number(CURVE.curve), sup = Number(CURVE.supply);
@@ -3317,7 +3329,7 @@ export class Books {
           const u = this.sql.exec('SELECT * FROM users WHERE username=? OR email=?', b.user, b.user).toArray()[0];
           if (!u) throw new Error('user not found');
           this.ctx.storage.transactionSync(() => {
-            const as = ['eth', 'zro', 'xlm'].includes(b.asset) ? b.asset : 'zro';
+            const as = ['eth', 'zro', 'xlm', 'ltc', 'zltc'].includes(b.asset) ? b.asset : 'zro';
             this.addBal(u.id, as, B(b.amount));
             this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?)`,
               u.id, 'deposit', b.chain || 'manual', String(b.amount), 'confirmed', b.note || 'Manual credit', now(), as);

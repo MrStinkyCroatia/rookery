@@ -946,3 +946,5 @@ a.net-card:hover{border-color:var(--line2)}
 .net-card>div:not(.cd){min-width:0}
 @media(min-width:721px){.net-card .cd span{white-space:nowrap}}
 @media(max-width:720px){.hero-grid,.nets{grid-template-columns:minmax(0,1fr)}.net-card{gap:12px;padding:14px}.net-card{flex-wrap:wrap}.net-card>div:not(.cd){flex:1}.net-card .cd{flex-basis:100%;margin-left:56px;display:flex;align-items:baseline;gap:10px;text-align:left;padding-top:10px;border-top:1px solid var(--line)}.net-card .cd b{font-size:14px;display:inline}.net-card .cd span{font-size:9.5px;white-space:nowrap}.net-card .net-meta{flex-wrap:wrap;white-space:normal}}
+.net-ico.ltc{background:#0e0e10;border:1px solid var(--line2)}
+.net-ico.ltc img{width:70%;height:70%;object-fit:contain;filter:none}

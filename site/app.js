@@ -69,10 +69,10 @@ const short = (a) => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '';
 const initials = (s) => esc(String(s || '?').replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2).toUpperCase() || '?');
 const timg = (m, cls = '') => `<div class="timg ${cls}">${m.image ? `<img src="${esc(m.image)}" alt="" loading="lazy">` : initials(m.symbol)}</div>`;
 const avatar = (u, url) => `<div class="av">${url ? `<img src="${esc(url)}" alt="">` : initials(u)}</div>`;
-const netTag = (n) => `<span class="tag ${n}">${n === 'giwa' ? '<img src="/assets/giwa.png" alt="">GIWA' : n === 'stellar' ? '<img src="/assets/chains/stellar.svg" alt="">STELLAR' : n === 'robinhood' ? '<img src="/assets/chains/robinhood.png" alt="">ROBINHOOD' : 'ZERO'}</span>`;
-const netName = (n) => (n === 'giwa' ? 'GIWA' : n === 'stellar' ? 'Stellar' : n === 'robinhood' ? 'Robinhood Chain' : 'Zero');
-const netCur = (n) => (n === 'giwa' || n === 'robinhood' ? 'eth' : n === 'stellar' ? 'xlm' : 'zro');
-const netLong = (n) => (n === 'zero' ? 'Zero · LayerZero' : n === 'giwa' ? 'GIWA · Upbit' : n === 'stellar' ? 'Stellar · on-chain' : n === 'robinhood' ? 'Robinhood Chain · L2' : 'All networks');
+const netTag = (n) => `<span class="tag ${n}">${n === 'giwa' ? '<img src="/assets/giwa.png" alt="">GIWA' : n === 'stellar' ? '<img src="/assets/chains/stellar.svg" alt="">STELLAR' : n === 'robinhood' ? '<img src="/assets/chains/robinhood.png" alt="">ROBINHOOD' : n === 'litvm' ? '<img src="/assets/chains/litecoin.svg" alt="">LITVM' : 'ZERO'}</span>`;
+const netName = (n) => (n === 'giwa' ? 'GIWA' : n === 'stellar' ? 'Stellar' : n === 'robinhood' ? 'Robinhood Chain' : n === 'litvm' ? 'LitVM' : 'Zero');
+const netCur = (n) => (n === 'giwa' || n === 'robinhood' ? 'eth' : n === 'stellar' ? 'xlm' : n === 'litvm' ? 'zltc' : 'zro');
+const netLong = (n) => (n === 'zero' ? 'Zero · LayerZero' : n === 'giwa' ? 'GIWA · Upbit' : n === 'stellar' ? 'Stellar · on-chain' : n === 'robinhood' ? 'Robinhood Chain · L2' : n === 'litvm' ? 'LitVM · Litecoin' : 'All networks');
 
 /* ───────── api ───────── */
 async function api(path, body, method) {
@@ -96,9 +96,10 @@ function reserves(m) {
   return { z: (m.vQuote ? B(m.vQuote) : B(c.vZro) * WEI) + B(m.reserveZro), t: B(c.vTok) * WEI - B(m.sold) };
 }
 const bpsOf = (pct) => BigInt(Math.round((pct || 0) * 100));
-const ASSET = { zro: { label: 'ZRO', ico: 'Z', quick: ['1', '5', '10', '50'], dp: 4 }, eth: { label: 'ETH', ico: 'Ξ', quick: ['0.001', '0.005', '0.01', '0.05'], dp: 6 }, xlm: { label: 'XLM', ico: 'X', quick: ['10', '50', '100', '500'], dp: 4 } };
+const ASSET = { zro: { label: 'ZRO', ico: 'Z', quick: ['1', '5', '10', '50'], dp: 4 }, eth: { label: 'ETH', ico: 'Ξ', quick: ['0.001', '0.005', '0.01', '0.05'], dp: 6 }, xlm: { label: 'XLM', ico: 'X', quick: ['10', '50', '100', '500'], dp: 4 },
+  zltc: { label: 'zkLTC', ico: 'Ł', quick: ['1', '5', '10', '50'], dp: 4 }, ltc: { label: 'LTC', ico: 'Ł', quick: ['0.05', '0.1', '0.5', '1'], dp: 5 } };
 const assetUsd = (a) => (a === 'eth' ? S.stats?.ethUsd : a === 'xlm' ? S.stats?.xlmUsd : S.stats?.zroUsd) || 0;
-const qaOf = (q) => (q === 'ETH' ? 'eth' : q === 'XLM' ? 'xlm' : 'zro');
+const qaOf = (q) => (q === 'ETH' ? 'eth' : q === 'XLM' ? 'xlm' : q === 'ZKLTC' ? 'zltc' : q === 'LTC' ? 'ltc' : 'zro');
 // mirror of the server's instant conversion (0.5% fee) for estimates only
 const convert = (wei, from, to) => (from === to ? wei : (wei * BigInt(Math.round(assetUsd(from) * 1e8)) / BigInt(Math.max(1, Math.round(assetUsd(to) * 1e8))) * 9950n) / 10000n);
 const fmtA = (wei, a, dp) => `${fmtZ(wei, dp ?? ASSET[a].dp)} ${ASSET[a].label}`;
@@ -1039,6 +1040,8 @@ async function viewExplore() {
           <div class="cd"><b>LIVE</b><span class="mono mu">Pre-market · mainnet in <i id="cdZero">${countdown(nets.zero?.launchAt)}</i></span></div></div>
         <div class="net-card"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><h4>GIWA</h4><span class="mu" style="font-size:12.5px">by Upbit · Ethereum L2</span><span class="net-meta"><i class="dotp"></i>Pre-market live · <b>${nt.giwa || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">Pre-market · testnet</span></div></div>
+        <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=litvm]')?.click()"><span class="net-ico ltc"><img src="/assets/chains/litecoin.svg" alt="LitVM"></span><div><h4>LitVM</h4><span class="mu" style="font-size:12.5px">by Litecoin · zkLTC pairs · 1:1 at mainnet</span><span class="net-meta"><i class="dotp live"></i>Pre-market live · <b>${nt.litvm || 0}</b> tokens</span></div>
+          <div class="cd"><b>LIVE</b><span class="mono mu">Premarket · zkLTC</span></div></a>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=robinhood]')?.click()"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><h4>Robinhood Chain</h4><span class="mu" style="font-size:12.5px">by Robinhood · ETH &amp; stock pairs · Uniswap V2</span><span class="net-meta"><i class="dotp live"></i>Pre-market live · on-chain · <b>${nt.robinhood || 0}</b> tokens</span></div>
           <div class="cd"><b>LIVE</b><span class="mono mu">Premarket · on-chain</span></div></a>
         <a class="net-card" href="#/" onclick="event.preventDefault();document.querySelector('#netMenu .mi[data-net=stellar]')?.click()"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><h4>Stellar</h4><span class="mu" style="font-size:12.5px">by SDF · graduates to Aquarius at ${gradK()}</span><span class="net-meta"><i class="dotp live"></i>Live on-chain · <b>${nt.stellar || 0}</b> tokens</span></div>
@@ -1073,6 +1076,7 @@ async function viewExplore() {
       <button data-n="giwa" class="${S.net === 'giwa' ? 'on' : ''}">GIWA</button>
       <button data-n="stellar" class="${S.net === 'stellar' ? 'on' : ''}">Stellar</button>
       <button data-n="robinhood" class="${S.net === 'robinhood' ? 'on' : ''}">Robinhood</button>
+      <button data-n="litvm" class="${S.net === 'litvm' ? 'on' : ''}">LitVM</button>
     </div>
     <div class="bar-row">
       <div class="seg" id="sort">
@@ -1128,6 +1132,7 @@ async function viewTrading() {
     <div class="panel">
       <div class="panel-h"><h3>Markets</h3><div class="seg" id="tsort">
         <button data-s="vol" class="on">Volume</button><button data-s="ch">24h</button><button data-s="mcap">MC</button><button data-s="new">New</button></div></div>
+      <p class="mu" style="font-size:12.5px;line-height:1.6;margin:0 0 10px">LitVM and the other pre-market networks hold no on-chain funds yet: their tokens trade on the Rookery ledger, so the table below covers ZRO, ETH and XLM. LTC has no custody wallet yet either: it lives in the bridge, not in the ledger.</p>
       <div style="overflow:auto"><table class="tbl" id="mt"><thead><tr>
         <th>Token</th><th>Network</th><th class="r">Price</th><th class="r">5m</th><th class="r">1h</th><th class="r">24h</th>
         <th class="r">Market cap</th><th class="r">Volume</th><th class="r">Holders</th><th class="r">Bonded</th></tr></thead><tbody></tbody></table></div>
@@ -1170,7 +1175,8 @@ async function viewToken(id) {
   let side = 'buy', ival = 60, tab = 'trades';
   const Q = m.quote || 'ZRO', QA = qaOf(Q);                                 // the market's own currency
   let pay = localStorage.getItem('pl_pay_' + QA) || QA;                  // what the user pays / receives in
-  if (!ASSET[pay] || QA === 'xlm' || pay === 'xlm') pay = QA;          // Stellar tokens trade only in XLM
+  if (!ASSET[pay] || QA === 'xlm' || pay === 'xlm') pay = QA;
+  if (QA === 'zltc' && !['eth', 'ltc', 'zltc'].includes(pay)) pay = 'eth';          // Stellar tokens trade only in XLM
   S.quickEth = S.quickEth || localStorage.getItem('pl_quick_eth') || '0.005';
 
   app.innerHTML = `
@@ -1250,7 +1256,7 @@ async function viewToken(id) {
       ${m.rh ? `<div class="panel pb rh-pane" id="rhPane"></div>` : ''}
       <div class="panel pb" ${(m.network === 'stellar' && (m.migrated || m.stellar?.job)) || m.rh ? 'style="display:none"' : ''}>
         <div class="tb-tabs"><button class="buy on" data-side="buy">Buy</button><button class="sell" data-side="sell">Sell</button></div>
-        <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button></div>
+        <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span>${(QA === 'zltc' ? [['eth', 'ETH'], ['ltc', 'LTC'], ['zltc', 'zkLTC']] : [['zro', 'ZRO'], ['eth', 'ETH']]).map(([k, l]) => `<button data-a="${k}">${l}</button>`).join('')}</div>
         <div class="amt"><input id="amt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="unit"></span></div>
         <div class="quick" id="quick"></div>
         <div class="est" id="est"></div>
@@ -1711,6 +1717,7 @@ async function viewCreate(hatchId) {
             <button class="opt" data-n="zero"><span class="net-ico">Ø</span><div><b>Zero</b><small>LayerZero · mainnet 30.11</small></div></button>
             <button class="opt" data-n="giwa"><span class="net-ico giwa"><img src="/assets/giwa.png" alt="GIWA"></span><div><b>GIWA</b><small>Upbit L2 · mainnet TBA</small></div></button>
             <button class="opt" data-n="stellar"><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt="Stellar"></span><div><b>Stellar</b><small>Live · graduates to Aquarius</small></div></button>
+            <button class="opt" data-n="litvm"><span class="net-ico ltc"><img src="/assets/chains/litecoin.svg" alt="LitVM"></span><div><b>LitVM</b><small>Litecoin EVM · pre-market · zkLTC pairs</small></div></button>
             <button class="opt" data-n="robinhood"><span class="net-ico rh"><img src="/assets/chains/robinhood.png" alt="Robinhood Chain"></span><div><b>Robinhood Chain</b><small>Live · Ethereum L2 · ETH pair</small></div></button>
           </div>
           <div class="choice" style="margin-top:10px" id="pairBox"></div>
@@ -1777,7 +1784,7 @@ async function viewCreate(hatchId) {
     $('#pairBox').innerHTML = pq === 'xlm'
       ? `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">X</span><div><b>Pair: XLM</b><small>Stellar tokens trade in XLM</small></div></button>
       <button class="opt" disabled><span class="net-ico st"><img src="/assets/chains/stellar.svg" alt=""></span><div><b>Graduates to Aquarius</b><small>At ${fmtUsd(S.stats?.stellar?.gradUsd || 46000)} market cap · LP burned</small></div></button>`
-      : `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">${ASSET[pq].ico}</span><div><b>Pair: ${ASSET[pq].label}</b><small>${pq === 'eth' ? 'GIWA tokens trade in ETH' : 'Zero tokens trade in ZRO'}</small></div></button>
+      : `<button class="opt on" disabled style="opacity:1;cursor:default"><span class="zro-ico" style="width:26px;height:26px;font-size:12px">${ASSET[pq].ico}</span><div><b>Pair: ${ASSET[pq].label}</b><small>${pq === 'eth' ? 'GIWA tokens trade in ETH' : pq === 'zltc' ? 'LitVM tokens trade in zkLTC · buy now with ETH' : 'Zero tokens trade in ZRO'}</small></div></button>
       <button class="opt" disabled><span class="net-ico all">⇄</span><div><b>Buy with ${pq === 'eth' ? 'ZRO' : 'ETH'} too</b><small>One button, instant conversion</small></div></button>`;
     $('#devLbl').textContent = 'Amount · ' + ASSET[pq].label;
     $('#devTxt').textContent = F.devBuy && S.me ? `Balance: ${fmtA(S.me[pq] || '0', pq)}` : '';
@@ -2550,12 +2557,12 @@ async function walletSignIn(link = false) {
 }
 
 /* ═══════════ BRIDGE ═══════════ */
-const BR_ICON = { stellar: '/assets/chains/stellar.svg', ethereum: '/assets/chains/ethereum.svg', base: '/assets/chains/base.svg', bsc: '/assets/chains/binance.svg',
+const BR_ICON = { stellar: '/assets/chains/stellar.svg', litecoin: '/assets/chains/litecoin.svg', litvm: '/assets/chains/litecoin.svg', ethereum: '/assets/chains/ethereum.svg', base: '/assets/chains/base.svg', bsc: '/assets/chains/binance.svg',
   robinhood: '/assets/chains/robinhood.png', giwa: '/assets/giwa.png' };
 const BR_LETTER = { arbitrum: ['A', '#28a0f0'], optimism: ['OP', '#ff0420'], polygon: ['P', '#8247e5'], avalanche: ['A', '#e84142'], solana: ['S', '#14f195'],
   bitcoin: ['₿', '#f7931a'], tron: ['T', '#ff060a'], zero: ['Z', '#ffffff'] };
 const BR_TOKICON = { XLM: '/assets/chains/stellar.svg', ETH: '/assets/chains/ethereum.svg', BNB: '/assets/chains/binance.svg' };
-const BR_ORDER = ['stellar', 'ethereum', 'base', 'arbitrum', 'optimism', 'robinhood', 'bsc', 'polygon', 'avalanche', 'solana', 'bitcoin', 'tron', 'zero', 'giwa'];
+const BR_ORDER = ['stellar', 'ethereum', 'base', 'arbitrum', 'optimism', 'robinhood', 'bsc', 'polygon', 'avalanche', 'solana', 'bitcoin', 'litecoin', 'tron', 'zero', 'giwa'];
 const BR_SOON_LABEL = { zero: 'Zero', giwa: 'GIWA' };
 function brIco(src, letter, size = 20) {
   if (src) return `<img src="${src}" alt="" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;background:#fff;flex:none">`;
@@ -2891,9 +2898,10 @@ function viewDocs() {
       <ul>
         <li><b>Zero</b> by LayerZero: a high-throughput chain with the ATLAS exchange engine. Mainnet is scheduled for <b>30 November 2026</b>.</li>
         <li><b>GIWA</b> by Upbit (Dunamu): an Ethereum layer 2, currently on testnet. Mainnet date has not been announced.</li>
+        <li><b>LitVM</b> by Litecoin: Litecoin's Virtual Machine, an EVM rollup (Arbitrum Orbit) that settles on Ethereum and brings LTC in through Charms. Testnet LiteForge runs on chain ID 4441 with <b>zkLTC</b> as the gas asset; mainnet has no announced date, so LitVM tokens trade on the Rookery ledger until it launches and then move 1:1 into the chain with a zkLTC pool.</li>
         <li><b>Stellar</b> by the Stellar Development Foundation: live since 2015, so a Stellar token trades for real from day one and graduates on-chain into an Aquarius pool at <b>${fmtUsd(S.stats?.stellar?.gradUsd || 46000)}</b> market cap. See the <a href="#/docs" data-s="stellar" style="text-decoration:underline;color:var(--tx)">Stellar</a> section.</li>
       </ul>
-      <div class="callout"><b>Zero tokens pair with ZRO, GIWA tokens pair with ETH, Stellar tokens pair with XLM.</b> Each network uses its natural quote asset: ZRO is the gas token of Zero, and GIWA is an Ethereum layer 2. You can still buy any token with either asset: pick <i>Pay with ZRO</i> or <i>Pay with ETH</i> and the conversion happens in one step at the live market rate (0.5% conversion fee). When you sell, pick <i>Receive in</i> ZRO or ETH the same way.</div>
+      <div class="callout"><b>Zero tokens pair with ZRO, GIWA tokens pair with ETH, LitVM tokens pair with zkLTC, Stellar tokens pair with XLM.</b> Each network uses its natural quote asset: ZRO is the gas token of Zero, and GIWA is an Ethereum layer 2. You can still buy any token with either asset: pick <i>Pay with ZRO</i> or <i>Pay with ETH</i> and the conversion happens in one step at the live market rate (0.5% conversion fee). When you sell, pick <i>Receive in</i> ZRO or ETH the same way.</div>
 
       <h2 id="account">Account & wallet</h2>
       <p>Sign up with email or with your wallet. Your account gets two personal deposit addresses: a <b>ZRO address</b> (the same on Ethereum, Base, Arbitrum, BNB Chain and Optimism; send only ZRO, <code>${esc(S.stats.zroToken)}</code>) and a separate <b>ETH address</b> (the same on Ethereum, Base and Arbitrum; send only native ETH). Switch between them with the ZRO / ETH toggle on the wallet page.</p>

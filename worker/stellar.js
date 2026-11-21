@@ -90,7 +90,7 @@ export class StellarIO {
     return raw;
   }
   async viewRaw(contract, fn, args = []) {
-    const tx = new TransactionBuilder(await this.seq(this.hotAddress), { fee: '100', networkPassphrase: this.N.pass })
+    const tx = new TransactionBuilder(await this.seq(this.simSource || this.hotAddress), { fee: '100', networkPassphrase: this.N.pass })
       .addOperation(Operation.invokeContractFunction({ contract, function: fn, args })).setTimeout(60).build();
     const raw = await this.simulate(tx);
     return xdr.ScVal.fromXDR(raw.results[0].xdr, 'base64');
@@ -103,7 +103,7 @@ export class StellarIO {
     return entries.map(e => ({ hash: Buffer.from(scValToNative(g(e, 'key'))).toString('hex'), address: String(scValToNative(g(e, 'val'))) }));
   }
   async view(contract, fn, args = []) {
-    const tx = new TransactionBuilder(await this.seq(this.hotAddress), { fee: '100', networkPassphrase: this.N.pass })
+    const tx = new TransactionBuilder(await this.seq(this.simSource || this.hotAddress), { fee: '100', networkPassphrase: this.N.pass })
       .addOperation(Operation.invokeContractFunction({ contract, function: fn, args })).setTimeout(60).build();
     const raw = await this.simulate(tx);
     return scValToNative(xdr.ScVal.fromXDR(raw.results[0].xdr, 'base64'));
@@ -208,14 +208,15 @@ export class StellarIO {
     return this.sac(asset);
   }
   // build an unsigned XLM payment the user's own wallet signs (no keys leave the wallet)
-  async buildPaymentXdr({ from, to, amount, memo, trust }) {
+  async buildPaymentXdr({ from, to, amount, memo, memoId, trust }) {
     const acc = await this.account(from);
     if (!acc) throw new Error('This Stellar account is not active yet: fund it with at least 1 XLM');
     const tb = new TransactionBuilder(new Account(from, acc.sequence), { fee: '10000', networkPassphrase: this.N.pass });
     if (trust && !acc.balances.some(b => b.asset_code === trust.code && b.asset_issuer === trust.issuer))
       tb.addOperation(Operation.changeTrust({ asset: new Asset(trust.code, trust.issuer) }));
     tb.addOperation(Operation.payment({ destination: to, asset: Asset.native(), amount: f7(amount) }));
-    if (memo) tb.addMemo(Memo.text(String(memo).slice(0, 28)));
+    if (memoId) tb.addMemo(Memo.id(String(memoId)));
+    else if (memo) tb.addMemo(Memo.text(String(memo).slice(0, 28)));
     return tb.setTimeout(180).build().toXDR();
   }
   // a holder sends tokens back from their wallet (to sell them on the curve); the wallet signs, we submit
