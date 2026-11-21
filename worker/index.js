@@ -4,6 +4,7 @@ import { installSniper } from './sniper.js';
 import { installStx } from './stx.js';
 import { installRhpad } from './rhpad.js';
 import { installLtcdep } from './ltcdep.js';
+import { installLtcaddr } from './ltcaddr.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2824,6 +2825,7 @@ export class Books {
           timed('bridge', this.xbCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('rh', this.rhScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
+          timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
@@ -3138,6 +3140,11 @@ export class Books {
       if (method === 'GET' && p === '/rh/balance') {
         const m = this.market(url.searchParams.get('market') || '');
         return json({ ok: true, balance: await this.rhWalletBalance(m, url.searchParams.get('address') || '') });
+      }
+      if (method === 'GET' && p === '/ltc/address') {
+        if (!user) return json({ address: '' });
+        try { return json({ ok: true, address: await this.ltcAddressFor(user) }); }
+        catch (e) { return json({ ok: false, error: String(e.message || e).slice(0, 200) }); }
       }
       if (method === 'POST' && p === '/ltc/deposit') { if (!user) throw new Error('Log in to continue'); return json(await this.ltcDeposit(user, await req.json().catch(() => ({})))); }
       if (method === 'GET' && p === '/ltc/deposits') { if (!user) return json({ list: [] }); return json({ ok: true, list: this.ltcDepList(user) }); }
@@ -3835,6 +3842,7 @@ export class Books {
         }
         const zro = this.bal(user.id, 'zro'), eth = this.bal(user.id, 'eth'), xlm = this.bal(user.id, 'xlm');
         const ltc = this.bal(user.id, 'ltc'), zltc = this.bal(user.id, 'zltc');
+        let ltcAddress = ''; try { ltcAddress = await this.ltcAddressFor(user); } catch { /* wallet service off */ }
         let stDep = null;
         try { const st = await this.stellar(); stDep = { address: st.hotAddress, memo: String(user.id), net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer }; } catch { /* not configured */ }
         if (!user.eth_dep_address && user.dep_index != null) {
@@ -3846,7 +3854,7 @@ export class Books {
           zro: zro.toString(), zroUsd: (Number(zro) / 1e18) * usd, depositAddress: user.dep_address,
           eth: eth.toString(), ethUsd: (Number(eth) / 1e18) * this.ethUsd(), ethPrice: this.ethUsd(), ethDepositAddress: user.eth_dep_address,
           xlm: xlm.toString(),
-          ltc: ltc.toString(), ltcUsd: this.ltcUsd(),
+          ltc: ltc.toString(), ltcUsd: this.ltcUsd(), ltcAddress,
           zltc: zltc.toString(), zltcUsd: this.ltcUsd(), xlmUsd: (Number(xlm) / 1e18) * this.xlmUsd(), xlmPrice: this.xlmUsd(), stellarDeposit: stDep,
           holdings: hold, pnl, badges: this.badgesOf(user.id), hatches: this.hatchList(user).filter(h => h.isMine || h.subscribed),
           points: this.pointsOf(user.id), ref: this.refStats(user),
@@ -3965,3 +3973,4 @@ installSniper(Books, { B, WEI, now, escH, randHex, qa, burnKey });
 installStx(Books, { B, WEI, now });
 installRhpad(Books, { B, WEI, now, randHex, CHAINS });
 installLtcdep(Books, { B, WEI, now, randHex });
+installLtcaddr(Books, { B, WEI, now });

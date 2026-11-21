@@ -1956,11 +1956,7 @@ async function viewWallet() {
     <div class="panel pb" id="ltcDep" style="margin:0 0 14px">
       <div style="display:flex;align-items:center;gap:10px"><span class="net-ico ltc" style="width:34px;height:34px"><img src="/assets/chains/litecoin.svg" alt="LTC"></span>
         <div><h3 style="font-size:16px;margin:0">Deposit LTC</h3><p class="mu" style="font-size:12.5px;margin:2px 0 0">Send Litecoin, get a balance you can trade with. Credited at the value that actually arrives, about 1–2% goes to the bridge.</p></div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
-        <input class="inp" id="ltcAmt" inputmode="decimal" placeholder="0.05" style="max-width:150px">
-        <input class="inp" id="ltcRef" placeholder="Your LTC address (for refunds)" style="flex:1;min-width:240px">
-        <button class="btn" id="ltcGo">Get deposit address</button></div>
-      <div id="ltcOut" style="margin-top:10px"></div>
+      <div id="ltcAddrBox" style="margin-top:12px"></div>
       <div id="ltcList" class="mu" style="font-size:12px;margin-top:8px"></div>
       <hr class="sep">
       <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px"><b style="font-size:14px">Withdraw LTC</b><span class="mu" style="font-size:12px">paid out through the same bridge, min 0.01 LTC</span></div>
@@ -3476,6 +3472,14 @@ document.addEventListener('click', async (e) => {
   } catch (err) { toast(esc(err.message), 'bad'); }
   finally { b.disabled = false; }
 });
+function ltcPaintAddr() {
+  const el = $('#ltcAddrBox'); if (!el) return;
+  const a = S.me?.ltcAddress;
+  el.innerHTML = a
+    ? `<div class="st-asset"><div class="kv"><span>Your deposit address (Litecoin, segwit)</span><b class="mono" style="font-size:11px;letter-spacing:0;word-break:break-all">${esc(a)}</b><button class="mini" data-copy="${esc(a)}">Copy</button></div>
+       <p class="mu" style="font-size:12px;line-height:1.5;margin:8px 0 0">One address, always yours — send any amount whenever you want, no expiry. Credited 1:1 in LTC as soon as the transaction confirms.</p></div>`
+    : `<p class="mu" style="font-size:12.5px">Log in to see your Litecoin deposit address.</p>`;
+}
 async function ltcPaintList() {
   const el = $('#ltcList'); if (!el || !S.me) return;
   try {
@@ -3489,4 +3493,5 @@ async function ltcPaintList() {
     el.innerHTML = parts.join(' — ');
   } catch { /* ignore */ }
 }
-setInterval(() => { if ($('#ltcList') && S.me) ltcPaintList(); }, 8000);
+ltcPaintAddr();
+setInterval(() => { if ($('#ltcList') && S.me) { ltcPaintList(); ltcPaintAddr(); } }, 8000);
