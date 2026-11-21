@@ -949,3 +949,5 @@ a.net-card:hover{border-color:var(--line2)}
 .net-ico.ltc{background:#0e0e10;border:1px solid var(--line2)}
 .net-ico.ltc img{width:70%;height:70%;object-fit:contain;filter:none}
 .zro-ico.ltc{background:#0e0e10;border:1px solid var(--line2);color:var(--tx)}
+.tag.litvm{background:rgba(255,255,255,.06);border-color:var(--line2);color:var(--tx)}
+.tag.litvm img{width:11px;height:11px;object-fit:contain;vertical-align:-1px;margin-right:3px}
