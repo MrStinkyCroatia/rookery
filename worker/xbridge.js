@@ -58,7 +58,7 @@ export function checkRoute(from, to) {
   if (XB_SOON.includes(from) || XB_SOON.includes(to)) throw new Error('This network is coming soon');
   if (!XB_NETS[from] || !XB_NETS[to]) throw new Error('Pick a supported network');
   if (from === to) throw new Error('Pick two different networks');
-  if ((from === 'stellar') === (to === 'stellar')) throw new Error('One side must be Stellar');
+  // Stellar is not required: EVM chains, Litecoin, Bitcoin and the rest route directly between each other
 }
 
 // cfg: { feeBps, feeTo, key }

@@ -2681,7 +2681,7 @@ async function viewBridge() {
   document.title = 'Bridge — Rookery';
   app.innerHTML = `<div class="wrap page"><div class="br-wrap">
     <div style="margin-bottom:14px"><h1 style="font-size:28px;margin:0 0 4px">Bridge</h1>
-      <p class="mu" style="margin:0;font-size:13.5px">Move XLM between Stellar and other networks. Send it to yourself or to any wallet.</p></div>
+      <p class="mu" style="margin:0;font-size:13.5px">Move assets between networks: Stellar, EVM chains, Litecoin, Bitcoin and more. Send to yourself or to any wallet.</p></div>
     <div class="panel pb br-card" id="brCard"><div class="mu" style="font-size:13px">Loading…</div></div>
     <div class="panel pb" style="margin-top:14px"><span class="mono mu">Your transfers</span><div id="brHist" style="margin-top:10px"></div></div>
   </div></div>`;
@@ -2696,7 +2696,7 @@ async function viewBridge() {
   const tokItems = (k) => [{ key: N[k].sym, label: N[k].sym, sub: N[k].name, icon: brTokIco(N[k].sym, k, 20) }];
   const fix = (side) => {
     const other = side === 'from' ? 'to' : 'from';
-    if ((st[side] === 'stellar') === (st[other] === 'stellar')) st[other] = st[side] === 'stellar' ? 'base' : 'stellar';
+    if (st[side] === st[other]) st[other] = st[side] === 'stellar' ? 'base' : 'stellar';   // any two networks are allowed
     if (!st.addrTouched) st.addr = myAddr(st.to);
     if (!st.refundTouched) st.refund = '';
   };
@@ -2732,7 +2732,8 @@ async function viewBridge() {
     $('#brFlip').onclick = () => { [st.from, st.to] = [st.to, st.from]; st.amount = ''; st.addrTouched = st.refundTouched = false; fix('from'); paint(); quote(); };
     paintQuote();
   };
-  const RX = { stellar: /^G[A-Z2-7]{55}$/, evm: /^0x[0-9a-fA-F]{40}$/, solana: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/, btc: /^(bc1[02-9ac-hj-np-z]{11,71}|[13][1-9A-HJ-NP-Za-km-z]{25,34})$/, tron: /^T[1-9A-HJ-NP-Za-km-z]{33}$/ };
+  const RX = { stellar: /^G[A-Z2-7]{55}$/, evm: /^0x[0-9a-fA-F]{40}$/, solana: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/, btc: /^(bc1[02-9ac-hj-np-z]{11,71}|[13][1-9A-HJ-NP-Za-km-z]{25,34})$/, tron: /^T[1-9A-HJ-NP-Za-km-z]{33}$/,
+    ltc: /^(ltc1[a-z0-9]{25,50}|[LM3][1-9A-HJ-NP-Za-km-z]{25,33})$/ };
   const okAddr = (k, a) => RX[kindOf(k)]?.test(a || '') || false;
   const paintGo = () => {
     const g = $('#brGo'); if (!g) return;
