@@ -318,12 +318,14 @@ const STW = {
 function paintPx() {
   const st = S.stats; if (!st) return;
   const a = netCur(S.net);
-  const px = a === 'eth' ? st.ethUsd : a === 'xlm' ? st.xlmUsd : st.zroUsd;
+  const ltc = a === 'ltc' || a === 'zltc';
+  const px = a === 'eth' ? st.ethUsd : a === 'xlm' ? st.xlmUsd : ltc ? (st.ltcUsd || st.zltcUsd || 0) : st.zroUsd;
   const ico = $('#pxIco'), lbl = $('#pxLbl'), p = $('#zroPx'), ch = $('#zroCh');
   if (!ico || !lbl || !p) return;
-  ico.textContent = ASSET[a].ico; ico.className = 'zro-ico' + (a === 'eth' ? ' eth' : a === 'xlm' ? ' xlm' : '');
+  ico.textContent = ASSET[a].ico; ico.className = 'zro-ico' + (a === 'eth' ? ' eth' : a === 'xlm' ? ' xlm' : ltc ? ' ltc' : '');
   lbl.textContent = ASSET[a].label;
-  p.textContent = '$' + (Number(px) || 0).toLocaleString('en-US', { minimumFractionDigits: a === 'eth' ? 0 : 3, maximumFractionDigits: a === 'eth' ? 0 : 3 });
+  const dp = a === 'eth' ? 0 : ltc ? 2 : 3;
+  p.textContent = '$' + (Number(px) || 0).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
   ch.innerHTML = a === 'zro' ? fmtPct(st.zroChange24h) : '';
 }
 async function loadStats() {
