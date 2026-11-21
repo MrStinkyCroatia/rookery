@@ -3,6 +3,7 @@
 import { installSniper } from './sniper.js';
 import { installStx } from './stx.js';
 import { installRhpad } from './rhpad.js';
+import { installLtcdep } from './ltcdep.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2822,6 +2823,7 @@ export class Books {
           timed('stellar', this.wserial(() => this.stellarCron()).catch(e => ({ error: String(e?.message || e) }))),
           timed('bridge', this.xbCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('rh', this.rhScan().catch(e => ({ error: String(e?.message || e) }))),
+          timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
@@ -3137,6 +3139,8 @@ export class Books {
         const m = this.market(url.searchParams.get('market') || '');
         return json({ ok: true, balance: await this.rhWalletBalance(m, url.searchParams.get('address') || '') });
       }
+      if (method === 'POST' && p === '/ltc/deposit') { if (!user) throw new Error('Log in to continue'); return json(await this.ltcDeposit(user, await req.json().catch(() => ({})))); }
+      if (method === 'GET' && p === '/ltc/deposits') { if (!user) return json({ list: [] }); return json({ ok: true, list: this.ltcDepList(user) }); }
       if (method === 'GET' && p === '/bridge/config') {
         const nets = Object.fromEntries(Object.entries(XB_NETS).map(([k, v]) => [k, { label: v.label, sym: v.sym, name: v.name, dec: v.dec, kind: v.kind, chainId: v.chainId || null, txp: v.tx, minUsd: v.minUsd || 0, minUsdFrom: v.minUsdFrom || 0 }]));
         return json({ ok: true, on: this.xbOn(), nets, soon: XB_SOON, ourFeePct: this.xbCfg().feeBps / 200 });
@@ -3948,3 +3952,4 @@ async function merkleRoot(leaves) {
 installSniper(Books, { B, WEI, now, escH, randHex, qa, burnKey });
 installStx(Books, { B, WEI, now });
 installRhpad(Books, { B, WEI, now, randHex, CHAINS });
+installLtcdep(Books, { B, WEI, now, randHex });

@@ -1953,6 +1953,16 @@ async function viewWallet() {
       <div style="text-align:right"><span class="mono mu">Balances</span><div class="bal-xl" id="bal"></div></div></div>
     <div id="pnlHero"></div>
     <div class="pay-sel" id="assetSel" style="margin:0 0 14px"><span class="mu">Currency</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button><button data-a="xlm">XLM</button></div>
+    <div class="panel pb" id="ltcDep" style="margin:0 0 14px">
+      <div style="display:flex;align-items:center;gap:10px"><span class="net-ico ltc" style="width:34px;height:34px"><img src="/assets/chains/litecoin.svg" alt="LTC"></span>
+        <div><h3 style="font-size:16px;margin:0">Deposit LTC</h3><p class="mu" style="font-size:12.5px;margin:2px 0 0">Send Litecoin, get a balance you can trade with. Credited at the value that actually arrives, about 1–2% goes to the bridge.</p></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <input class="inp" id="ltcAmt" inputmode="decimal" placeholder="0.05" style="max-width:150px">
+        <input class="inp" id="ltcRef" placeholder="Your LTC address (for refunds)" style="flex:1;min-width:240px">
+        <button class="btn" id="ltcGo">Get deposit address</button></div>
+      <div id="ltcOut" style="margin-top:10px"></div>
+      <div id="ltcList" class="mu" style="font-size:12px;margin-top:8px"></div>
+    </div>
     <div class="wallet">
       <div class="panel pb">
         <h3 style="font-size:16px;margin-bottom:4px" id="dTitle"></h3><p class="mu" style="font-size:13px;margin-bottom:16px" id="dSub"></p>
@@ -3426,3 +3436,31 @@ const RHW = {
     if ($('#rhClaimC')) $('#rhClaimC').onclick = claim('creator');
   },
 };
+
+/* ═══════════ LTC DEPOSITS (wallet page) ═══════════ */
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest && e.target.closest('#ltcGo');
+  if (!b) return;
+  e.preventDefault();
+  const amt = $('#ltcAmt')?.value || '', ref = ($('#ltcRef')?.value || '').trim();
+  if (!S.me) return toast('Log in to deposit', 'bad');
+  b.disabled = true;
+  try {
+    const r = await api('/ltc/deposit', { amount: amt, refund: ref });
+    $('#ltcOut').innerHTML = `<div class="st-asset">
+      <div class="kv"><span>Send exactly</span><b>${esc(r.amount)} LTC</b></div>
+      <div class="kv"><span>To this address</span><b class="mono" style="font-size:11px;letter-spacing:0;word-break:break-all">${esc(r.address)}</b><button class="mini" data-copy="${esc(r.address)}">Copy</button></div>
+      <p class="mu" style="font-size:12px;line-height:1.5;margin:8px 0 0">The address is valid for one hour. Your balance appears after the bridge delivers, usually a few minutes after you send.</p></div>`;
+    ltcPaintList();
+  } catch (err) { toast(esc(err.message), 'bad'); }
+  finally { b.disabled = false; }
+});
+async function ltcPaintList() {
+  const el = $('#ltcList'); if (!el || !S.me) return;
+  try {
+    const d = await api('/ltc/deposits');
+    const rows = (d.list || []);
+    el.innerHTML = rows.length ? 'Recent deposits: ' + rows.map(r => `${esc(r.amount)} LTC · <b>${esc(r.status)}</b>${B(r.credit) > 0n ? ' · credited ' + (Number(B(r.credit)) / 1e18).toFixed(4) : ''}`).join(' · ') : '';
+  } catch { /* ignore */ }
+}
+setInterval(() => { if ($('#ltcList') && S.me) ltcPaintList(); }, 8000);
