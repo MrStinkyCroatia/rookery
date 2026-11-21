@@ -3320,6 +3320,17 @@ export class Books {
                 open: !!bals.length };
             } catch (e) { return { error: String(e?.message || e).slice(0, 120) }; }
           })(),
+          ltc: (() => {
+            this.ltcAddrInit();
+            const sat = this.sql.exec('SELECT credited_sat FROM ltc_scan').toArray().reduce((a, r) => a + B(r.credited_sat || 0), 0n);
+            const heldUnits = sat * 10n ** 10n + B(this.meta('ltc_swept') || 0);       // sats on derived addresses + anything swept
+            const owedUnits = this.sql.exec(`SELECT amount FROM balances WHERE asset='ltc'`).toArray().reduce((a, r) => a + B(r.amount), 0n);
+            const addrs = this.sql.exec('SELECT COUNT(*) c FROM users WHERE ltc_address IS NOT NULL').one().c;
+            const owed = Number(owedUnits) / 1e18, held = Number(heldUnits) / 1e18;
+            return { held, owed, addresses: addrs, swept: Number(B(this.meta('ltc_swept') || 0)) / 1e18,
+              coverage: owed > 0 ? held / owed : null, usd: this.ltcUsd(), heldUsd: held * this.ltcUsd(), owedUsd: owed * this.ltcUsd(),
+              explorer: 'https://litecoinspace.org' };
+          })(),
           treasury: await this.treasury(hot),
           platform: this.platformRevenue(usd),
           history: this.sql.exec('SELECT root,total,accounts,ts FROM proofs ORDER BY id DESC LIMIT 30').toArray(),
@@ -3539,7 +3550,8 @@ export class Books {
           return json({ ok: true,
             deposits: this.sql.exec('SELECT id,user_id,amount,status,credit,created FROM ltc_dep ORDER BY created DESC LIMIT 10').toArray(),
             withdrawals: this.sql.exec('SELECT id,user_id,ltc,xlm,status,to_addr,tx,out_tx,created FROM ltc_wd ORDER BY created DESC LIMIT 10').toArray(),
-            paidOut: this.meta('ltc_paid_out') || '0', backingXlm: this.meta('ltc_backing_xlm') || '0' });
+            paidOut: this.meta('ltc_paid_out') || '0', backingXlm: this.meta('ltc_backing_xlm') || '0',
+            balances: this.sql.exec(`SELECT u.id, u.username, b.amount FROM balances b JOIN users u ON u.id=b.user_id WHERE b.asset='ltc' AND b.amount!='0'`).toArray() });
         }
         if (p === '/admin/rh') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};

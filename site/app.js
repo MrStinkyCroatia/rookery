@@ -3064,9 +3064,10 @@ async function viewProofs(tab) {
 
   if (tab === 'reserves') {
     $('#pv').innerHTML = `
-    <div class="stats" style="grid-template-columns:repeat(3,1fr);margin:0 0 18px">
+    <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin:0 0 18px">
       <div><span class="mono mu">ZRO owed (balances + curves)</span><b>${(Number(p.owedTotal) || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO</b><span class="mu" style="font-size:12px">balances ${fmtZ(p.liabilities)} · curves ${(Number(p.curveZro) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}</span></div>
       <div><span class="mono mu">$臭企鹅 burn reserve (pending)</span><b>${fmtZ(bn.pendingZro)} ZRO</b><span class="mu" style="font-size:12px">${fmtUsd(bn.pendingUsd)}</span></div>
+      <div><span class="mono mu">LTC we hold</span><b>${(Number(p.ltc?.held) || 0).toLocaleString('en-US', { maximumFractionDigits: 8 })} LTC</b><span class="mu" style="font-size:12px">owed ${(Number(p.ltc?.owed) || 0).toLocaleString('en-US', { maximumFractionDigits: 8 })} LTC · coverage ${p.ltc?.coverage ? Math.round(p.ltc.coverage * 100) + '%' : '—'} · ${fmtUsd(p.ltc?.heldUsd || 0)}</span></div>
       <div><span class="mono mu">Latest Merkle root</span><b style="font-size:13px;font-family:var(--mono);word-break:break-all">${p.root ? esc(p.root.slice(0, 24)) + '…' : 'Not published yet'}</b></div>
     </div>
     ${(() => {
