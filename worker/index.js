@@ -2854,7 +2854,7 @@ export class Books {
         const volUsd = this.sql.exec('SELECT volume, quote, rh_quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * (r.rh_quote ? this.rhMarketUsd(r) : this.usdOf(qa(r))), 0);
         const burn = B(this.meta('plaunch_burn')), burnEth = B(this.meta('plaunch_burn_eth')), burnXlm = B(this.meta('plaunch_burn_xlm'));
         return json({
-          zroUsd: usd, zroChange24h: Number(this.meta('zro_chg') || 0), ethUsd: this.ethUsd(), ethChains: ETH_CHAINS, xlmUsd: this.xlmUsd(),
+          zroUsd: usd, zroChange24h: Number(this.meta('zro_chg') || 0), ethUsd: this.ethUsd(), ethChains: ETH_CHAINS, xlmUsd: this.xlmUsd(), ltcUsd: this.ltcUsd(), zltcUsd: this.ltcUsd(),
           stellar: { net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer, gradUsd: this.stGradUsd() },
           plaunchBurnEth: burnEth.toString(), plaunchBurnXlm: burnXlm.toString(),
           burnReserveUsd: (Number(burn) / 1e18) * usd + (Number(burnEth) / 1e18) * this.ethUsd() + (Number(burnXlm) / 1e18) * this.xlmUsd(),

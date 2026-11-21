@@ -24,10 +24,10 @@ const user = login.username;
 let cfg = null;
 for (let i = 0; i < 12; i++) {
   cfg = await api('GET', '/stats?r=' + Math.random());
-  if (cfg.prices && cfg.prices.ltc > 0) break;
+  if (cfg.ltcUsd > 0) break;
   await new Promise(r => setTimeout(r, 5000));
 }
-ok('LTC price feed live', cfg?.prices?.ltc > 0, '$' + (cfg?.prices?.ltc || 0));
+ok('LTC price feed live', cfg?.ltcUsd > 0, '$' + (cfg?.ltcUsd || 0));
 
 await api('POST', '/admin/credit', { user, asset: 'eth', amount: (10n ** 18n).toString() }, true);
 const mk = await api('POST', '/markets', { name: 'Lite Penguin', symbol: 'LTPNG', network: 'litvm', description: 'pre-market zkLTC pair',
