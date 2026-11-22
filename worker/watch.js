@@ -156,6 +156,15 @@ export function installWatch(Cls, H) {
   P.zwSay = async function (text, st) {
     const chat = this.meta('tg_owner_chat') || this.meta('watch_chat');
     st.log = (st.log || []).concat([{ ts: now(), text: text.replace(/<[^>]+>/g, '').slice(0, 200) }]).slice(-50);
+    if (this.env.ZW_BOT_TOKEN) {
+      this.zbInit();
+      const n = this.sql.exec('SELECT COUNT(*) c FROM zw_subs WHERE active=1').one().c;
+      if (n) {
+        this.sql.exec('INSERT INTO zw_outbox (chat_id,text,tries,created) SELECT chat_id, ?, 0, ? FROM zw_subs WHERE active=1', text, now());
+        await this.zbDrain().catch(() => {});
+        return true;
+      }
+    }
     if (chat && this.env.TG_BOT_TOKEN) {
       const r = await this.tg('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
       return !!(r && r.ok);
@@ -399,6 +408,7 @@ export function installWatch(Cls, H) {
           st.peer = peer;
         } catch { /* next round */ }
       }
+      if (this.env.ZW_BOT_TOKEN) await this.zbDrain().catch(() => {});
       st.last = t; st.lastMs = now() - t;
     } finally {
       this.zwSave(st);
@@ -428,6 +438,149 @@ export function installWatch(Cls, H) {
     const st = this.zwState();
     if (!st.last || now() - st.last >= ZW.tick - 300) await this.zwTick().catch(() => {});
     await this.zwArm().catch(() => {});
+  };
+
+  // ───────────── @RookeryAlertsBot: public Zero alerts, /start in any private chat or group ─────────────
+  P.zb = async function (method, body) {
+    if (!this.env.ZW_BOT_TOKEN) return null;
+    const r = await fetch(`https://api.telegram.org/bot${this.env.ZW_BOT_TOKEN}/${method}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
+    return r.json().catch(() => null);
+  };
+  P.zbInit = function () {
+    if (this._zbInit) return; this._zbInit = true;
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_subs (chat_id TEXT PRIMARY KEY, type TEXT, title TEXT, active INTEGER DEFAULT 1, added INTEGER, updated INTEGER)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, text TEXT, tries INTEGER DEFAULT 0, created INTEGER)`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_upd (id INTEGER PRIMARY KEY, ts INTEGER)`);
+  };
+  P.zbSub = function (chat, on) {
+    this.zbInit();
+    const title = chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || '';
+    this.sql.exec(`INSERT INTO zw_subs (chat_id,type,title,active,added,updated) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(chat_id) DO UPDATE SET active=excluded.active, title=excluded.title, type=excluded.type, updated=excluded.updated`,
+      String(chat.id), chat.type || '', title.slice(0, 80), on ? 1 : 0, now(), now());
+  };
+  // send queued alerts; Telegram allows ~30 msg/s overall and ~20/min per group, 25 per pass keeps us well inside
+  P.zbDrain = async function (max = 25) {
+    this.zbInit();
+    if (this._zbDraining) return; this._zbDraining = true;
+    try {
+      if (Number(this.meta('zb_pause_until') || 0) > now()) return;
+      const rows = this.sql.exec('SELECT * FROM zw_outbox ORDER BY id LIMIT ?', max).toArray();
+      for (const m of rows) {
+        const r = await this.zb('sendMessage', { chat_id: m.chat_id, text: m.text, parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
+        if (r?.ok) { this.sql.exec('DELETE FROM zw_outbox WHERE id=?', m.id); continue; }
+        const code = r?.error_code, d = String(r?.description || '');
+        if (code === 429) { this.setMeta('zb_pause_until', String(now() + 1000 * Number(r?.parameters?.retry_after || 3))); break; }
+        if (code === 403 || /chat not found|kicked|blocked|deactivated|not enough rights/i.test(d)) {
+          this.sql.exec('UPDATE zw_subs SET active=0, updated=? WHERE chat_id=?', now(), m.chat_id);
+          this.sql.exec('DELETE FROM zw_outbox WHERE chat_id=?', m.chat_id); continue;
+        }
+        if (r?.parameters?.migrate_to_chat_id) { // group upgraded to supergroup
+          const nid = String(r.parameters.migrate_to_chat_id);
+          this.sql.exec('UPDATE zw_subs SET chat_id=? WHERE chat_id=?', nid, m.chat_id);
+          this.sql.exec('UPDATE zw_outbox SET chat_id=? WHERE chat_id=?', nid, m.chat_id); continue;
+        }
+        if (m.tries >= 3) this.sql.exec('DELETE FROM zw_outbox WHERE id=?', m.id);
+        else this.sql.exec('UPDATE zw_outbox SET tries=tries+1 WHERE id=?', m.id);
+      }
+      this.sql.exec('DELETE FROM zw_outbox WHERE created<?', now() - 3600e3);
+    } finally { this._zbDraining = false; }
+  };
+
+  P.zwStatusText = function () {
+    const st = this.zwState();
+    const b = st.bridge || {};
+    const live = Object.entries(st.rpc || {}).filter(([, v]) => v.live).map(([k]) => k);
+    const chainLive = live.length || st.firstFromZero || st.firstZeroTx;
+    const ago = st.last ? Math.max(0, Math.round((now() - st.last) / 1000)) : null;
+    const icon = (x) => x === 'open' ? '🟢 open' : x === 'closed' ? '🔴 closed' : '⚪ checking';
+    return [
+      '🛰 <b>Zero by LayerZero · live watch</b>',
+      '',
+      `Network: ${chainLive ? '🟢 <b>LIVE</b>' : '⏳ not live yet (official launch: Nov 30, 2026)'}`,
+      `ZRO → Zero bridge: Ethereum ${icon(b.eth?.state)} · Arbitrum ${icon(b.arb?.state)} · Base ${icon(b.base?.state)}`,
+      `ZRO transfers to Zero seen: ${st.transfers || 0} · delivered: ${st.delivered || 0}`,
+      `LayerZero messages to / from Zero: ${st.feedTo || 0} / ${st.feedFrom || 0}`,
+      `Public Zero RPC: ${live.length ? live.map(u => `<code>${u}</code>`).join(', ') : 'none yet'}`,
+      ago !== null ? `Last check: ${ago}s ago · checks every ~3s` : null,
+      '',
+      'Alerts land here the moment the bridge opens, ZRO moves to Zero, the first message leaves Zero or an RPC goes live.',
+      '<i>Community tool, not affiliated with LayerZero. Not financial advice.</i>',
+    ].filter(x => x !== null).join('\n').replace(/<i>|<\/i>/g, '');
+  };
+
+  P.zbUpdate = async function (u) {
+    this.zbInit();
+    const me = this.meta('zb_username') || 'RookeryAlertsBot';
+    const kb = { inline_keyboard: [[{ text: '➕ Add to group', url: `https://t.me/${me}?startgroup=true` }], [{ text: 'LayerZero Scan', url: 'https://layerzeroscan.com' }, { text: 'Official staking', url: 'https://staking.layerzero.network' }]] };
+    // bot added to / removed from a group or channel
+    if (u.my_chat_member) {
+      const cm = u.my_chat_member, st = cm.new_chat_member?.status;
+      if (['member', 'administrator'].includes(st)) {
+        this.zbSub(cm.chat, true);
+        await this.zb('sendMessage', { chat_id: cm.chat.id, text: '✅ This chat now gets Zero network alerts.\n\n' + this.zwStatusText(), parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: kb });
+      } else if (['left', 'kicked'].includes(st)) this.zbSub(cm.chat, false);
+      return;
+    }
+    const msg = u.message || u.channel_post;
+    if (!msg) return;
+    const text = (msg.text || '').trim();
+    if (!text.startsWith('/')) return;
+    const [cmdRaw, ...args] = text.split(/\s+/);
+    const [cmdName, at] = cmdRaw.split('@');
+    if (at && at.toLowerCase() !== me.toLowerCase()) return; // command meant for another bot in the group
+    const cmd = cmdName.toLowerCase();
+    const chat = msg.chat;
+    const isGroup = ['group', 'supergroup', 'channel'].includes(chat.type);
+    const reply = (t, extra = {}) => this.zb('sendMessage', { chat_id: chat.id, text: t, parse_mode: 'HTML', disable_web_page_preview: true, ...(msg.message_id ? { reply_to_message_id: msg.message_id, allow_sending_without_reply: true } : {}), ...extra });
+    const isAdmin = async () => {
+      if (chat.type === 'channel' || !isGroup) return true;
+      if (!msg.from) return false;
+      const r = await this.zb('getChatMember', { chat_id: chat.id, user_id: msg.from.id });
+      return r?.ok && ['creator', 'administrator'].includes(r.result.status);
+    };
+    const owner = String(msg.from?.id || '') === String(this.meta('tg_owner_chat') || '-');
+
+    if (cmd === '/start' || cmd === '/subscribe') {
+      this.zbSub(chat, true);
+      return reply('✅ Subscribed to Zero alerts.\n\n' + this.zwStatusText(), { reply_markup: kb });
+    }
+    if (cmd === '/status' || cmd === '/zero') return reply(this.zwStatusText(), { reply_markup: kb });
+    if (cmd === '/stop' || cmd === '/unsubscribe') {
+      if (!(await isAdmin())) return reply('Only group admins can turn alerts off here.');
+      this.zbSub(chat, false);
+      return reply('🔕 Alerts off for this chat. Send /start to turn them back on.');
+    }
+    if (cmd === '/zerorpc' && owner) {
+      const st = this.zwState();
+      const rm = (args[0] || '').toLowerCase() === 'remove';
+      let url = String((rm ? args[1] : args[0]) || '').trim();
+      if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+      if (!/^https:\/\/[^\s]+$/.test(url)) return reply('Usage: <code>/zerorpc https://…</code> or <code>/zerorpc remove https://…</code>');
+      if (rm) { st.extraRpcs = (st.extraRpcs || []).filter(x => x !== url); this.zwSave(st); return reply('Removed ' + url); }
+      st.extraRpcs = [...new Set([...(st.extraRpcs || []), url])].slice(0, 10);
+      const c = await this.zwRpcCheck(url, st);
+      this.zwSave(st);
+      return reply(c.live ? `🟢 Verified Zero RPC, watching it\n<code>${url}</code>\nblock ${c.block}` : `👀 Watching, not live yet: ${c.why}\n<code>${url}</code>`);
+    }
+    if (cmd === '/help') return reply('/start — get Zero alerts here and see the current status\n/status — current status\n/stop — stop alerts (group admins)\n\nAdd me to any group: the group is subscribed automatically.', { reply_markup: kb });
+  };
+
+  P.zbSetup = async function (host) {
+    this.zbInit();
+    let secret = this.meta('zb_secret');
+    if (!secret) { secret = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join(''); this.setMeta('zb_secret', secret); }
+    const me = await this.zb('getMe', {});
+    if (me?.ok) this.setMeta('zb_username', me.result.username);
+    const out = { me: me?.result?.username };
+    out.webhook = await this.zb('setWebhook', { url: `https://${host}/api/zbot/hook/${secret}`, secret_token: secret, allowed_updates: ['message', 'channel_post', 'my_chat_member'], drop_pending_updates: true });
+    const cmds = [{ command: 'start', description: 'Get Zero alerts here + current status' }, { command: 'status', description: 'Zero network and bridge status' }, { command: 'stop', description: 'Stop alerts in this chat' }, { command: 'help', description: 'How it works' }];
+    out.cmds = await this.zb('setMyCommands', { commands: cmds });
+    out.cmdsGroups = await this.zb('setMyCommands', { commands: cmds, scope: { type: 'all_group_chats' } });
+    out.desc = await this.zb('setMyDescription', { description: 'Live alerts for Zero, the LayerZero L1: the second the ZRO → Zero bridge opens or closes, ZRO starts moving to Zero, the first LayerZero message leaves Zero, or a Zero RPC goes live.\n\nPress Start, or add me to your group: it gets the alerts automatically.\n\nCommunity tool, not affiliated with LayerZero. Not financial advice.' });
+    out.short = await this.zb('setMyShortDescription', { short_description: 'Zero (LayerZero L1) live alerts: bridge open, ZRO transfers, first blocks, RPC live. Add me to your group.' });
+    return out;
   };
 
   P.watchAlert = async function (target, r, kind) {

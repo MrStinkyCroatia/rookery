@@ -2799,6 +2799,19 @@ export class Books {
         }
         return json({ ok: true });
       }
+      if (p.startsWith('/zbot/hook/')) {
+        const secret = this.meta('zb_secret');
+        if (!secret || p !== '/zbot/hook/' + secret || req.headers.get('x-telegram-bot-api-secret-token') !== secret) return json({ ok: false }, 403);
+        const upd = await req.json().catch(() => null);
+        if (upd) {
+          this.zbInit();
+          const uid = Number(upd.update_id || 0);
+          if (uid && this.sql.exec('SELECT 1 FROM zw_upd WHERE id=?', uid).toArray().length) return json({ ok: true, dup: true });
+          if (uid) { this.sql.exec('INSERT OR IGNORE INTO zw_upd (id,ts) VALUES (?,?)', uid, now()); this.sql.exec('DELETE FROM zw_upd WHERE ts<?', now() - 864e5); }
+          this.ctx.waitUntil(this.zbUpdate(upd).catch((e) => console.log('zbot', e?.stack || e)));
+        }
+        return json({ ok: true });
+      }
       if (method === 'GET' && p.startsWith('/snb/login/')) {
         this.snbInit();
         const tok = p.split('/')[3] || '';
@@ -3588,6 +3601,9 @@ export class Books {
             if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
             if (b.zero) return json({ ok: true, tick: await this.zwTick({ force: true, meta: !!b.meta }), state: this.zwState() });
             if (b.zeroBacktest) return json({ ok: true, backtest: await this.zwBacktest(b.zeroBacktest) });
+            if (b.zbotSetup) return json({ ok: true, setup: await this.zbSetup(this.meta('public_host') || url.host) });
+            if (b.zbotSubs) { this.zbInit(); return json({ ok: true, subs: this.sql.exec('SELECT chat_id,type,title,active,added FROM zw_subs ORDER BY added').toArray(), outbox: this.sql.exec('SELECT COUNT(*) c FROM zw_outbox').one().c, status: this.zwStatusText() }); }
+            if (b.zbotUpdate) { await this.zbUpdate(b.zbotUpdate); return json({ ok: true }); }
             if (b.zeroFeedTest) { const hits = await this.zwFeed({}, 100, Number(b.zeroFeedTest)); return json({ ok: true, eid: Number(b.zeroFeedTest), hits: hits.length, sample: hits.slice(0, 3) }); }
             if (b.zeroActTest) { const st = {}; return json({ ok: true, act: await this.zwActivity(String(b.zeroActTest), st) }); }
             if (b.zeroCmdTest) {
