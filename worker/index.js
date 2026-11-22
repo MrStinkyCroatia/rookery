@@ -3490,6 +3490,11 @@ export class Books {
           }
           if (b.run) return json(await this.zeroMigrate(b.run));
           if (b.finalize) return json(this.zeroFinalize(b.finalize === 'force' ? { force: true } : {}));
+          if (b.uiMarkMigrated && /staging/.test(url.host)) {           // staging only: preview the post-migration page
+            try { this.sql.exec('ALTER TABLE markets ADD COLUMN zero_token TEXT'); } catch { /* exists */ }
+            this.sql.exec(`UPDATE markets SET migrated=?, zero_token=? WHERE id=? AND network='zero'`, b.undo ? 0 : 1, b.undo ? null : this.zeroTokenAddr(b.uiMarkMigrated), b.uiMarkMigrated);
+            return json({ ok: true });
+          }
           if (b.fund) return json(await this.zeroFund(b.fund));
           if (b.wdTick) return json(await this.zeroWdTick());
           if (b.runStatus) return json({ status: JSON.parse(this.meta('zero_run_status') || 'null'), state: JSON.parse(this.meta('zero_run') || 'null'),

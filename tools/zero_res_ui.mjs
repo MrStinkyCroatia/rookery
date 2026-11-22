@@ -23,9 +23,9 @@ for (const [name, w, h, mobile] of [['desktop', 1400, 1000, false], ['mobile', 3
   await cmd('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: mobile ? 2 : 1, mobile });
   await cmd('Page.navigate', { url: `${BASE}/?nocache=${Date.now()}#/t/${ID}` });
   await sleep(7000);
-  out[name] = await ev(`(() => { const p = document.querySelector('.zero-res'); if (!p) return { panel: false };
+  out[name] = await ev(`(() => { const p = document.querySelector('.zero-live') || document.querySelector('.zero-res'); if (!p) return { panel: false };
     p.scrollIntoView({ block: 'center' }); const r = p.getBoundingClientRect();
-    return { panel: true, addr: p.querySelector('.zr-addr')?.getAttribute('data-copy'), text: p.innerText.slice(0, 260), width: Math.round(r.width),
+    return { panel: true, addr: p.querySelector('.zr-addr')?.getAttribute('data-copy'), text: p.innerText.slice(0, 700), ledgerTradeHidden: [...document.querySelectorAll('.panel.pb')].filter(x => x.querySelector('#paySel')).every(x => getComputedStyle(x).display === 'none'), width: Math.round(r.width),
       overflowX: document.documentElement.scrollWidth > window.innerWidth, kvContract: [...document.querySelectorAll('.kv')].find(k => /Contract/.test(k.innerText))?.innerText }; })()`);
   await sleep(600);
   const shot = await cmd('Page.captureScreenshot', { format: 'png' });

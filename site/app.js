@@ -1257,12 +1257,13 @@ async function viewToken(id) {
         <a class="btn lg wide ghost" style="margin-top:8px" href="#/wallet">Withdraw to my Stellar wallet</a>` : '<div class="prog big"><i style="width:70%"></i></div>'}
       </div>` : ''}
       ${m.rh ? `<div class="panel pb rh-pane" id="rhPane"></div>` : ''}
-      ${m.zeroContract ? `<div class="panel pb zero-res">
+      ${m.network === 'zero' && m.migrated ? `<div class="panel pb zero-live" id="zeroLive"></div>` : ''}
+      ${m.zeroContract && !m.migrated ? `<div class="panel pb zero-res">
         <div class="zr-h"><span class="tag net-zero">RESERVED</span><b>Zero contract</b></div>
         <button class="zr-addr mono" data-copy="${esc(m.zeroContract)}" title="Copy address">${esc(m.zeroContract)}<span class="zr-cp">⧉</span></button>
         <p class="mu zr-n">This is the address $${esc(m.symbol)} gets on Zero mainnet. Every balance moves here 1:1. Anything else claiming to be $${esc(m.symbol)} on Zero is fake.</p>
       </div>` : ''}
-      <div class="panel pb" ${(m.network === 'stellar' && (m.migrated || m.stellar?.job)) || m.rh ? 'style="display:none"' : ''}>
+      <div class="panel pb" ${(m.network === 'stellar' && (m.migrated || m.stellar?.job)) || m.rh || (m.network === 'zero' && m.migrated) ? 'style="display:none"' : ''}>
         <div class="tb-tabs"><button class="buy on" data-side="buy">Buy</button><button class="sell" data-side="sell">Sell</button></div>
         <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span>${(QA === 'zltc' ? [['eth', 'ETH'], ['ltc', 'LTC'], ['zltc', 'zkLTC']] : [['zro', 'ZRO'], ['eth', 'ETH']]).map(([k, l]) => `<button data-a="${k}">${l}</button>`).join('')}</div>
         <div class="amt"><input id="amt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span class="unit" id="unit"></span></div>
@@ -1314,6 +1315,7 @@ async function viewToken(id) {
     </aside>
   </section>`;
   if (m.rh) RHW.pane(m);
+  if (m.network === 'zero' && m.migrated) ZW.pane(m);
 
   /* chart */
   const LW = window.LightweightCharts;
@@ -2914,7 +2916,7 @@ function viewDocs() {
         <div><span class="n">01</span><b>Deposit ZRO, ETH or XLM</b><span>ZRO from Ethereum, Base, Arbitrum, BNB Chain or Optimism; ETH from Ethereum, Base or Arbitrum; XLM on Stellar with your memo.</span></div>
         <div><span class="n">02</span><b>Create or trade</b><span>Tokens trade instantly on a bonding curve, paid with ZRO or ETH and shown in USD.</span></div>
         <div><span class="n">03</span><b>Bond or graduate</b><span>At 800M sold the curve becomes a Rookery pool. Stellar tokens graduate into an Aquarius pool at ${gradK()}.</span></div>
-        <div><span class="n">04</span><b>Mainnet</b><span>Balances mint 1:1 on the target chain, the reserve seeds the first pool.</span></div>
+        <div><span class="n">04</span><b>Mainnet</b><span>Every balance moves 1:1 to a contract address reserved in advance; the curve continues on-chain.</span></div>
       </div>
 
       <h2 id="networks">Supported networks</h2>
@@ -2966,15 +2968,17 @@ function viewDocs() {
 
       <h2 id="migration">Bonding and mainnet migration</h2>
       <p><b>Bonding (before mainnet):</b> when 800M tokens are sold, the curve turns into a Rookery pool: the ZRO raised on the curve plus the 200M reserved tokens, priced with the same constant-product math as a DEX. The pool opens at exactly the curve's final price, so there is no jump; the small part of the raised ZRO that does not fit at that price buys and burns $臭企鹅. Buys and sells continue without any market-cap limit, so a token never freezes while it waits for its chain.</p>
-      <p>When the target network launches:</p>
+      <p><b>Zero (LayerZero) at mainnet.</b> Every Zero token already has its contract address reserved, and it is shown on the token page. The address is fixed by math: it depends only on Rookery's dedicated Zero deployer and the token's ID (CREATE3), never on order, name or compiler settings, and one ID can only ever be deployed once. Anyone can check it on-chain with <span class="mono">predictImported("token-id")</span> on the curve.</p>
       <ol>
-        <li>Trading on Rookery is paused for that network and a final snapshot of every balance is published.</li>
-        <li>The token contract is deployed on the new chain with a fixed supply of 1,000,000,000.</li>
-        <li>Each holder receives exactly their Rookery balance, 1:1. Burned tokens stay burned.</li>
-        <li>The Rookery pool (or, for tokens that have not bonded yet, the curve's ZRO plus the unsold and reserved tokens) becomes the first DEX pool at exactly the last Rookery price. LP tokens are locked.</li>
-        <li>Holders can withdraw to their own wallets on the new chain.</li>
+        <li>As soon as a Zero RPC is verified live (chain ID 33002, the LayerZero endpoint present, blocks moving), trading on Rookery pauses for Zero tokens and a final snapshot of every balance is published with its SHA-256 at <span class="mono">/api/migration/zero/snapshot.json</span>. Pending holder rewards are paid out in ZRO first, so nothing is lost.</li>
+        <li>Each token is deployed on Zero at its reserved address with a fixed supply of 1,000,000,000. Burned tokens stay burned.</li>
+        <li>The bonding curve moves on-chain 1:1: the same tokens sold, the same ZRO reserve and the same price, to the wei. Trading continues on the on-chain Rookery curve, from your own wallet.</li>
+        <li>Your balance moves 1:1 too. It stays in your Rookery account, and you withdraw it to your own Zero wallet whenever you want, from the token page.</li>
+        <li>When an on-chain curve sells out, the token graduates to a Uniswap V2 pool on Zero with the 200M reserved tokens. LP tokens go to the dead address, so the liquidity is locked forever.</li>
       </ol>
-      <div class="callout"><b>Nothing to claim, nothing to connect.</b> Rookery will never ask you to sign anything on a third-party site for the migration.</div>
+      <p><b>Taxes on Zero.</b> The creator's marketing and burn taxes keep working the same way. Holder rewards change form: on-chain they are paid in the token itself to wallets that hold it, instead of in ZRO on the pre-market ledger. Withdraw to your own wallet to receive them.</p>
+      <p><b>GIWA and LitVM</b> follow the same steps when their mainnets launch.</p>
+      <div class="callout"><b>Nothing to claim, nothing to connect.</b> Rookery will never ask you to sign anything on a third-party site for the migration. Anything claiming to be a Rookery token on Zero at a different address than the one on its token page is fake.</div>
 
       <h2 id="stellar">Stellar</h2>
       <p>Stellar is the one network on Rookery that is already live. A Stellar token is not a pre-market bet: it trades for real from day one, and at <b>${fmtUsd(S.stats.stellar?.gradUsd || 46000)}</b> market cap it graduates on-chain into an Aquarius pool on Stellar mainnet. Everything below is specific to Stellar; the curve itself works exactly like the other networks.</p>
@@ -3514,3 +3518,92 @@ new MutationObserver(() => {
   ltcMo = setTimeout(() => { ltcMo = null; const el = $('#ltcAddrBox'); if (el && el.innerText.trim() === '') ltcPaintAddr(); }, 150);
 }).observe(document.body, { childList: true, subtree: true });
 setInterval(() => { if ($('#ltcList') && S.me) { ltcPaintList(); ltcPaintAddr(); } }, 8000);
+
+
+// ───────────── Zero (after the 1:1 migration): withdraw from Rookery custody + trade the on-chain curve from a wallet
+const ZW = {
+  CHAIN: 33002, info: null,
+  async meta() { if (!ZW.info || Date.now() - ZW.info._t > 60000) ZW.info = { ...(await api('/migration/zero')), _t: Date.now() }; return ZW.info; },
+  w: (x) => BigInt(x).toString(16).padStart(64, '0'),
+  a: (x) => String(x).toLowerCase().replace(/^0x/, '').padStart(64, '0'),
+  async call(to, data) {
+    const i = await ZW.meta(); if (!i.rpc) throw new Error('Zero RPC not available yet');
+    const r = await fetch(i.rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }) });
+    const j = await r.json(); if (j.error) throw new Error(j.error.message); return BigInt(j.result || '0x0');
+  },
+  async connect() {
+    const i = await ZW.meta();
+    const a = await EVMW.account();
+    const eth = EVMW.eth(), want = EVMW.hex(ZW.CHAIN);
+    if (String(await eth.request({ method: 'eth_chainId' })).toLowerCase() !== want) {
+      try { await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: want }] }); }
+      catch (e) {
+        if (e?.code !== 4902 || !i.rpc) throw e;
+        await eth.request({ method: 'wallet_addEthereumChain', params: [{ chainId: want, chainName: 'Zero (LayerZero)', rpcUrls: [i.rpc], nativeCurrency: { name: 'ZRO', symbol: 'ZRO', decimals: 18 }, ...(i.explorer ? { blockExplorerUrls: [i.explorer] } : {}) }] });
+      }
+    }
+    return a;
+  },
+  txLink(h) { const e = ZW.info?.explorer; return e ? `<a href="${esc(e.replace(/\/$/, ''))}/tx/${esc(h)}" target="_blank" rel="noopener">${esc(h.slice(0, 10))}…</a>` : `<span class="mono">${esc(h.slice(0, 10))}…</span>`; },
+  async pane(m) {
+    const box = $('#zeroLive'); if (!box) return;
+    const i = await ZW.meta().catch(() => ({}));
+    let mine = 0n;
+    if (S.me) { try { const me = await api('/me'); mine = BigInt((me.holdings || me.hold || []).find(h => h.id === m.id)?.amount || 0); } catch { /* signed out */ } }
+    box.innerHTML = `
+      <div class="zr-h"><span class="tag net-zero">LIVE ON ZERO</span><b>$${esc(m.symbol)} is on-chain</b></div>
+      <button class="zr-addr mono" data-copy="${esc(m.zeroContract)}" title="Copy address">${esc(m.zeroContract)}<span class="zr-cp">⧉</span></button>
+      <div class="zl-row"><button class="btn sm ghost" id="zlWatch">Add to wallet</button>${i.explorer ? `<a class="btn sm ghost" target="_blank" rel="noopener" href="${esc(i.explorer.replace(/\/$/, ''))}/token/${esc(m.zeroContract)}">Explorer ↗</a>` : ''}</div>
+      <div class="zl-sec"><h4>Withdraw to your Zero wallet</h4>
+        <p class="mu zr-n">Your Rookery balance: <b>${fmtT(mine.toString())} $${esc(m.symbol)}</b>. It moved 1:1 from the pre-market.</p>
+        ${S.me ? `<input id="zlTo" class="inp mono" placeholder="0x… your wallet on Zero" value="${esc(S.me.wallet || '')}">
+        <div class="zl-amt"><input id="zlAmt" class="inp" placeholder="Amount" inputmode="decimal"><button class="btn sm ghost" id="zlMax">Max</button></div>
+        <button class="btn lg wide" id="zlGo" ${mine > 0n ? '' : 'disabled'}>Withdraw to Zero</button><div id="zlHist" class="zl-hist"></div>` : `<a class="btn lg wide" href="#/login">Log in to withdraw</a>`}
+      </div>
+      <div class="zl-sec"><h4>Trade on Zero from your wallet</h4>
+        <div class="tb-tabs zl-tabs"><button class="buy on" data-zs="buy">Buy</button><button class="sell" data-zs="sell">Sell</button></div>
+        <div class="zl-amt"><input id="zlTrade" class="inp" placeholder="ZRO to spend" inputmode="decimal"><span class="mu" id="zlUnit">ZRO</span></div>
+        <p class="mu zr-n" id="zlQuote">${i.rpc ? 'Enter an amount for a live quote from the curve.' : 'Zero RPC is not available yet.'}</p>
+        <button class="btn lg wide" id="zlTradeGo">Buy with wallet</button>
+      </div>`;
+    const unit = 10n ** 18n, parse = (v) => { const [a, b = ''] = String(v || '').trim().split('.'); if (!/^\d*$/.test(a) || !/^\d*$/.test(b)) return 0n; return BigInt(a || '0') * unit + BigInt((b + '0'.repeat(18)).slice(0, 18) || '0'); };
+    $('#zlWatch').onclick = async () => { try { await ZW.connect(); await EVMW.eth().request({ method: 'wallet_watchAsset', params: { type: 'ERC20', options: { address: m.zeroContract, symbol: m.symbol.slice(0, 11), decimals: 18 } } }); } catch (e) { toast(esc(RHW.errMsg(e)), 'bad'); } };
+    if ($('#zlMax')) $('#zlMax').onclick = () => { $('#zlAmt').value = (Number(mine) / 1e18).toString(); };
+    const hist = async () => {
+      const el = $('#zlHist'); if (!el) return;
+      const r = await api('/zero/withdrawals').catch(() => ({ items: [] }));
+      const rows = (r.items || []).filter(x => x.market === m.id).slice(0, 5);
+      el.innerHTML = rows.map(x => `<div class="zl-h"><span>${fmtT(x.amount)}</span><span class="mu">${esc(x.to_addr.slice(0, 6))}…${esc(x.to_addr.slice(-4))}</span><span class="${x.status === 'sent' ? 'up' : x.status === 'refunded' ? 'dn' : 'mu'}">${esc(x.status)}</span>${x.txid ? ZW.txLink(x.txid) : ''}</div>`).join('');
+    };
+    hist();
+    if ($('#zlGo')) $('#zlGo').onclick = async () => {
+      const btn = $('#zlGo'); btn.disabled = true; btn.textContent = 'Sending…';
+      try { await api('/zero/withdraw', { market: m.id, to: $('#zlTo').value, amount: parse($('#zlAmt').value).toString() }); toast('Withdrawal queued: it lands in your wallet in a few seconds'); setTimeout(() => ZW.pane(m), 4000); }
+      catch (e) { toast(esc(e.message || e), 'bad'); btn.disabled = false; btn.textContent = 'Withdraw to Zero'; }
+    };
+    let side = 'buy';
+    $$('[data-zs]').forEach(b => b.onclick = () => { side = b.dataset.zs; $$('[data-zs]').forEach(x => x.classList.toggle('on', x === b)); $('#zlUnit').textContent = side === 'buy' ? 'ZRO' : '$' + m.symbol; $('#zlTrade').placeholder = side === 'buy' ? 'ZRO to spend' : 'Tokens to sell'; $('#zlTradeGo').textContent = side === 'buy' ? 'Buy with wallet' : 'Sell with wallet'; $('#zlTrade').dispatchEvent(new Event('input')); });
+    let qOut = 0n;
+    $('#zlTrade').oninput = async () => {
+      const amt = parse($('#zlTrade').value); qOut = 0n;
+      if (!amt || !i.rpc) return;
+      try {
+        qOut = await ZW.call(i.curve, (side === 'buy' ? '0x0d7a94f6' : '0xd98b2f5c') + ZW.a(m.zeroContract) + ZW.w(amt));
+        $('#zlQuote').textContent = side === 'buy' ? `You get ≈ ${fmtT(qOut.toString())} $${m.symbol} (2% slippage limit)` : `You get ≈ ${(Number(qOut) / 1e18).toFixed(4)} ZRO (2% slippage limit)`;
+      } catch (e) { $('#zlQuote').textContent = 'Quote failed: ' + (e.message || e); }
+    };
+    $('#zlTradeGo').onclick = async () => {
+      const btn = $('#zlTradeGo'), amt = parse($('#zlTrade').value);
+      if (!amt || !qOut) return toast('Enter an amount first', 'bad');
+      const min = (qOut * 98n) / 100n;
+      try {
+        btn.disabled = true; btn.textContent = 'Confirm in your wallet…';
+        const from = await ZW.connect();
+        const data = (side === 'buy' ? '0xa59ac6dd' + ZW.a(m.zeroContract) + ZW.w(0) + ZW.w(min) : '0x6a272462' + ZW.a(m.zeroContract) + ZW.w(amt) + ZW.w(min));
+        const hash = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: i.curve, data, value: side === 'buy' ? EVMW.hex(amt) : '0x0' }] });
+        toast('Sent on Zero: ' + hash.slice(0, 10) + '…');
+      } catch (e) { toast(esc(RHW.errMsg(e)).replace('Robinhood Chain', 'Zero').replace('ETH', 'ZRO'), 'bad'); }
+      finally { btn.disabled = false; btn.textContent = side === 'buy' ? 'Buy with wallet' : 'Sell with wallet'; }
+    };
+  },
+};
