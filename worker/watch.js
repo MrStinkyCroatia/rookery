@@ -486,10 +486,12 @@ export function installWatch(Cls, H) {
         for (const r of res) {
           const was = st.rpc[r.url]?.live || false;
           st.rpc[r.url] = { live: r.live, why: r.why || '', block: r.block || 0, supply: r.supply || 0, checked: t };
+          if (r.live && this.migOnZeroRpc) { const mr = await this.migOnZeroRpc(r.url, r.block, st).catch(e => ({ error: String(e.message || e) })); if (mr && !mr.waiting) st.migResult = { ts: t, ...(mr.error ? { error: mr.error } : { sha256: mr.sha256, markets: mr.markets }) }; }
           if (r.live && !was) await this.zwSay(`🟢 <b>Zero RPC is LIVE</b>\n<code>${r.url}</code>\nchain id 33002 · block ${r.block}${r.supply ? ` · ZRO on Zero ${r.supply.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : ''}`, st);
           if (!r.live && was) await this.zwSay(`🔴 <b>Zero RPC stopped answering</b>\n<code>${r.url}</code>\n${r.why || ''}`, st);
         }
         out.rpcLive = res.filter(r => r.live).map(r => r.url);
+        if (!out.rpcLive.length) st.migConfirm = 0; // confirmations must be consecutive
       }
 
       // 5 · official metadata (rpc list for "zerointerop") every 100th tick ≈ 5 min, + peer every 20th ≈ 1 min

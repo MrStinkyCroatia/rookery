@@ -6,6 +6,7 @@ import { installRhpad } from './rhpad.js';
 import { installLtcdep } from './ltcdep.js';
 import { installLtcaddr } from './ltcaddr.js';
 import { installWatch } from './watch.js';
+import { installZeroMig } from './zeromig.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -1631,6 +1632,7 @@ export class Books {
     let res, res_graduated = false;
     {
       let m = this.market(market);
+      if (this.netPaused(m.network)) throw new Error(this.netPauseMsg(m.network));
       if (m.rh_token) throw new Error('This token lives on Robinhood Chain: buy and sell it from your wallet');
       if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : 'Token migrated to mainnet');
       // bonded Stellar tokens keep trading on the Rookery pool; only the graduation itself freezes the book
@@ -1839,6 +1841,7 @@ export class Books {
     if (!symbol) throw new Error('Ticker is required');
     const network = ['giwa', 'stellar', 'robinhood', 'litvm'].includes(b.network) ? b.network : 'zero';
     if (network === 'robinhood' && this.rhLive()) throw new Error('Robinhood Chain tokens are launched from your wallet: the contract goes on-chain right away');
+    if (this.netPaused(network)) throw new Error(this.netPauseMsg(network));
     // double-submit guard: the same creator can't launch the same name twice within 2 minutes
     const dup = this.sql.exec(`SELECT id FROM markets WHERE creator_id=? AND lower(trim(name))=lower(?) AND created>? ORDER BY created DESC LIMIT 1`,
       user.id, name, now() - 120_000).toArray()[0];
@@ -2883,6 +2886,16 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      if (method === 'GET' && p === '/migration/zero') {
+        const meta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
+        return json({ network: 'zero', paused: this.netPaused('zero'), snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: '/api/migration/zero/snapshot.json' } : null,
+          plan: 'Variant B: each curve moves 1:1 to an on-chain Rookery curve on Zero; balances stay in your account and can be withdrawn to your Zero wallet.' });
+      }
+      if (method === 'GET' && p === '/migration/zero/snapshot.json') {
+        const d = await this.migSnapshotDoc('zero');
+        if (!d) return json({ error: 'snapshot not taken yet' }, 404);
+        return new Response(d.body, { headers: { 'content-type': 'application/json', 'x-sha256': d.meta.sha256, 'cache-control': 'public, max-age=300' } });
+      }
       if (method === 'GET' && p === '/stats') {
         const volUsd = this.sql.exec('SELECT volume, quote, rh_quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * (r.rh_quote ? this.rhMarketUsd(r) : this.usdOf(qa(r))), 0);
         const burn = B(this.meta('plaunch_burn')), burnEth = B(this.meta('plaunch_burn_eth')), burnXlm = B(this.meta('plaunch_burn_xlm'));
@@ -3441,6 +3454,16 @@ export class Books {
           });
           return json({ ok: true, ...report });
         }
+        if (p === '/admin/migration') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          const net = ['zero', 'giwa', 'litvm'].includes(b.network) ? b.network : 'zero';
+          if (b.pause !== undefined) this.setNetPaused(net, !!b.pause);
+          if (b.auto !== undefined) this.setMeta('mig_auto_' + net, b.auto ? '1' : '0');
+          if (b.snapshot) return json(await this.migSnapshot(net, { reason: b.reason || 'manual', pause: b.pauseOnSnapshot !== false, force: !!b.force, rehearsal: !!b.rehearsal }));
+          if (b.clearSnapshot) { this.setMeta('mig_snapshot_' + net, ''); }
+          return json({ ok: true, network: net, paused: this.netPaused(net), auto: this.meta('mig_auto_' + net) !== '0',
+            snapshot: JSON.parse(this.meta('mig_snapshot_' + net) || 'null'), rehearsal: JSON.parse(this.meta('mig_snapshot_' + net + '_rehearsal') || 'null') });
+        }
         if (p === '/admin/pause') { this.setMeta('withdrawals_paused', url.searchParams.get('on') === '1' ? '1' : '0'); return json({ ok: true }); }
         if (p === '/admin/burn/config') {
           const b = await req.json();
@@ -3926,6 +3949,7 @@ export class Books {
       /* authed */
       if (!user) return json({ error: 'Log in to continue' }, 401);
 
+      if (method === 'GET' && p === '/migration/zero/me') return json(await this.migMine('zero', user.id));
       if (method === 'GET' && p === '/me') {
         const hold = this.sql.exec(`SELECT asset, amount FROM balances WHERE user_id=? AND asset LIKE 't:%' AND amount!='0'`, user.id).toArray()
           .map(h => { const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) return null;
@@ -4087,3 +4111,4 @@ installRhpad(Books, { B, WEI, now, randHex, CHAINS });
 installLtcdep(Books, { B, WEI, now, randHex });
 installLtcaddr(Books, { B, WEI, now });
 installWatch(Books, { now });
+installZeroMig(Books, { B, WEI, now });
