@@ -8,7 +8,7 @@
 
 Site: **https://rookery.stinkypenguin.xyz**
 
-Networks: **Zero** (LayerZero, mainnet 30 Nov) and **GIWA** (Upbit, testnet, mainnet TBA), plus **Stellar** on mainnet.
+Networks: **Zero** (LayerZero, mainnet 30 Nov, pre-market), **GIWA** (Upbit, pre-market, mainnet TBA), **LitVM** (Litecoin EVM, pre-market with zkLTC), plus **Stellar** and **Robinhood Chain** live on mainnet (Robinhood fully on-chain).
 Trading currency: **ZRO**, every price shown in **USD** (ZRO rate from OKX, fallbacks Bybit, KuCoin, CoinGecko, refreshed every minute).
 Platform fee: **0.5% of every trade** goes into the **$臭企鹅 buy & burn** reserve.
 
@@ -63,8 +63,38 @@ curl -s -X POST "$U/admin/pause?key=$K&on=0" -H 'x-pl: 1'
 
 Amounts are in wei: 1 ZRO = `1000000000000000000`.
 
-## Mainnet migration
-Described in Docs on the site: balance snapshot, token deployment (1B), 1:1 mint for holders, a pool from the curve reserve plus 200M tokens at the last price, LP locked.
+## Zero mainnet migration (1:1)
+
+Every Rookery pre-market token for Zero moves on-chain 1:1 when Zero launches. Nothing to claim, nothing to connect.
+
+**Reserved addresses.** Every token's Zero contract address is fixed today and shown on its token page:
+- a dedicated deployer (HD child `2000033002`, used for nothing else) deploys `RookeryCurve2` as its first transaction on Zero, so the curve lands at `CREATE(deployer, 0)`;
+- the curve's constructor deploys the token factory at `CREATE(curve, 1)`;
+- each token is created with CREATE3: `token = CREATE(CREATE2(factory, keccak256(tokenId), 0x21c35dbe…7c1f), nonce 1)`. The proxy is the standard 16-byte CREATE3 initcode (`0x67363d3d37363d34f03d5260086018f3`), so the address never depends on compiler settings or EVM version, on import order, name, creator or taxes. One token ID can only be deployed once.
+- check any address yourself: `curve.predictImported("<token id>")`, or recompute it from [`migration/zero_reserved_addresses.json`](migration/zero_reserved_addresses.json).
+
+| | Address on Zero (chain id 33002) |
+|---|---|
+| Curve | `0x4ffd205049EFf2AFFa0cB61d81C718cb3928e84a` |
+| Token factory | `0x1de02dCaE433DD6B602BC7cC887395d930c127Bd` |
+| Deployer | `0x2244bD4c8500a88165A91deAa9B33fa37b582E1D` |
+
+**Launch day, step by step**
+1. The watcher (`worker/watch.js`) verifies a Zero RPC twice: chain id 33002, LayerZero EndpointV2 code at its known address, blocks moving (impostor "zero" chains are rejected).
+2. Zero trading on Rookery pauses automatically, pending holder rewards are paid in ZRO, and the 1:1 snapshot of every balance and curve is published with its SHA-256 at `/api/migration/zero/snapshot.json` (`worker/zeromig.js`).
+3. The curve reserves (~3,000 ZRO) are sent to the deployer on Zero through the official ZRO OFT.
+4. One command runs the migration (`worker/zerorun.js`): preflight (chain id, unused deployer, funds), the curve build this EVM accepts (cancun or paris, picked by gas estimation), the curve at its reserved address, then every token imported at its reserved address with exactly its ledger state (`RookeryCurve2.importCurve`), and a per-token check of custody balance, supply, curve state and price to the wei. Resumable and idempotent.
+5. The ledger switches each token to on-chain; token pages show **LIVE ON ZERO**: withdraw to your own wallet in one click, and trade the on-chain curve from your wallet.
+6. When a curve sells out, the token graduates to a V2-style DEX pool on Zero with LP sent to the dead address. The DEX is chosen on launch day (an existing V2 DEX on Zero, or our own deployment of the official Uniswap V2 artifacts); it is a constructor argument and changes no reserved address.
+
+**Tested before launch** (local chain id 33002, the real production snapshot of 60 tokens):
+- `rhcurve/test/ImportCurve.t.sol`: 9/9 (state = ledger, price continuity, exits always covered, owner-only, one ID once, off-chain formula = on-chain address from a fresh deployer); `RookeryCurve2.t.sol`: 13/13.
+- `tools/zero_rehearsal.mjs`: 60/60 tokens on cancun and on paris, **same addresses on both**; external-DEX and own-DEX modes; post-migration withdraw + sell + buy; re-run sends 0 transactions.
+- `tools/zero_worker_path.mjs`: the worker's own signing/background code, 64 transactions, 60/60.
+- `tools/zero_wd_test.mjs`: migrate → finalize → withdrawals on a real SQLite ledger (EOA ok, contract refused, pre-broadcast failure refunded, crash-resume never sends twice, custody covers every balance).
+- Contract bytecode used on launch day and its SHA-256: [`migration/zero_artifacts.json`](migration/zero_artifacts.json).
+
+GIWA and LitVM follow the same steps at their mainnets.
 
 ## Before serious volume
 1. Offline copy of the phrase, moved into a hardware wallet.
