@@ -19,6 +19,7 @@ const out = {};
 out.bags = await ev(`({ head: document.querySelector('.tx-fh')?.innerText, sum: [...document.querySelectorAll('.tx-bagsum div')].map(d => d.innerText.replace(/\\n/g, ': ')), rows: [...document.querySelectorAll('.tx-row')].map(r => r.innerText.replace(/\\n/g, ' | ')) })`);
 await ev(`document.querySelector('.tx-row')?.click()`); await sleep(5000);
 out.position = await ev(`[...document.querySelectorAll('.tx-pos .kv')].map(k => k.innerText.replace(/\\n/g, ': '))`);
+out.safety = await ev(`[...document.querySelectorAll('.tx-safe .kv')].slice(0,2).map(k => k.innerText.replace(/\\n/g, ': '))`);
 out.youHold = await ev(`document.querySelector('.tx-side .tx-note')?.innerText`);
 writeFileSync('out/tx_bags.png', Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
 await ev(`document.querySelector('[data-tab=trending]').click()`); await sleep(3000);

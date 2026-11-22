@@ -1251,3 +1251,5 @@ button.tx-tag{cursor:pointer}
 .tx-pos h4{margin:0 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu)}
 .tx-pos .kv{display:flex;justify-content:space-between;padding:4px 0;font-size:12.5px}
 .tx-pos .kv span{color:var(--mu)}
+
+.tx-bagsum small{font-size:11px;font-family:var(--mono,monospace)}

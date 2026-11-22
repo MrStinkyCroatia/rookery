@@ -3663,7 +3663,7 @@ async function viewTerminal(arg1, arg2, arg3) {
     $('#txPad').innerHTML = `<option value="all">All launchpads (${D.pads.length})</option>` + D.pads.map(p => `<option value="${p.id}" ${st.pad === p.id ? 'selected' : ''}>${esc(p.name)} · ${p.tokens}</option>`).join('');
     $('#txTabs').innerHTML = [['trending', 'Trending'], ['new', 'New'], ['bonding', 'Almost bonded'], ['watch', `Watch${watch.size ? ' ' + watch.size : ''}`], ['bags', 'Bags']].map(([k, l]) => `<button data-tab="${k}" class="${st.tab === k ? 'on' : ''}">${l}</button>`).join('');
     const bagsHead = st.bags && st.bags.items.length ? `<div class="tx-bagsum"><div><span>Value</span><b>${fmtUsd(st.bags.totalValueUsd)}</b></div>
-      <div><span>PnL</span><b class="${cls(st.bags.totalPnlUsd)}">${st.bags.totalPnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(st.bags.totalPnlUsd))}${st.bags.totalPnlPct != null ? ` · ${pct(st.bags.totalPnlPct)}` : ''}</b></div>
+      <div><span>PnL</span><b class="${cls(st.bags.totalPnlUsd)}">${st.bags.totalPnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(st.bags.totalPnlUsd))}</b>${st.bags.totalPnlPct != null ? `<small class="${cls(st.bags.totalPnlPct)}">${pct(st.bags.totalPnlPct)}</small>` : ''}</div>
       <div><span>Realized</span><b class="${cls(st.bags.realizedUsd)}">${st.bags.realizedUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(st.bags.realizedUsd))}</b></div></div>` : '';
     $('.tx-fh').innerHTML = st.tab === 'bags' ? '<span>Position</span><span>Value · PnL</span>' : '<span>Coin</span><span>MC</span>';
     if (st.tab === 'bags') { $('#txList').innerHTML = bagsHead + (list.length ? list.map((t, i) => `<button class="tx-row ${st.sel && keyOf(t) === (st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id) ? 'on' : ''}" data-i="${i}">
@@ -3710,7 +3710,8 @@ async function viewTerminal(arg1, arg2, arg3) {
     } catch (e) { $('#txCenter').innerHTML = `<div class="tx-empty big">${esc(e.message || 'Not indexed yet')}</div>`; }
   }
   function norm() {   // one shape for Rookery markets and on-chain tokens
-    const row = st.selRow || st.list.find(t => (st.sel.kind === 'm' ? t.market === st.sel.id : t.address === st.sel.id)) || {};
+    const match = (t) => (st.sel.kind === 'm' ? t.market === st.sel.id : t.address === st.sel.id);
+    const row = { ...(st.selRow || {}), ...((D?.tokens || []).find(match) || {}) };   // feed data (top 10, 24h) wins over a Bags row
     if (st.sel.kind === 'm') {
       const m = T.market;
       return { m, name: m.name, symbol: m.symbol, image: m.image, pad: pads.rookery, ts: m.created, priceUsd: m.priceUsd, mcapUsd: m.mcapUsd, liqUsd: m.liquidityUsd, holders: m.holders ?? row.holders,
