@@ -2891,12 +2891,17 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      if (method === 'GET' && p === '/terminal/intel') {
+        const n = ['zero', 'giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero';
+        const d = this.termIntel(n, { market: url.searchParams.get('market') || undefined, addr: url.searchParams.get('addr') || undefined });
+        return d ? json(d) : json({ error: 'unknown token' }, 404);
+      }
       if (method === 'GET' && p === '/terminal/token') {
-        const d = this.termToken(url.searchParams.get('net') === 'giwa' ? 'giwa' : 'zero', url.searchParams.get('addr'));
+        const d = this.termToken(['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero', url.searchParams.get('addr'));
         return d ? json(d) : json({ error: 'Token not indexed yet' }, 404);
       }
       if (method === 'GET' && p === '/terminal') {
-        return json(this.termView({ net: url.searchParams.get('net') || 'zero', pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
+        return json(this.termView({ net: url.searchParams.get('net') || 'zero', tab: url.searchParams.get('tab') || '', pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
       }
       const migM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)(\/addresses|\/snapshot\.json)?$/);
       if (migM) {

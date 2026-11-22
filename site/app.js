@@ -3240,8 +3240,7 @@ async function route() {
   try {
     if (!a) await viewExplore();
     else if (a === 'trading') await viewTrading();
-    else if (a === 'terminal' && c === 'token') await viewTermToken(b, d);
-    else if (a === 'terminal') await viewTerminal(b, c);
+    else if (a === 'terminal') await viewTerminal(b, c, d);
     else if (a === 't') await viewToken(b);
     else if (a === 'create') await viewCreate(b);
     else if (a === 'points') await viewPoints();
@@ -3617,148 +3616,233 @@ const ZW = {
 };
 
 
-// ───────────── Zero Terminal: every launchpad on Zero, ArcTools-style (All · New · one tab per launchpad)
-async function viewTerminal(arg1, arg2) {
-  const NETS = ['zero', 'giwa'];
-  const st = NETS.includes(arg1) ? { net: arg1, pad: arg2 || 'all' } : { net: 'zero', pad: arg1 || 'all' };
-  st.sort = 'new'; st.q = '';
-  const go = () => history.replaceState(null, '', '#/terminal/' + st.net + (st.pad === 'all' ? '' : '/' + st.pad));
+// ───────────── Terminal: one-screen trading terminal for Zero · GIWA · LitVM (feed · chart · trade + intel)
+async function viewTerminal(arg1, arg2, arg3) {
+  const NETS = ['zero', 'giwa', 'litvm'];
+  const st = { net: NETS.includes(arg1) ? arg1 : 'zero', pad: 'all', tab: 'trending', q: '', side: 'buy', rtab: 'trade', btab: 'trades', mode: 'mcap', ival: 300, sel: null, list: [] };
+  if (arg2 === 'token' && arg3) st.sel = { kind: 'c', id: arg3 };
+  else if (arg2 === 'm' && arg3) st.sel = { kind: 'm', id: arg3 };
+  else if (arg2 && !NETS.includes(arg2)) st.pad = arg2;
+  const watch = new Set(JSON.parse(localStorage.getItem('term_watch') || '[]'));
+  const saveWatch = () => localStorage.setItem('term_watch', JSON.stringify([...watch]));
+  const keyOf = (t) => (t.market ? 'm:' + t.market : 'c:' + st.net + ':' + t.address);
+  const short = (x) => x ? x.slice(0, 6) + '…' + x.slice(-4) : '—';
+  const ago = (ts) => { const v = Math.max(0, (Date.now() - ts) / 1000); return v < 60 ? Math.round(v) + 's' : v < 3600 ? Math.round(v / 60) + 'm' : v < 86400 ? Math.round(v / 3600) + 'h' : Math.round(v / 86400) + 'd'; };
+  const pct = (v, dp = 1) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(dp) + '%';
+  const cls = (v) => v == null ? 'mu' : v >= 0 ? 'up' : 'dn';
+  const avatar = (t, c = 'tx-av') => t.image ? `<img class="${c}" src="${esc(t.image)}" alt="" loading="lazy">` : `<span class="${c} tx-av-t">${esc((t.symbol || '?')[0])}</span>`;
+  const padAv = (p) => !p ? '' : p.avatar ? `<img class="tx-pad" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer" title="${esc(p.name)}">` : p.ours ? `<img class="tx-pad" src="/assets/logo-64.png" alt="" title="Rookery">` : '';
+  const go = () => history.replaceState(null, '', '#/terminal/' + st.net + (st.sel ? (st.sel.kind === 'm' ? '/m/' : '/token/') + st.sel.id : st.pad !== 'all' ? '/' + st.pad : ''));
   const app = $('#app');
-  const ago = (ts) => { const s = Math.max(0, (Date.now() - ts) / 1000); return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
-  const short = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
-  const badge = (s) => s === 'live' ? '<span class="tag term-live">LIVE</span>' : s === 'testnet' ? '<span class="tag term-test">TESTNET</span>' : '<span class="tag term-soon">SOON</span>';
-  const av = (p, cls = 'term-av') => p.avatar ? `<img class="${cls}" src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : p.ours ? `<img class="${cls}" src="/assets/logo-64.png" alt="">` : `<span class="${cls} term-av-t">${esc(p.name[0])}</span>`;
-  async function load() {
-    const d = await api(`/terminal?net=${st.net}&pad=${encodeURIComponent(st.pad)}&sort=${st.sort}&q=${encodeURIComponent(st.q)}`);
-    const NL = d.nets[d.net].label, NM = d.nets[d.net].mainnet;
-    const pads = d.pads, cur = pads.find(p => p.id === st.pad);
-    const byId = Object.fromEntries(pads.map(p => [p.id, p]));
-    const dot = (s) => `<i class="term-dot ${s}"></i>`;
-    const head = `<div class="page-h term-head"><div><h1>${NL} Terminal</h1><p>Every launchpad on ${NL} by ${d.nets[d.net].by} in one place. Tokens show up here the second they launch on-chain, sorted by launchpad.</p></div>
-      <div class="term-hr"><div class="term-net">${Object.entries(d.nets).map(([k, v]) => `<button data-net="${k}" class="${k === d.net ? 'on' : ''}">${k === 'giwa' ? '<img src="/assets/giwa.png" alt="">' : '<span class="term-net-z">Ø</span>'}${esc(v.label)}</button>`).join('')}</div>
-      <div class="term-chain">${d.chainLive ? `<span class="tag term-live">${NL.toUpperCase()} LIVE</span><span class="mu mono">indexed to block ${d.cursor.toLocaleString('en-US')}</span>` : `<span class="tag term-soon">${NL.toUpperCase()} MAINNET ${NM}</span><span class="mu">indexing starts with the first block</span>`}</div></div></div>`;
-    const side = `<aside class="term-side">
-      <button class="term-si ${st.pad === 'new' ? 'on' : ''}" data-pad="new"><span class="term-si-ic">⚡</span><span class="term-si-n">New deploys</span><em>${d.newDeploys24h ? d.newDeploys24h + ' · 24h' : d.deploysTotal}</em></button>
-      <button class="term-si ${st.pad === 'all' ? 'on' : ''}" data-pad="all"><span class="term-si-ic">▦</span><span class="term-si-n">All launchpads</span><em>${pads.length}</em></button>
-      <div class="term-si-h">Launchpads on ${NL}</div>
-      ${pads.map(p => `<button class="term-si ${st.pad === p.id ? 'on' : ''}" data-pad="${p.id}">${av(p, 'term-av-xs')}<span class="term-si-n">${esc(p.name)}</span>${dot(p.status)}<em>${p.tokens}</em></button>`).join('')}
-    </aside>`;
-    const padCard = (p) => `<div class="term-pad ${p.ours ? 'ours' : ''}" data-pad="${p.id}">${av(p)}<div class="term-pad-b"><div class="term-pad-t"><b>${esc(p.name)}</b>${badge(p.status)}</div>
-      <p class="mu">${esc(p.kind)}</p><div class="term-pad-l"><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">@${esc(p.handle)}</a>${p.followers ? `<span class="mu">${p.followers.toLocaleString('en-US')} followers</span>` : ''}${p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">site ↗</a>` : ''}<span class="mu">${p.tokens} token${p.tokens === 1 ? '' : 's'}</span></div></div></div>`;
-    const newHead = st.pad === 'new' ? `<div class="term-one term-newh"><b>⚡ New deploys</b><p class="mu">Every token deployed on ${NL}, from every launchpad, newest first. ${d.chainLive ? '' : 'The feed starts with the first block of ${NL} mainnet (${NM}).'}</p></div>` : '';
-    const dir = st.pad === 'all' ? `<div class="term-strip">${pads.map(padCard).join('')}</div>` : cur ? `<div class="term-one">${padCard(cur)}${cur.factories?.length ? `<p class="mu term-fac">Factory: ${cur.factories.map(f => `<span class="mono">${esc(short(f))}</span>`).join(', ')}</p>` : ''}</div>` : '';
-    const ctrl = `<div class="term-ctrl"><div class="term-sort">${[['new', 'New'], ['mcap', 'Market cap'], ['holders', 'Holders'], ['volume', 'Volume'], ['active', 'Active']].map(([k, l]) => `<button data-sort="${k}" class="${st.sort === k ? 'on' : ''}">${l}</button>`).join('')}</div>
-      <input class="inp" id="termQ" placeholder="Search name, ticker or 0x address" value="${esc(st.q)}"></div>`;
-    const ex = d.explorer;
-    const pctCls = (v) => v == null ? '' : v >= 30 ? 'dn' : v >= 15 ? 'warn' : 'up';
-    const rows = d.tokens.map(t => { const p = byId[t.pad] || { name: t.pad === 'unknown' ? 'Unattributed' : t.pad, id: t.pad };
-      const href = t.market ? `#/t/${esc(t.market)}` : t.address ? `#/terminal/${d.net}/token/${esc(t.address)}` : '';
-      return `<tr class="term-row" data-href="${href}">
-        <td><div class="term-tok">${t.image ? `<img src="${esc(t.image)}" alt="">` : `<span class="term-av-t">${esc((t.symbol || '?')[0])}</span>`}<div><b>${esc(t.name || 'Unnamed')}</b><span class="mu">$${esc(t.symbol || '?')}${t.progress != null ? ` · ${Number(t.progress).toFixed(0)}% bonded` : ''}</span></div></div></td>
-        <td><span class="term-chip">${byId[t.pad] ? av(byId[t.pad], 'term-av-xs') : ''}${esc(p.name)}</span></td>
-        <td class="num">${t.priceEstimated && t.mcapUsd ? '<span class="mu" title="Estimated from the native value paid in buys">≈ </span>' : ''}${t.mcapUsd ? fmtUsd(t.mcapUsd) : '—'}</td>
-        <td class="num">${t.volumeUsd ? fmtUsd(t.volumeUsd) : '—'}</td>
-        <td class="num">${t.holders != null ? Number(t.holders).toLocaleString('en-US') : '—'}</td>
-        <td class="num ${pctCls(t.top10)}">${t.top10 != null ? t.top10.toFixed(1) + '%' : '—'}</td>
-        <td class="num">${t.buys != null ? `<span class="up">${t.buys}</span> / <span class="dn">${t.sells}</span>` : (t.transfers || 0).toLocaleString('en-US')}</td>
-        <td class="mu">${t.ts ? ago(t.ts) : '—'}</td>
-        <td>${t.address ? `<button class="mono zr-mini" data-copy="${esc(t.address)}" onclick="event.stopPropagation()">${esc(short(t.address))} ⧉</button>${t.reserved ? ' <span class="mu">reserved</span>' : ''}` : '—'}</td></tr>`; }).join('');
-    const empty = cur && !cur.ours ? `${cur.name} goes live with ${NL} mainnet. Its tokens appear here automatically from the first block.` : st.pad === 'new' ? (d.chainLive ? 'No deploys yet.' : `No deploys yet: ${NL} mainnet starts ${NM === 'TBA' ? 'soon (date TBA)' : 'on ' + NM}. Every new token on ${NL} lands here the second it is deployed.`) : 'No tokens match.';
-    const table = `<div class="panel term-table"><table class="tbl"><thead><tr><th>Token</th><th>Launchpad</th><th class="num">Market cap</th><th class="num">Volume</th><th class="num">Holders</th><th class="num">Top 10</th><th class="num">Buys / sells</th><th>Age</th><th>${NL} address</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="9" class="mu term-empty">${esc(empty)}</td></tr>`}</tbody></table></div>`;
-    app.innerHTML = `<div class="wrap term">${head}<div class="term-layout">${side}<div class="term-main">${newHead}${dir}${ctrl}${table}</div></div><p class="mu term-foot">Community view of public launchpads on ${NL}. Not affiliated with them or with ${d.net === 'giwa' ? 'Upbit or GIWA' : 'LayerZero'}. Always check a token's address on its launchpad before trading. NFA.</p></div>`;
-    $$('[data-pad]').forEach(b => b.onclick = () => { st.pad = b.dataset.pad; go(); load(); });
-    $$('[data-net]').forEach(b => b.onclick = () => { if (st.net === b.dataset.net) return; st.net = b.dataset.net; st.pad = 'all'; st.q = ''; go(); load(); });
-    $$('[data-sort]').forEach(b => b.onclick = () => { st.sort = b.dataset.sort; load(); });
-    $$('.term-row').forEach(r => r.onclick = (e) => { if (e.target.closest('button,a')) return; if (r.dataset.href) { sessionStorage.setItem('termBack', location.hash || '#/terminal'); location.hash = r.dataset.href.slice(1); } });
-    const q = $('#termQ'); let t0; q.oninput = () => { clearTimeout(t0); t0 = setTimeout(() => { st.q = q.value.trim(); load().then(() => { const n = $('#termQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 350); };
+  app.innerHTML = `<div class="tx">
+    <div class="tx-top"><div class="tx-netbar"><div class="tx-nets"></div><span class="tx-status" id="txStatus"></span></div>
+      <label class="tx-search"><span>⌕</span><input id="txQ" placeholder="Search a coin or paste a contract" autocomplete="off"><kbd>/</kbd></label>
+      <select id="txPad" class="tx-sel"></select><button class="tx-btn" id="txDir">Launchpads</button></div>
+    <div class="tx-body">
+      <aside class="tx-feed"><div class="tx-tabs" id="txTabs"></div><div class="tx-fh"><span>Coin</span><span>MC</span></div><div class="tx-list" id="txList"></div></aside>
+      <main class="tx-center" id="txCenter"></main>
+      <aside class="tx-side" id="txSide"></aside>
+    </div>
+    <div class="tx-keys"><span class="tx-live"><i></i>Live</span><span>${S.me ? esc(S.me.username || 'signed in') : 'signed out'}</span>
+      <span><kbd>/</kbd> Search</span><span><kbd>↑↓</kbd> Coins</span><span><kbd>B</kbd> Buy</span><span><kbd>S</kbd> Sell</span><span><kbd>1-4</kbd> Amount</span><span><kbd>W</kbd> Watch</span><span><kbd>Esc</kbd> Leave field</span></div>
+    <div class="tx-dir" id="txDirPanel" hidden></div></div>`;
+  let D = null, pads = {};
+
+  async function loadFeed() {
+    const tab = st.tab === 'watch' ? '' : st.tab;
+    D = await api(`/terminal?net=${st.net}&tab=${tab}&pad=${encodeURIComponent(st.pad)}&sort=${st.tab === 'trending' ? 'trending' : st.tab === 'new' ? 'new' : 'mcap'}&q=${encodeURIComponent(st.q)}`);
+    pads = Object.fromEntries(D.pads.map(p => [p.id, p]));
+    let list = D.tokens;
+    if (st.tab === 'watch') list = list.filter(t => watch.has(keyOf(t)));
+    st.list = list;
+    const N = D.nets[D.net];
+    $('.tx-nets').innerHTML = Object.entries(D.nets).map(([k, v]) => `<button data-net="${k}" class="${k === st.net ? 'on' : ''}">${k === 'giwa' ? '<img src="/assets/giwa.png" alt="">' : k === 'litvm' ? '<img src="/assets/chains/litecoin.svg" alt="">' : '<b>Ø</b>'}${esc(v.label)}</button>`).join('');
+    $('#txStatus').innerHTML = D.chainLive ? `<i class="tx-dot live"></i>${esc(N.label)} live · block ${D.cursor.toLocaleString('en-US')}` : `<i class="tx-dot"></i>${esc(N.label)} mainnet ${esc(N.mainnet)}`;
+    $('#txPad').innerHTML = `<option value="all">All launchpads (${D.pads.length})</option>` + D.pads.map(p => `<option value="${p.id}" ${st.pad === p.id ? 'selected' : ''}>${esc(p.name)} · ${p.tokens}</option>`).join('');
+    $('#txTabs').innerHTML = [['trending', 'Trending'], ['new', 'New'], ['bonding', 'Almost bonded'], ['watch', `Watch${watch.size ? ' ' + watch.size : ''}`]].map(([k, l]) => `<button data-tab="${k}" class="${st.tab === k ? 'on' : ''}">${l}</button>`).join('');
+    $('#txList').innerHTML = list.length ? list.map((t, i) => `<button class="tx-row ${st.sel && keyOf(t) === (st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id) ? 'on' : ''}" data-i="${i}">
+        ${avatar(t)}<span class="tx-rn"><b>${esc(t.name || 'Unnamed')}</b><span class="mu">${padAv(pads[t.pad])}$${esc(t.symbol || '?')} · ${t.ts ? ago(t.ts) : '—'}${t.address ? ` · <span class="mono">…${esc(t.address.slice(-4))}</span>` : ''}</span></span>
+        <span class="tx-rm"><b>${t.mcapUsd ? fmtUsd(t.mcapUsd) : '—'}</b><span class="${t.change24h != null ? cls(t.change24h) : 'mu'}">${t.change24h != null ? pct(t.change24h) : t.x ? t.x.toFixed(1) + 'x' : t.reserved ? 'reserved' : '—'}</span></span></button>`).join('')
+      : `<div class="tx-empty">${st.tab === 'watch' ? 'Press W on a coin to add it to your watchlist.' : st.tab === 'bonding' ? 'No coin above 50% of its curve yet.' : D.chainLive ? 'Nothing here yet.' : `${esc(N.label)} mainnet starts ${N.mainnet === 'TBA' ? 'soon' : 'on ' + esc(N.mainnet)}. Tokens of every launchpad land here from the first block.`}</div>`;
+    $$('[data-net]').forEach(b => b.onclick = () => { if (st.net === b.dataset.net) return; st.net = b.dataset.net; st.pad = 'all'; st.sel = null; st.q = ''; $('#txQ').value = ''; go(); loadFeed().then(autoPick); });
+    $$('[data-tab]').forEach(b => b.onclick = () => { st.tab = b.dataset.tab; loadFeed(); });
+    $$('.tx-row').forEach(b => b.onclick = () => pick(st.list[+b.dataset.i]));
+    renderDir();
   }
-  await load();
-  S.timer = setInterval(() => { if (location.hash.startsWith('#/terminal') && document.activeElement?.id !== 'termQ') load().catch(() => {}); }, 15000);
-}
+  function autoPick() { if (!st.sel && st.list.length) pick(st.list[0], true); else if (!st.list.length && !st.sel) { $('#txCenter').innerHTML = `<div class="tx-empty big">Pick a coin on the left.</div>`; $('#txSide').innerHTML = ''; } }
+  function pick(t, quiet) {
+    if (!t) return;
+    st.sel = t.market ? { kind: 'm', id: t.market } : { kind: 'c', id: t.address };
+    st.selRow = t; go();
+    $$('.tx-row').forEach(r => r.classList.toggle('on', st.list[+r.dataset.i] === t));
+    if (!quiet) $('.tx-row.on')?.scrollIntoView({ block: 'nearest' });
+    loadToken().then(() => { if (!quiet && innerWidth < 960) $('#txCenter')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  }
+  function renderDir() {
+    const el = $('#txDirPanel'); if (!D) return;
+    el.innerHTML = `<div class="tx-dir-in"><div class="tx-dir-h"><b>Launchpads on ${esc(D.nets[D.net].label)}</b><button class="tx-btn" id="txDirX">✕</button></div>
+      <div class="tx-dir-g">${D.pads.map(p => `<button class="tx-dp" data-dpad="${p.id}">${padAv(p) || `<span class="tx-av tx-av-t">${esc(p.name[0])}</span>`}<span><b>${esc(p.name)}</b><em class="tx-st ${p.status}">${p.status === 'live' ? 'LIVE' : p.status === 'testnet' ? 'TESTNET' : 'SOON'}</em><small class="mu">${esc(p.kind)}</small>
+      <small><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener">@${esc(p.handle)}</a>${p.followers ? ` · ${p.followers.toLocaleString('en-US')} followers` : ''}${p.site ? ` · <a href="${esc(p.site)}" target="_blank" rel="noopener">site ↗</a>` : ''} · ${p.tokens} tokens</small></span></button>`).join('')}</div></div>`;
+    $('#txDirX').onclick = () => { el.hidden = true; };
+    $$('[data-dpad]').forEach(b => b.onclick = (e) => { if (e.target.closest('a')) return; st.pad = b.dataset.dpad; el.hidden = true; st.sel = null; go(); loadFeed().then(autoPick); });
+  }
 
-
-// ───────────── Terminal token page: any token of any launchpad on Zero / GIWA (ArcTools-style)
-async function viewTermToken(net, addr) {
-  net = net === 'giwa' ? 'giwa' : 'zero';
-  const app = $('#app');
-  const short = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
-  const ago = (ts) => { const s = Math.max(0, (Date.now() - ts) / 1000); return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
-  let tab = 'txs';
-  async function load(first) {
-    let d;
-    try { d = await api(`/terminal/token?net=${net}&addr=${encodeURIComponent(addr)}`); }
-    catch (e) { app.innerHTML = `<div class="wrap term"><a class="term-backbtn" href="#/terminal/${net}">← Back to ${net === 'giwa' ? 'GIWA' : 'Zero'} Terminal</a><div class="panel pb term-empty">This token is not indexed yet. New tokens show up within seconds of their first transaction.</div></div>`; return; }
-    const t = d.token, p = d.pad, NL = d.nets[net].label, N = d.native;
-    const ex = d.explorer ? d.explorer.replace(/\/$/, '') : null;
-    const exA = (a, kind = 'address') => ex ? `<a href="${esc(ex)}/${kind}/${esc(a)}" target="_blank" rel="noopener" class="mono">${esc(short(a))}</a>` : `<span class="mono">${esc(short(a))}</span>`;
-    const tok = (v) => fmtT(v);
-    const warn = [];
-    if (t.top10 >= 30) warn.push(`Top 10 wallets hold ${t.top10.toFixed(1)}% of the supply`);
-    if (t.creatorPct >= 10) warn.push(`Creator holds ${t.creatorPct.toFixed(1)}%`);
-    const stat = (l, v, cls = '') => `<div class="tt-stat"><span>${l}</span><b class="${cls}">${v}</b></div>`;
-    const pctCls = (v) => v >= 30 ? 'dn' : v >= 15 ? 'warn' : 'up';
-    const kindCls = { buy: 'up', sell: 'dn', mint: 'mu', burn: 'dn', transfer: 'mu' };
-    app.innerHTML = `<div class="wrap term tt">
-      <a class="term-backbtn" href="${esc(sessionStorage.getItem('termBack') || '#/terminal/' + net + (t.pad ? '/' + t.pad : ''))}">← Back to ${esc(NL)} Terminal${p ? ' · ' + esc(p.name) : ''}</a>
-      <div class="tt-head panel pb">
-        <div class="tt-id"><span class="term-av-t tt-av">${esc((t.symbol || '?')[0])}</span><div><h1>${esc(t.name || 'Unnamed')} <span class="mu">$${esc(t.symbol || '?')}</span></h1>
-          <div class="tt-sub">${p ? `<a class="term-chip" href="#/terminal/${net}/${esc(p.id)}">${p.avatar ? `<img class="term-av-xs" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}${esc(p.name)}</a>` : '<span class="term-chip">Unattributed</span>'}
-          <span class="tag term-test">${esc(NL.toUpperCase())}</span><button class="mono zr-mini" data-copy="${esc(t.address)}"><span class="tt-full">${esc(t.address)}</span><span class="tt-short">${esc(short(t.address))}</span> ⧉</button></div></div></div>
-        <div class="tt-px"><b>${t.priceUsd ? fmtUsd(t.priceUsd) : '—'}</b><span class="mu">${t.priceUsd ? 'price ≈ from the last buy' : 'no priced buy yet'}</span>
-          <div class="tt-btns">${p?.site ? `<a class="btn" href="${esc(p.site)}" target="_blank" rel="noopener">Trade on ${esc(p.name)} ↗</a>` : ''}${ex ? `<a class="btn ghost" href="${esc(ex)}/token/${esc(t.address)}" target="_blank" rel="noopener">Explorer ↗</a>` : ''}</div></div>
-      </div>
-      <div class="tt-stats">
-        ${stat('Market cap', t.mcapUsd ? '<span class="mu">≈</span> ' + fmtUsd(t.mcapUsd) : '—')}${stat('Volume (buys)', t.volumeUsd ? fmtUsd(t.volumeUsd) : '—')}
-        ${stat('Holders', Number(t.holders || 0).toLocaleString('en-US'))}${stat('Top 10', (t.top10 || 0).toFixed(1) + '%', pctCls(t.top10 || 0))}
-        ${stat('Creator holds', (t.creatorPct || 0).toFixed(1) + '%', (t.creatorPct || 0) >= 10 ? 'dn' : '')}${stat('Buys / sells', `<span class="up">${t.buys || 0}</span> / <span class="dn">${t.sells || 0}</span>`)}
-        ${stat('Supply', tok(t.supply))}${stat('Age', ago(t.ts))}
-      </div>
-      ${warn.length ? `<div class="tt-warn">⚠ ${warn.map(esc).join(' · ')}</div>` : ''}
-      <div class="tt-grid">
-        <div class="tt-main">
-          <div class="panel tt-chart"><div class="tt-ch"><b>Price</b><span class="mu">USD · from buys on-chain</span></div><div id="ttChart"></div>${d.points.length < 2 ? '<div class="tt-nochart mu">The chart appears after the first priced trades.</div>' : ''}</div>
-          <div class="panel"><div class="tb-tabs tt-tabs"><button data-tt="txs" class="${tab === 'txs' ? 'on' : ''}">Transactions (${d.txs.length})</button><button data-tt="holders" class="${tab === 'holders' ? 'on' : ''}">Holders (${t.holders || 0})</button></div>
-            <div id="ttBody"></div></div>
-        </div>
-        <aside class="tt-side">
-          <div class="panel pb"><h4>Contract</h4>
-            <div class="kv"><span>Token</span><b>${exA(t.address, 'token')}</b></div>
-            <div class="kv"><span>Curve / pool</span><b>${t.pool ? exA(t.pool) : '—'}</b></div>
-            <div class="kv"><span>Factory</span><b>${t.factory ? exA(t.factory) : '—'}</b></div>
-            <div class="kv"><span>Creator</span><b>${t.creator ? exA(t.creator) : '—'}</b></div>
-            <div class="kv"><span>Supply</span><b>${tok(t.supply)}</b></div><div class="kv"><span>Decimals</span><b>${t.decimals}</b></div>
-            <div class="kv"><span>Launched</span><b>block ${Number(t.block).toLocaleString('en-US')}</b></div>
-          </div>
-          ${p ? `<div class="panel pb tt-pad">${p.avatar ? `<img class="term-av" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}<div><b>${esc(p.name)}</b><p class="mu">${esc(p.kind)}</p>
-            <div class="term-pad-l"><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener">@${esc(p.handle)}</a>${p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener">site ↗</a>` : ''}</div></div></div>` : ''}
-          <p class="mu tt-note">Data is read directly from ${esc(NL)}: holders and trades from token transfers, price from the ${esc(N)} paid in buys. Trade on the launchpad itself. NFA.</p>
-        </aside>
-      </div></div>`;
-    const body = () => {
-      const el = $('#ttBody'); if (!el) return;
-      el.innerHTML = tab === 'txs'
-        ? `<div class="term-table"><table class="tbl"><thead><tr><th>Type</th><th class="num">Tokens</th><th class="num">${esc(N)} / USD</th><th>From</th><th>To</th><th>Age</th><th>Tx</th></tr></thead><tbody>${d.txs.map(x => `<tr>
-            <td class="${kindCls[x.kind] || ''}">${esc(x.kind.toUpperCase())}</td><td class="num">${tok(x.amount)}</td>
-            <td class="num">${x.value && x.value !== '0' ? `${(Number(BigInt(x.value)) / 1e18).toFixed(4)} · ${fmtUsd(x.valueUsd)}` : '—'}</td>
-            <td>${exA(x.from_a)}</td><td>${exA(x.to_a)}</td><td class="mu">${ago(x.ts)}</td><td>${exA(x.tx, 'tx')}</td></tr>`).join('') || '<tr><td colspan="7" class="mu term-empty">No transactions yet.</td></tr>'}</tbody></table></div>`
-        : `<div class="term-table"><table class="tbl"><thead><tr><th>#</th><th>Holder</th><th class="num">Tokens</th><th class="num">Share</th><th></th></tr></thead><tbody>${d.holders.map((h, i) => `<tr>
-            <td class="mu">${i + 1}</td><td>${exA(h.address)} ${h.tag ? `<span class="tag term-soon">${esc(h.tag)}</span>` : ''}</td><td class="num">${tok(h.amount)}</td>
-            <td class="num">${h.pct.toFixed(2)}%</td><td style="width:30%"><div class="tt-bar"><i style="width:${Math.min(100, h.pct)}%"></i></div></td></tr>`).join('') || '<tr><td colspan="5" class="mu term-empty">No holders yet.</td></tr>'}</tbody></table></div>`;
-    };
-    body();
-    $$('[data-tt]').forEach(b => b.onclick = () => { tab = b.dataset.tt; $$('[data-tt]').forEach(x => x.classList.toggle('on', x === b)); body(); });
-    const LW = window.LightweightCharts, el = $('#ttChart');
-    if (LW && el && d.points.length >= 2) {
-      if (S.chart) { try { S.chart.remove(); } catch {} }
-      S.chart = LW.createChart(el, { autoSize: true, layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#76767E', fontFamily: 'JetBrains Mono', fontSize: 10 },
-        grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.035)' } }, rightPriceScale: { borderColor: '#1E1E23' }, timeScale: { borderColor: '#1E1E23', timeVisible: true } });
-      const ser = S.chart.addAreaSeries({ lineColor: '#3DDC97', topColor: 'rgba(61,220,151,.25)', bottomColor: 'rgba(61,220,151,0)', lineWidth: 2, priceFormat: { type: 'custom', formatter: (v) => '$' + (v >= 1 ? v.toFixed(4) : Number(v).toPrecision(5)), minMove: 1e-14 } });
-      const seen = new Map(); for (const x of d.points) seen.set(Math.floor(x.ts / 1000), x.priceUsd);
-      ser.setData([...seen.entries()].sort((a, b) => a[0] - b[0]).map(([time, value]) => ({ time, value })));
-      S.chart.timeScale().fitContent();
+  // ── selected coin: center (header, stats, chart, trades/holders/about) + side (trade, intel)
+  let T = null, I = null;
+  async function loadToken() {
+    const sel = st.sel; if (!sel) return;
+    try {
+      const [tok, intel] = await Promise.all([
+        sel.kind === 'm' ? api('/market/' + sel.id) : api(`/terminal/token?net=${st.net}&addr=${encodeURIComponent(sel.id)}`),
+        api(`/terminal/intel?net=${st.net}&${sel.kind === 'm' ? 'market' : 'addr'}=${encodeURIComponent(sel.id)}`).catch(() => null)]);
+      if (st.sel !== sel) return;
+      T = tok; I = intel; renderCenter(); renderSide();
+    } catch (e) { $('#txCenter').innerHTML = `<div class="tx-empty big">${esc(e.message || 'Not indexed yet')}</div>`; }
+  }
+  function norm() {   // one shape for Rookery markets and on-chain tokens
+    const row = st.selRow || st.list.find(t => (st.sel.kind === 'm' ? t.market === st.sel.id : t.address === st.sel.id)) || {};
+    if (st.sel.kind === 'm') {
+      const m = T.market;
+      return { m, name: m.name, symbol: m.symbol, image: m.image, pad: pads.rookery, ts: m.created, priceUsd: m.priceUsd, mcapUsd: m.mcapUsd, liqUsd: m.liquidityUsd, holders: m.holders ?? row.holders,
+        vol24h: row.vol24h, top10: row.top10, change24h: row.change24h, x: row.x, progress: m.progress, address: m.chainContract || m.zeroContract, reserved: !m.migrated,
+        trades: (T.trades || []).slice().reverse().map(t => ({ side: t.side, usd: Number(B(t.zro)) / 1e18 * (t.usd || 0), tok: t.tokens, who: t.username || 'trader', ts: t.ts })),
+        holdersList: (T.holders || []).map(h => ({ who: h.username || short(h.address), amount: h.amount, pct: h.pct, tag: h.creator ? 'creator' : h.tag || '' })),
+        points: (T.trades || []).map(t => ({ ts: t.ts, p: Number(B(t.price)) / 1e18 * (t.usd || 0) })), about: m.description, links: { x: m.x, tg: m.tg, web: m.web } };
     }
+    const t = T.token;
+    return { name: t.name, symbol: t.symbol, pad: T.pad, ts: t.ts, priceUsd: t.priceUsd, mcapUsd: t.mcapUsd, liqUsd: null, holders: t.holders, vol24h: t.volumeUsd, top10: t.top10, change24h: null, x: null, address: t.address, est: true,
+      trades: T.txs.filter(x => x.kind === 'buy' || x.kind === 'sell').map(x => ({ side: x.kind, usd: x.valueUsd, tok: x.amount, who: short(x.kind === 'buy' ? x.to_a : x.from_a), ts: x.ts, tx: x.tx })),
+      holdersList: T.holders.map(h => ({ who: short(h.address), amount: h.amount, pct: h.pct, tag: h.tag })), points: T.points.map(x => ({ ts: x.ts, p: x.priceUsd })), contract: t, explorer: T.explorer };
   }
-  await load(true);
-  S.timer = setInterval(() => { if (location.hash.includes('/token/')) load().catch(() => {}); }, 15000);
+  function renderCenter() {
+    const n = norm(), wk = st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id;
+    const stat = (l, v, c = '') => `<div><span>${l}</span><b class="${c}">${v}</b></div>`;
+    $('#txCenter').innerHTML = `
+      <div class="tx-th">${avatar(n, 'tx-av lg')}<div class="tx-tn"><h2>${esc(n.name)} <span class="mu">$${esc(n.symbol)}</span></h2>
+        <div class="tx-tags"><span>${n.ts ? ago(n.ts) + ' old' : ''}</span>${n.pad ? `<span class="tx-tag">${padAv(n.pad)}${esc(n.pad.name)}</span>` : ''}${n.progress != null ? `<span class="tx-tag">${Number(n.progress).toFixed(0)}% bonded</span>` : ''}
+        ${n.address ? `<button class="tx-tag mono" data-copy="${esc(n.address)}">${esc(short(n.address))}${n.reserved ? ' · reserved' : ''} ⧉</button>` : ''}</div></div>
+        <div class="tx-th-r"><button class="tx-btn ${watch.has(wk) ? 'on' : ''}" id="txWatch">${watch.has(wk) ? '★ Watching' : '☆ Watch'}</button>${st.sel.kind === 'm' ? `<a class="tx-btn" href="#/t/${esc(st.sel.id)}" onclick="sessionStorage.setItem('termBack', location.hash)">Full page ↗</a>` : ''}</div></div>
+      <div class="tx-stats"><div class="tx-mc"><b>${n.mcapUsd ? (n.est ? '≈ ' : '') + fmtUsd(n.mcapUsd) : '—'}</b><span><em class="${cls(n.change24h)}">${n.change24h != null ? pct(n.change24h) + ' 24h' : ''}</em>${n.x ? ` <em class="up">${n.x.toFixed(2)}x since launch</em>` : ''}</span></div>
+        ${stat('Price', n.priceUsd ? fmtUsd(n.priceUsd) : '—')}${stat('Liquidity', n.liqUsd ? fmtUsd(n.liqUsd) : '—')}${stat('Holders', n.holders != null ? Number(n.holders).toLocaleString('en-US') : '—')}
+        ${stat('Volume 24h', n.vol24h ? fmtUsd(n.vol24h) : '$0')}${stat('Top 10', n.top10 != null ? n.top10.toFixed(1) + '%' : '—', n.top10 >= 30 ? 'dn' : n.top10 >= 15 ? 'warn' : '')}</div>
+      <div class="tx-cbar"><div class="tx-seg">${[[60, '1m'], [300, '5m'], [900, '15m'], [3600, '1h']].map(([v, l]) => `<button data-iv="${v}" class="${st.ival === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+        <div class="tx-seg"><button data-mode="mcap" class="${st.mode === 'mcap' ? 'on' : ''}">MCap</button><button data-mode="price" class="${st.mode === 'price' ? 'on' : ''}">Price</button></div>
+        <span class="mu tx-ath">${I?.athUsd ? `ATH ${fmtUsd(st.mode === 'mcap' ? I.athUsd * 1e9 : I.athUsd)} · ${pct(I.fromAthPct, 0)}` : ''}</span></div>
+      <div class="tx-chart" id="txChart">${n.points.length < 2 ? '<div class="tx-empty">The chart appears after the first trades.</div>' : ''}</div>
+      <div class="tx-btabs">${[['trades', `Trades ${n.trades.length}`], ['holders', `Holders ${n.holders ?? ''}`], ['about', 'About']].map(([k, l]) => `<button data-bt="${k}" class="${st.btab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="tx-bbody" id="txB"></div>`;
+    $('#txWatch').onclick = () => { watch.has(wk) ? watch.delete(wk) : watch.add(wk); saveWatch(); renderCenter(); loadFeed(); };
+    $$('[data-iv]').forEach(b => b.onclick = () => { st.ival = +b.dataset.iv; renderCenter(); });
+    $$('[data-mode]').forEach(b => b.onclick = () => { st.mode = b.dataset.mode; renderCenter(); });
+    $$('[data-bt]').forEach(b => b.onclick = () => { st.btab = b.dataset.bt; $$('[data-bt]').forEach(x => x.classList.toggle('on', x === b)); bottom(n); });
+    bottom(n); chart(n);
+  }
+  function bottom(n) {
+    const el = $('#txB');
+    if (st.btab === 'trades') el.innerHTML = `<table class="tbl tx-tbl"><thead><tr><th>Side</th><th class="num">USD</th><th class="num">Tokens</th><th>Trader</th><th>Age</th></tr></thead><tbody>${n.trades.slice(0, 60).map(t => `<tr><td class="${t.side === 'buy' ? 'up' : 'dn'}">${t.side.toUpperCase()}</td><td class="num">${t.usd ? fmtUsd(t.usd) : '—'}</td><td class="num">${fmtT(t.tok)}</td><td>${esc(t.who)}</td><td class="mu">${ago(t.ts)}</td></tr>`).join('') || '<tr><td colspan="5" class="tx-empty">No trades yet.</td></tr>'}</tbody></table>`;
+    else if (st.btab === 'holders') el.innerHTML = `<table class="tbl tx-tbl"><thead><tr><th>#</th><th>Holder</th><th class="num">Tokens</th><th class="num">Share</th></tr></thead><tbody>${n.holdersList.slice(0, 50).map((h, i) => `<tr><td class="mu">${i + 1}</td><td>${esc(h.who)} ${h.tag ? `<span class="tx-tag">${esc(h.tag)}</span>` : ''}</td><td class="num">${fmtT(h.amount)}</td><td class="num">${Number(h.pct || 0).toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="4" class="tx-empty">No holders yet.</td></tr>'}</tbody></table>`;
+    else el.innerHTML = `<div class="tx-about">${n.about ? `<p>${esc(n.about)}</p>` : ''}${n.links ? `<p>${['x', 'tg', 'web'].filter(k => n.links[k]).map(k => `<a href="${esc(n.links[k])}" target="_blank" rel="noopener">${k === 'x' ? 'X' : k === 'tg' ? 'Telegram' : 'Website'} ↗</a>`).join(' · ')}</p>` : ''}
+      ${n.contract ? `<div class="kv"><span>Token</span><b class="mono">${esc(n.contract.address)}</b></div><div class="kv"><span>Curve / pool</span><b class="mono">${esc(short(n.contract.pool))}</b></div><div class="kv"><span>Creator</span><b class="mono">${esc(short(n.contract.creator))}</b></div><div class="kv"><span>Supply</span><b>${fmtT(n.contract.supply)}</b></div>` : ''}
+      ${n.address ? `<div class="kv"><span>${esc(D.nets[st.net].label)} address</span><b class="mono">${esc(n.address)}${n.reserved ? ' <span class="mu">reserved, live at mainnet</span>' : ''}</b></div>` : ''}
+      ${n.pad ? `<div class="kv"><span>Launchpad</span><b>${esc(n.pad.name)} · ${esc(n.pad.kind)}</b></div>` : ''}</div>`;
+  }
+  function chart(n) {
+    const LW = window.LightweightCharts, el = $('#txChart');
+    if (S.chart) { try { S.chart.remove(); } catch {} S.chart = null; }
+    if (!LW || !el || n.points.length < 2) return;
+    S.chart = LW.createChart(el, { autoSize: true, layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#76767E', fontFamily: 'JetBrains Mono', fontSize: 10 },
+      grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.035)' } }, rightPriceScale: { borderColor: '#1E1E23' }, timeScale: { borderColor: '#1E1E23', timeVisible: true, secondsVisible: false }, crosshair: { mode: 0 } });
+    const mul = st.mode === 'mcap' ? 1e9 : 1;
+    const ser = S.chart.addCandlestickSeries({ upColor: '#3DDC97', downColor: '#FF5C5C', borderVisible: false, wickUpColor: '#3DDC97', wickDownColor: '#FF5C5C',
+      priceFormat: { type: 'custom', formatter: (v) => '$' + (v >= 1000 ? (v / 1000).toFixed(1) + 'K' : v >= 1 ? v.toFixed(2) : Number(v).toPrecision(3)), minMove: 1e-12 } });
+    if (n.points.length < 8) {
+      const line = S.chart.addLineSeries({ color: '#3DDC97', lineWidth: 2, priceFormat: { type: 'custom', formatter: (v) => '$' + (v >= 1000 ? (v / 1000).toFixed(1) + 'K' : v >= 1 ? v.toFixed(2) : Number(v).toPrecision(3)), minMove: 1e-12 } });
+      S.chart.removeSeries(ser);
+      const seen = new Map(); for (const x of n.points) seen.set(Math.floor(x.ts / 1000), x.p * mul);
+      line.setData([...seen.entries()].sort((a, b) => a[0] - b[0]).map(([time, value]) => ({ time, value })));
+      S.chart.timeScale().fitContent(); return;
+    }
+    const map = new Map(); let prev = n.points[0].p * mul;
+    for (const x of n.points) { const p = x.p * mul, b = Math.floor(x.ts / 1000 / st.ival) * st.ival, c = map.get(b);
+      if (!c) map.set(b, { time: b, open: prev, high: Math.max(prev, p), low: Math.min(prev, p), close: p }); else { c.high = Math.max(c.high, p); c.low = Math.min(c.low, p); c.close = p; } prev = p; }
+    ser.setData([...map.values()].sort((x, y) => x.time - y.time));
+    S.chart.timeScale().fitContent();
+  }
+  function renderSide() {
+    const n = norm(), side = $('#txSide');
+    const intelCard = I ? `<div class="tx-intel"><i class="tx-dot amber"></i><span><b>${I.inProfit}</b> in profit · <b>${I.supplyInProfitPct.toFixed(1)}%</b> ≈ <b>${fmtUsd(I.valueInProfitUsd)}</b> can sell into your buy</span><button class="tx-link" data-rt="intel">See exit pressure →</button></div>` : '';
+    const tabs = `<div class="tx-rtabs"><button data-rt="trade" class="${st.rtab === 'trade' ? 'on' : ''}">Trade</button><button data-rt="intel" class="${st.rtab === 'intel' ? 'on' : ''}">Intel</button></div>`;
+    if (st.rtab === 'intel') {
+      const row = (l, v, c = '') => `<div class="kv"><span>${l}</span><b class="${c}">${v}</b></div>`;
+      side.innerHTML = tabs + (I ? `<div class="tx-intel-full">
+        ${row('Holders in profit', `${I.inProfit} of ${I.holders} (${I.inProfitPct.toFixed(0)}%)`)}${row('Supply in profit', I.supplyInProfitPct.toFixed(1) + '%')}${row('Value they can sell', fmtUsd(I.valueInProfitUsd), 'warn')}
+        ${row('In-profit avg entry', I.inProfitEntryUsd ? fmtUsd(I.inProfitEntryUsd * (st.mode === 'mcap' ? 1e9 : 1)) + (st.mode === 'mcap' ? ' mcap' : '') : '—')}${row('Top 100 avg entry', I.top100EntryUsd ? fmtUsd(I.top100EntryUsd * (st.mode === 'mcap' ? 1e9 : 1)) + (st.mode === 'mcap' ? ' mcap' : '') : '—')}
+        ${row('ATH', I.athUsd ? fmtUsd(I.athUsd * (st.mode === 'mcap' ? 1e9 : 1)) + ' · ' + pct(I.fromAthPct, 0) : '—')}${row('Traders · 1h', I.traders1h)}${row('Buyers / sellers · 1h', `<span class="up">${I.buyers1h}</span> / <span class="dn">${I.sellers1h}</span>`)}
+        ${row('Net buyers · 1h', (I.netBuyers1h >= 0 ? '+' : '') + I.netBuyers1h, I.netBuyers1h >= 0 ? 'up' : 'dn')}<p class="mu tx-note">${esc(I.note)}</p></div>` : '<div class="tx-empty">No data yet.</div>');
+    } else if (st.sel.kind === 'm' && n.m && !n.m.migrated && !n.m.rh) {
+      const m = n.m, Q = m.quote || 'ZRO', QA = qaOf(Q), A = ASSET[QA] || ASSET.zro;
+      side.innerHTML = tabs + `<div class="tx-bs"><button data-side="buy" class="${st.side === 'buy' ? 'on buy' : ''}">Buy <kbd>B</kbd></button><button data-side="sell" class="${st.side === 'sell' ? 'on sell' : ''}">Sell <kbd>S</kbd></button></div>
+        <label class="tx-amt"><input id="txAmt" inputmode="decimal" placeholder="0.0"><span>${st.side === 'buy' ? esc(A.label) : '$' + esc(m.symbol)}</span></label>
+        <div class="tx-pre">${(st.side === 'buy' ? A.quick : ['25', '50', '75', '100']).map((v, i) => `<button data-pre="${v}">${st.side === 'buy' ? v : v + '%'}<kbd>${i + 1}</kbd></button>`).join('')}</div>
+        <div class="tx-get" id="txGet"><span>You get</span><b>—</b></div>
+        <div class="tx-get"><span>Fees</span><b class="mu">${(0.5 + m.taxes.marketing + m.taxes.rewards).toFixed(1)}% + ${m.taxes.burn}% burn</b></div>
+        ${intelCard}
+        <button class="btn lg wide ${st.side === 'buy' ? 'up' : 'dn'}" id="txGo">${S.me ? (st.side === 'buy' ? 'Buy' : 'Sell') + ' $' + esc(m.symbol) : 'Log in to trade'}</button>
+        ${T.me ? `<p class="mu tx-note">You hold ${fmtT(T.me.tokens || '0')} $${esc(m.symbol)} · ${fmtA(T.me[QA] || '0', QA)}</p>` : ''}`;
+      const amt = $('#txAmt');
+      const est = () => {
+        const v = toWei(amt.value); let out = '—';
+        if (v > 0n) { if (st.side === 'buy') { const e = estBuy(m, v); out = e ? `${fmtT(e.tokens)} $${esc(m.symbol)}` : '—'; } else { const e = estSell(m, v); out = e ? `${fmtA(e.zro, QA)} · ${fmtUsd(zNum(e.zro) * assetUsd(QA))}` : '—'; } }
+        $('#txGet b').innerHTML = out;
+      };
+      amt.oninput = est;
+      $$('[data-pre]').forEach(b => b.onclick = () => { amt.value = st.side === 'buy' ? b.dataset.pre : (T.me ? weiToStr((B(T.me.tokens || '0') * BigInt(b.dataset.pre)) / 100n, 4) : ''); est(); });
+      $$('[data-side]').forEach(b => b.onclick = () => { st.side = b.dataset.side; renderSide(); });
+      $('#txGo').onclick = async () => {
+        if (!S.me) { location.hash = '#/login'; return; }
+        const w = toWei(amt.value); if (w <= 0n) return toast('Enter an amount', 'bad');
+        const btn = $('#txGo'); btn.disabled = true; btn.textContent = 'Sending…';
+        try { await api('/trade', { market: m.id, side: st.side, amount: w.toString() }); toast(`${st.side === 'buy' ? 'Bought' : 'Sold'} $${m.symbol}`); amt.value = ''; await loadToken(); loadFeed(); }
+        catch (e) { toast(esc(e.message || e), 'bad'); btn.disabled = false; btn.textContent = st.side === 'buy' ? 'Buy' : 'Sell'; }
+      };
+    } else {
+      const p = n.pad;
+      side.innerHTML = tabs + `<div class="tx-ext"><p>${p ? `$${esc(n.symbol)} trades on <b>${esc(p.name)}</b>.` : 'Trade this coin on its launchpad.'} Open it there to buy or sell with your wallet.</p>
+        ${p?.site ? `<a class="btn lg wide up" href="${esc(p.site)}" target="_blank" rel="noopener">Trade on ${esc(p.name)} ↗</a>` : ''}${n.explorer ? `<a class="btn wide ghost" href="${esc(n.explorer.replace(/\/$/, ''))}/token/${esc(n.address)}" target="_blank" rel="noopener">Explorer ↗</a>` : ''}</div>
+        ${intelCard}<div class="tx-risk">${n.top10 >= 30 ? `<p class="dn">⚠ Top 10 wallets hold ${n.top10.toFixed(1)}%</p>` : ''}${n.contract?.creatorPct >= 10 ? `<p class="dn">⚠ Creator holds ${n.contract.creatorPct.toFixed(1)}%</p>` : ''}<p class="mu tx-note">Price and market cap are estimated from the coin paid in buys on-chain.</p></div>`;
+    }
+    if (st.rtab === 'trade') {
+      const it = (l, v, c = '') => `<div class="kv"><span>${l}</span><b class="${c}">${v}</b></div>`;
+      const cp = n.contract?.creatorPct ?? (st.selRow?.creatorPct);
+      side.insertAdjacentHTML('beforeend', `<div class="tx-safe"><h4>Safety</h4>
+        ${it('Top 10 holders', n.top10 != null ? n.top10.toFixed(1) + '%' : '—', n.top10 >= 30 ? 'dn' : n.top10 >= 15 ? 'warn' : 'up')}
+        ${it('Creator holds', cp != null ? Number(cp).toFixed(1) + '%' : '—', cp >= 10 ? 'dn' : 'up')}
+        ${it('Holders', n.holders != null ? Number(n.holders).toLocaleString('en-US') : '—')}
+        ${n.progress != null ? it('Bonding curve', Number(n.progress).toFixed(0) + '%') + `<div class="tx-prog"><i style="width:${Math.min(100, n.progress)}%"></i></div>` : ''}
+        ${I ? it('Net buyers · 1h', (I.netBuyers1h >= 0 ? '+' : '') + I.netBuyers1h, I.netBuyers1h >= 0 ? 'up' : 'dn') + it('From ATH', I.fromAthPct != null ? pct(I.fromAthPct, 0) : '—', cls(I.fromAthPct)) : ''}
+        ${n.address ? it(esc(D.nets[st.net].label) + ' contract', `<span class="mono">${esc(short(n.address))}</span>${n.reserved ? ' <span class="mu">reserved</span>' : ''}`) : ''}</div>`);
+    }
+    $$('[data-rt]').forEach(b => b.onclick = () => { st.rtab = b.dataset.rt; renderSide(); });
+  }
+
+  // ── controls, keyboard, refresh
+  let qt; $('#txQ').oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { st.q = e.target.value.trim(); loadFeed(); }, 300); };
+  $('#txPad').onchange = (e) => { st.pad = e.target.value; st.sel = null; go(); loadFeed().then(autoPick); };
+  $('#txDir').onclick = () => { $('#txDirPanel').hidden = false; };
+  const onKey = (e) => {
+    if (!location.hash.startsWith('#/terminal')) { document.removeEventListener('keydown', onKey); return; }
+    const inField = /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '');
+    if (e.key === 'Escape') { document.activeElement?.blur(); $('#txDirPanel').hidden = true; return; }
+    if (inField) return;
+    if (e.key === '/') { e.preventDefault(); $('#txQ').focus(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const i = st.list.findIndex(t => (st.sel?.kind === 'm' ? t.market === st.sel.id : t.address === st.sel?.id)); const j = Math.max(0, Math.min(st.list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1))); pick(st.list[j]); }
+    else if (e.key === 'b' || e.key === 'B') { st.side = 'buy'; st.rtab = 'trade'; renderSide(); }
+    else if (e.key === 's' || e.key === 'S') { st.side = 'sell'; st.rtab = 'trade'; renderSide(); }
+    else if (e.key === 'w' || e.key === 'W') $('#txWatch')?.click();
+    else if (/^[1-4]$/.test(e.key)) { const b = $$('[data-pre]')[+e.key - 1]; if (b) b.click(); }
+  };
+  document.addEventListener('keydown', onKey);
+  await loadFeed();
+  if (st.sel) loadToken(); else autoPick();
+  S.timer = setInterval(() => { if (!location.hash.startsWith('#/terminal')) return; loadFeed().catch(() => {}); if (st.sel && !/INPUT/.test(document.activeElement?.tagName || '')) loadToken().catch(() => {}); }, 15000);
 }
