@@ -3,7 +3,12 @@
 // From the first Zero block it indexes every new token on-chain: the first mint (Transfer from 0x0) of a contract is
 // its birth; the transaction's `to` is the factory, mapped to a launchpad (factories are learned at launch and can
 // be mapped later, retroactively). Activity = Transfer count, refreshed in batches.
+import { Interface } from 'ethers';
 const ZERO_ADDR_TOPIC = '0x' + '0'.repeat(64);
+// Multicall3 is deployed on Robinhood Chain (and most EVM chains): one eth_call returns the metadata of a whole chunk,
+// which keeps a discovery pass under the node's request limits.
+const MC_ADDR = '0xcA11bde05977b3631167028862bE2a173976CA11';
+const MC_IF = new Interface(['function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)']);
 const TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 // launchpads announced for Zero (profile data from their X accounts, 22 Nov 2026)
@@ -37,14 +42,25 @@ export const PADS = [
 ];
 export const TERM_NETS = { zero: { label: 'Zero', by: 'LayerZero', mainnet: '30.11', native: 'ZRO' }, giwa: { label: 'GIWA', by: 'Upbit', mainnet: 'TBA', native: 'ETH' }, litvm: { label: 'LitVM', by: 'Litecoin', mainnet: 'TBA', native: 'zkLTC' } };
 
+// Robinhood Chain (EVM, chain id 4663): the official RPC answers eth_getLogs up to 100k blocks, publicnode works for reads
+export const RH_RPCS = ['https://rpc.mainnet.chain.robinhood.com', 'https://robinhood-rpc.publicnode.com'];
+export const RH_WETH = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+export const RH_FACTORIES = {
+  '0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb': 'pons',    // pons v1 (pools against WETH)
+  '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e': 'pons',    // pons v2 (bonding curve -> locked Uniswap v4)
+  '0x8cf6b340d761508df5c08136eb34eeb21fe021fe': 'rookery', // Rookery's own curve on Robinhood (live)
+};
+
 const hexAddr = (topic) => '0x' + topic.slice(26).toLowerCase();
+const cleanStr = (x) => String(x || '').replace(/[\u0000-\u001f\u007f]+/g, '').trim();
 function decodeString(hex) {
   if (!hex || hex === '0x') return '';
   const b = hex.slice(2);
   try {
-    if (b.length === 64) return Buffer.from(b, 'hex').toString('utf8').replace(/\0+$/g, '');      // bytes32 symbols
+    if (b.length === 64) return cleanStr(new TextDecoder().decode(Uint8Array.from(b.match(/../g) || [], (x) => parseInt(x, 16))));   // bytes32 names
     const len = parseInt(b.slice(64, 128), 16);
-    return new TextDecoder().decode(Uint8Array.from(b.slice(128, 128 + len * 2).match(/../g) || [], (x) => parseInt(x, 16)));
+    if (isNaN(len) || len <= 0 || len > 512) return '';
+    return cleanStr(new TextDecoder().decode(Uint8Array.from(b.slice(128, 128 + len * 2).match(/../g) || [], (x) => parseInt(x, 16))));
   } catch { return ''; }
 }
 
@@ -74,7 +90,7 @@ export function installTerminal(Cls, H) {
   P.termIndex = async function (rpc, { from, to, chain = 'zero', maxNew = 40 } = {}) {
     this.termInit();
     const fac = this.termFactories();
-    const logs = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), topics: [TRANSFER, ZERO_ADDR_TOPIC] }]);
+    const logs = chain === 'rh' ? [] : await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), topics: [TRANSFER, ZERO_ADDR_TOPIC] }]);
     const seen = new Set(this.sql.exec('SELECT addr FROM term_tokens WHERE chain=?', chain).toArray().map(r => r.addr));
     const fresh = [];
     for (const l of logs || []) {
@@ -104,7 +120,7 @@ export function installTerminal(Cls, H) {
     let trades = 0;
     if (tracked.length) {
       const meta = Object.fromEntries(tracked.map(t => [t.addr, t]));
-      const act = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: tracked.map(t => t.addr), topics: [TRANSFER] }]).catch(() => []);
+      const act = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: tracked.map(t => t.addr), topics: [TRANSFER] }]).catch(e => { this.setMeta('term_err_' + chain, String(e.message || e).slice(0, 140)); return []; });
       // timestamps: interpolate inside the range (2 block reads instead of one per block)
       const [b0, b1] = await Promise.all([rpc('eth_getBlockByNumber', ['0x' + from.toString(16), false]).catch(() => null), rpc('eth_getBlockByNumber', ['0x' + to.toString(16), false]).catch(() => null)]);
       const t0 = b0 ? Number(BigInt(b0.timestamp)) * 1000 : now(), t1 = b1 ? Number(BigInt(b1.timestamp)) * 1000 : now();
@@ -156,7 +172,7 @@ export function installTerminal(Cls, H) {
     this.sql.exec('UPDATE term_tokens SET holders=?, top10=?, creator_pct=? WHERE chain=? AND addr=?', rows.length, top10, cr ? pct(BigInt(cr.bal)) : 0, chain, tok);
   };
 
-  P.termNativeUsd = function (net) { try { return net === 'giwa' ? this.ethUsd() : net === 'litvm' ? (this.ltcUsd?.() || 0) : this.zroUsd(); } catch { return 0; } };
+  P.termNativeUsd = function (net) { try { return net === 'giwa' || net === 'rh' ? this.ethUsd() : net === 'litvm' ? (this.ltcUsd?.() || 0) : this.zroUsd(); } catch { return 0; } };
   P.termRow = function (net, r, usd) {
     const px = Number(BigInt(r.price_native || '0')) / 1e18;           // native per whole token
     const sup = Number(BigInt(r.supply || '0')) / 10 ** (r.decimals ?? 18);
@@ -185,7 +201,7 @@ export function installTerminal(Cls, H) {
     const pad = PADS.find(p => p.id === r.pad) || null;
     const zs = net === 'zero' ? (this.zwState?.() || {}) : {};
     const explorer = net === 'zero' ? (Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null) : (this.meta(net + '_explorer') || null);
-    return { net, nets: TERM_NETS, token: row, pad, holders, txs, points, explorer, native: net === 'giwa' ? 'ETH' : 'ZRO', nativeUsd: usd };
+    return { net, nets: TERM_NETS, token: row, pad, holders, txs, points, explorer: explorer || (net === 'rh' ? 'https://robinhoodchain.blockscout.com' : null), native: net === 'zero' ? 'ZRO' : net === 'litvm' ? 'zkLTC' : 'ETH', nativeUsd: usd };
   };
 
   // EXFIL-style intel: who is in profit, how much of the supply could sell into a buy, ATH, entry levels, net buyers
@@ -285,7 +301,152 @@ export function installTerminal(Cls, H) {
   };
 
   // called from the Zero watcher loop once a verified RPC exists: follow the chain from block 1, a capped range per pass
-  P.termTick = async function (rpc, chain = 'zero') {
+  // Robinhood RPC with fallback: the official node handles log queries, publicnode is the backup
+  P.termRhRpc = async function () {
+    // Two jobs, two endpoints: block history (eth_getLogs) needs an archive-capable node, while latest-state reads are
+    // cheap and go to the public nodes. Retries with backoff keep a 429 from killing an indexing pass.
+    const archive = [this.env?.RH_RPC_URL, this.meta('rh_rpc')].filter(Boolean);
+    const reads = [...RH_RPCS];
+    const post = (url, method, params) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(45000) })
+      .then(async r => { const t = await r.text(); let j; try { j = JSON.parse(t); } catch { throw new Error('rpc returned ' + r.status); } if (j.error) throw Object.assign(new Error(j.error.message || 'rpc error'), { rpcCode: j.error.code }); return j.result; });
+    const tryList = async (urls, method, params) => {
+      let last;
+      for (const url of urls) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try { return await post(url, method, params); }
+          catch (e) { last = e; if (!/429|Too Many|rate|timeout|fetch/i.test(String(e.message))) break; await new Promise(r => setTimeout(r, 250 * (attempt + 1))); }
+        }
+      }
+      throw last || new Error('no RPC answered');
+    };
+    const heavy = (method) => method === 'eth_getLogs';
+    return (method, params) => tryList(heavy(method) && archive.length ? archive : reads, method, params);
+  };
+  // Launchpad factories announce their tokens in their own events, which is chain-agnostic: any log whose first
+  // indexed address answers name() is a token, and the second one that answers getReserves() is its curve/pool.
+  // batch of read-only calls in one request: [{target,data}] -> [{ok,data}]
+  P.termBatch = async function (rpc, items) {
+    if (!items.length) return [];
+    try {
+      const res = await rpc('eth_call', [{ to: MC_ADDR, data: MC_IF.encodeFunctionData('aggregate3', [items.map(i => [i.target, true, i.data])]) }, 'latest']);
+      const out = MC_IF.decodeFunctionResult('aggregate3', res)[0];
+      return out.map(x => ({ ok: x[0], data: x[1] }));
+    } catch {                                       // no multicall on this chain: fall back to single calls
+      const out = [];
+      for (const i of items) { try { out.push({ ok: true, data: await rpc('eth_call', [{ to: i.target, data: i.data }, 'latest']) }); } catch { out.push({ ok: false, data: '0x' }); } }
+      return out;
+    }
+  };
+
+  P.termSeed = async function (net, b = {}) {
+    this.termInit();
+    const rpc = b.rpc || (net === 'rh' ? await this.termRhRpc() : this.netRpcFn(net));
+    const head = parseInt(await rpc('eth_blockNumber', []), 16);
+    let cur = Number(this.meta('term_seed_' + net) || 0);
+    const from0 = b.fromBlock ? Number(b.fromBlock) : cur || (head - (b.span || 2000000));
+    const chunk = Math.min(b.chunk || 100000, 100000);
+    const stop = Math.min(head, b.toBlock ? Number(b.toBlock) : head);
+    // only the factories that belong to THIS network (a stray list makes the node reject the whole query)
+    const fac = net === 'rh' ? { ...RH_FACTORIES } : Object.fromEntries(Object.entries(this.termFactories()).map(([k, v]) => [k.toLowerCase(), v]));
+    const addrs = Object.keys(fac);
+    if (!addrs.length) return { off: true, reason: 'no launchpad factories mapped' };
+    const call = (to, data) => rpc('eth_call', [{ to, data }, 'latest']).catch(() => '0x');
+    const nameOf = async (a) => decodeString(await call(a, '0x06fdde03'));
+    let found = 0, scanned = 0;
+    for (let from = from0; from <= stop; from += chunk) {
+      const to = Math.min(stop, from + chunk - 1);
+      let logs = [];
+      try { logs = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: addrs }]); }
+      catch (e) { this.setMeta('term_seed_err_' + net, String(e.message || e).slice(0, 160)); continue; }
+      scanned++;
+      const have = new Set(this.sql.exec('SELECT addr FROM term_tokens WHERE chain=?', net).toArray().map(r => r.addr));
+      const cands = [];
+      for (const l of logs) {
+        if (!l.topics || l.topics.length < 2) continue;
+        const addr = hexAddr(l.topics[1]);
+        if (have.has(addr) || cands.some(c => c.addr === addr) || addr === RH_WETH) continue;
+        cands.push({ addr, log: l, pool: l.topics[2] ? hexAddr(l.topics[2]) : null });
+        have.add(addr);
+      }
+      if (cands.length) {
+        // name, symbol, decimals, supply for every candidate (and getReserves on the hinted curve) in one request
+        const items = [];
+        for (const c of cands) {
+          items.push({ target: c.addr, data: '0x06fdde03' }, { target: c.addr, data: '0x95d89b41' },
+            { target: c.addr, data: '0x313ce567' }, { target: c.addr, data: '0x18160ddd' },
+            { target: c.pool || c.addr, data: '0x0902f1ac' });
+        }
+        const res = await this.termBatch(rpc, items);
+        const blocks = [...new Set(cands.map(c => parseInt(c.log.blockNumber, 16)))];
+        const stamps = new Map();
+        for (const bn of blocks.slice(0, 40)) {
+          const blk = await rpc('eth_getBlockByNumber', ['0x' + bn.toString(16), false]).catch(() => null);
+          stamps.set(bn, blk ? Number(BigInt(blk.timestamp)) * 1000 : now());
+        }
+        for (let i = 0; i < cands.length; i++) {
+          const c = cands[i], r5 = res.slice(i * 5, i * 5 + 5);
+          const nm = r5[0]?.ok ? decodeString(r5[0].data) : '';
+          if (!nm) continue;
+          const sy = r5[1]?.ok ? decodeString(r5[1].data) : '';
+          const dec = r5[2]?.ok && r5[2].data !== '0x' ? Number(BigInt(r5[2].data)) : 18;
+          if (dec > 36) continue;
+          const sup = r5[3]?.ok && r5[3].data !== '0x' ? BigInt(r5[3].data).toString() : '0';
+          const hasReserves = r5[4]?.ok && r5[4].data && r5[4].data.length >= 130;
+          const bn = parseInt(c.log.blockNumber, 16);
+          this.sql.exec(`INSERT OR IGNORE INTO term_tokens (addr,pad,factory,creator,name,symbol,decimals,supply,tx,block,ts,chain,pool) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            c.addr, fac[c.log.address.toLowerCase()] || 'unknown', c.log.address.toLowerCase(), c.log.topics[3] ? hexAddr(c.log.topics[3]) : null,
+            nm.slice(0, 64), sy.slice(0, 24), dec, sup, c.log.transactionHash, bn, stamps.get(bn) || now(), net, hasReserves ? c.pool : null);
+          found++;
+        }
+      }
+      this.setMeta('term_seed_' + net, String(to + 1));
+      if (found >= (b.maxNew || 400)) break;          // stop after a whole chunk, so no token in it is skipped
+    }
+    // hand the transfer indexer the position where discovery ended (once), then it follows new blocks
+    const curTick = Number(this.meta(net === 'zero' ? 'term_cursor' : 'term_cursor_' + net) || 0);
+    if (!curTick) this.setMeta(net === 'zero' ? 'term_cursor' : 'term_cursor_' + net, String(Number(this.meta('term_seed_' + net) || 0)));
+    await this.termCurvePrices(net, rpc, 120).catch(() => 0);
+    return { net, found, scanned, from: from0, to: Math.min(stop, Number(this.meta('term_seed_' + net) || 0)) };
+  };
+  // spot price straight from the curve: quoteReserve / tokenReserve (a launchpad curve and a pool both answer getReserves)
+  P.termCurvePrices = async function (net, rpc, limit = 60) {
+    const rows = this.sql.exec(`SELECT addr, pool FROM term_tokens WHERE chain=? AND pool IS NOT NULL AND pool!='' AND (price_native IS NULL OR price_native='0') ORDER BY block DESC LIMIT ?`, net, limit).toArray();
+    let n = 0;
+    for (const r of rows) {
+      const rs = await rpc('eth_call', [{ to: r.pool, data: '0x0902f1ac' }, 'latest']).catch(() => null);
+      if (!rs || rs === '0x' || rs.length < 130) continue;
+      const quote = BigInt('0x' + rs.slice(2, 66)), tokens = BigInt('0x' + rs.slice(66, 130));
+      if (tokens === 0n) continue;
+      this.sql.exec('UPDATE term_tokens SET price_native=? WHERE chain=? AND addr=?', ((quote * 10n ** 18n) / tokens).toString(), net, r.addr);
+      n++;
+    }
+    return n;
+  };
+
+  // Fill what a rate-limited first pass could miss: the curve/pool and the creator come from the token's launch event,
+  // and the name/symbol/decimals are re-read from the contract.
+  P.termFix = async function (net, b = {}) {
+    this.termInit();
+    const rpc = b.rpc || (net === 'rh' ? await this.termRhRpc() : this.netRpcFn(net));
+    const limit = Math.min(b.limit || 25, 60);
+    const rows = this.sql.exec(`SELECT addr, block, factory, pool, name, symbol FROM term_tokens WHERE chain=? AND (pool IS NULL OR pool='' OR name IS NULL OR name='') ORDER BY block DESC LIMIT ?`, net, limit).toArray();
+    const call = (to, data) => rpc('eth_call', [{ to, data }, 'latest']).catch(() => '0x');
+    let fixedPools = 0, fixedNames = 0;
+    for (const r of rows) {
+      const topic = '0x' + r.addr.slice(2).padStart(64, '0');
+      const from = Math.max(0, r.block - 50000), to = r.block + 50000;
+      const logs = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: r.factory, topics: [null, topic] }]).catch(() => []);
+      const l = logs.find(x => x.topics.length >= 3);
+      if (l && !r.pool && l.topics[2]) { this.sql.exec('UPDATE term_tokens SET pool=?, creator=? WHERE chain=? AND addr=?', hexAddr(l.topics[2]), l.topics[3] ? hexAddr(l.topics[3]) : null, net, r.addr); fixedPools++; }
+      if (!r.name) {
+        const nm = decodeString(await call(r.addr, '0x06fdde03')), sy = decodeString(await call(r.addr, '0x95d89b41'));
+        if (nm) { this.sql.exec('UPDATE term_tokens SET name=?, symbol=COALESCE(NULLIF(symbol,""),?) WHERE chain=? AND addr=?', nm.slice(0, 64), sy.slice(0, 24), net, r.addr); fixedNames++; }
+      }
+    }
+    return { net, checked: rows.length, fixedPools, fixedNames };
+  };
+
+  P.termTick = async function (rpc, chain = 'zero', maxBlocks = chain === 'rh' ? 5000 : 500) {
     this._termBusyBy = this._termBusyBy || {};
     if (this._termBusyBy[chain]) return null; this._termBusyBy[chain] = true;
     const ck = chain === 'zero' ? 'term_cursor' : 'term_cursor_' + chain;
@@ -293,7 +454,7 @@ export function installTerminal(Cls, H) {
       const head = parseInt(await rpc('eth_blockNumber', []), 16);
       let cur = Number(this.meta(ck) || 0);
       if (cur >= head) return { head, idle: true };
-      const to = Math.min(head, cur + 500);
+      const to = Math.min(head, cur + Math.min(maxBlocks, chain === 'rh' ? 5000 : 100000));
       const r = await this.termIndex(rpc, { from: cur + 1, to, chain });
       this.setMeta(ck, String(to));
       return { head, ...r };
@@ -357,6 +518,7 @@ export function installTerminal(Cls, H) {
     if (q) { const s2 = q.toLowerCase(); tokens = tokens.filter(t => (t.name || '').toLowerCase().includes(s2) || (t.symbol || '').toLowerCase().includes(s2) || (t.address || '').toLowerCase() === s2); }
     let chainLive = false, explorer = null;
     if (net === 'zero') { const zs = this.zwState?.() || {}; chainLive = Object.values(zs.rpc || {}).some(v => v.live); explorer = Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null; }
+    else if (net === 'rh') { chainLive = true; explorer = 'https://robinhoodchain.blockscout.com'; }
     else { chainLive = !!this.meta(net + '_rpc'); explorer = this.meta(net + '_explorer') || null; }
     return { net, nets: TERM_NETS, chainLive, cursor: Number(this.meta(net === 'zero' ? 'term_cursor' : 'term_cursor_' + net) || 0), newDeploys24h, deploysTotal, pads, tokens, explorer };
   };

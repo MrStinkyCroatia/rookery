@@ -3525,6 +3525,15 @@ export class Books {
         if (p === '/admin/terminal') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
           this.termInit();
+          if (b.seed) return json(await this.termSeed(['rh', 'giwa', 'zero'].includes(b.seed) ? b.seed : 'rh', b));   // discover tokens from launchpad events
+          if (b.prices) { const rpc = b.prices === 'rh' ? await this.termRhRpc() : this.netRpcFn(b.prices); return json({ updated: await this.termCurvePrices(b.prices, rpc, b.limit || 200) }); }
+          if (b.fix) return json(await this.termFix(['rh', 'giwa', 'zero'].includes(b.fix) ? b.fix : 'rh', b));
+          if (b.cursorSet) { const net = ['rh', 'giwa', 'zero', 'litvm'].includes(b.cursorSet.net) ? b.cursorSet.net : 'rh'; this.setMeta(net === 'zero' ? 'term_cursor' : 'term_cursor_' + net, String(Math.max(0, Number(b.cursorSet.block) || 0))); return json({ ok: true, net, cursor: Number(b.cursorSet.block) || 0 }); }
+          if (b.tick) { const net = ['rh', 'giwa', 'zero'].includes(b.tick) ? b.tick : 'rh'; const rpc = net === 'rh' ? await this.termRhRpc() : this.netRpcFn(net); const r = await this.termTick(rpc, net, Math.min(Number(b.blocks) || 20000, 100000)); return json(r); }
+          if (b.wipe) { const net = ['rh', 'giwa', 'zero', 'litvm'].includes(b.wipe) ? b.wipe : 'rh';   // re-index a network from scratch
+            this.sql.exec('DELETE FROM term_tx WHERE chain=?', net); this.sql.exec('DELETE FROM term_bal WHERE chain=?', net); this.sql.exec('DELETE FROM term_tokens WHERE chain=?', net);
+            this.setMeta('term_cursor_' + net, '0'); this.setMeta('term_seed_' + net, '0'); return json({ ok: true, wiped: net }); }
+          if (b.rhRpc) { if (!/^https:\/\//.test(b.rhRpc)) throw new Error('rhRpc must be an https URL'); this.setMeta('rh_rpc', b.rhRpc); return json({ ok: true, rhRpc: 'set' }); }
           if (b.factory && b.pad) {                                   // map a launchpad factory, also for tokens already indexed
             const f = String(b.factory).toLowerCase(), fac = this.termFactories();
             if (b.remove) delete fac[f]; else fac[f] = String(b.pad);
