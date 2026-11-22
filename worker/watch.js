@@ -39,8 +39,25 @@ export function installWatch(Cls, H) {
   };
 
   // one probe: chain id + two block heights, so "answers" never passes for "produces blocks"
+  const httpOnce = async (url) => {
+    const t0 = Date.now();
+    const r = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'rookery-watch/1.0' }, signal: AbortSignal.timeout(9000) });
+    const body = await r.text().catch(() => '');
+    return { status: r.status, ms: Date.now() - t0, body };
+  };
+
   P.watchProbe = async function (target, url) {
     const out = { name: target.name, url, ok: false, status: 'down', chainId: '', block: '', latency: 0, err: '' };
+    if (target.kind === 'http') {
+      try {
+        const h = await httpOnce(url);
+        out.latency = h.ms; out.block = 'HTTP ' + h.status;
+        if (h.status >= 400) throw new Error('HTTP ' + h.status);
+        if (target.contains && !h.body.toLowerCase().includes(String(target.contains).toLowerCase())) throw new Error('page up, marker missing');
+        out.ok = true; out.status = 'live';
+      } catch (e) { out.err = String(e.message || e).slice(0, 120); out.status = /429/.test(out.err) ? 'rate-limited' : 'down'; }
+      return out;
+    }
     try {
       const id = await rpcOnce(url, 'eth_chainId', []);
       out.chainId = String(Number(BigInt(id.result)));
@@ -84,8 +101,9 @@ export function installWatch(Cls, H) {
         const was = before?.status || 'unknown';
         const becameLive = r.ok && was !== 'live' && was !== 'live-stalled';
         const died = !r.ok && (was === 'live' || was === 'live-stalled');
-        if (becameLive) await this.watchAlert(t, r, 'live');
-        else if (died && t.alertDown !== false) await this.watchAlert(t, r, 'down');
+        const wants = t.alert !== false;
+        if (wants && becameLive) await this.watchAlert(t, r, 'live');
+        else if (wants && died && t.alertDown !== false) await this.watchAlert(t, r, 'down');
       }
     }
     return results;
@@ -94,7 +112,9 @@ export function installWatch(Cls, H) {
   P.watchAlert = async function (target, r, kind) {
     const chat = this.meta('tg_owner_chat') || this.meta('watch_chat');
     const line = kind === 'live'
-      ? `🟢 <b>${target.name} RPC is live</b>\n<code>${r.url}</code>\nchain id ${r.chainId} · block ${r.block} · ${r.latency} ms`
+      ? (target.kind === 'http'
+        ? `🟢 <b>${target.name} is up</b>\n${r.url}\n${r.block} · ${r.latency} ms`
+        : `🟢 <b>${target.name} RPC is live</b>\n<code>${r.url}</code>\nchain id ${r.chainId} · block ${r.block} · ${r.latency} ms`)
       : `🔴 <b>${target.name} RPC down</b>\n<code>${r.url}</code>\n${r.err || r.status}`;
     const log = JSON.parse(this.meta('watch_log') || '[]');
     log.push({ ts: now(), kind, name: target.name, url: r.url, block: r.block, err: r.err || '' });
