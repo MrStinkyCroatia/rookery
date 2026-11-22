@@ -37,8 +37,17 @@ const io = {
   addr: { deployer: W.deployer.address, dex: W.dex.address, custody: W.custody.address, feeTo: W.custody.address },
   load: async () => state, save: async (s) => { state = JSON.parse(JSON.stringify(s)); }, log: () => {},
 };
-const plan = { snapshot, artifacts, creators, chainId: 33002, vNative: (3150n * 10n ** 18n).toString(), build: 'auto' };
-const out = { hardfork: HF };
+const plan = { snapshot, artifacts, creators, chainId: 33002, vNative: (3150n * 10n ** 18n).toString(), build: 'auto', dex: 'own' };
+if (process.env.DEX === 'external') {   // a V2 DEX someone else deployed earlier on Zero
+  const ext = new Wallet(Wallet.createRandom().privateKey, provider);
+  await provider.send('anvil_setBalance', [ext.address, '0x' + (10n ** 20n).toString(16)]);
+  const dep = async (data) => { const n = Number(BigInt(await provider.send('eth_getTransactionCount', [ext.address, 'pending']))); const r = await ext.sendTransaction({ data, nonce: n, gasLimit: 30_000_000n }); await r.wait(); return (await provider.getTransactionReceipt(r.hash)).contractAddress; };
+  const { AbiCoder } = await import('ethers'); const c = AbiCoder.defaultAbiCoder();
+  const weth = await dep(artifacts.WETH9.bytecode); const fac = await dep(artifacts.UniswapV2Factory.bytecode + c.encode(['address'], [ext.address]).slice(2));
+  const router = await dep(artifacts.UniswapV2Router02.bytecode + c.encode(['address', 'address'], [fac, weth]).slice(2));
+  plan.dex = { weth, factoryV2: fac, router };
+}
+const out = { hardfork: HF, dexMode: process.env.DEX || 'own' };
 const t0 = Date.now();
 try {
   out.dry = (await zeroRun(io, { ...plan, dryRun: true })).funds;

@@ -2974,7 +2974,7 @@ function viewDocs() {
         <li>Each token is deployed on Zero at its reserved address with a fixed supply of 1,000,000,000. Burned tokens stay burned.</li>
         <li>The bonding curve moves on-chain 1:1: the same tokens sold, the same ZRO reserve and the same price, to the wei. Trading continues on the on-chain Rookery curve, from your own wallet.</li>
         <li>Your balance moves 1:1 too. It stays in your Rookery account, and you withdraw it to your own Zero wallet whenever you want, from the token page.</li>
-        <li>When an on-chain curve sells out, the token graduates to a Uniswap V2 pool on Zero with the 200M reserved tokens. LP tokens go to the dead address, so the liquidity is locked forever.</li>
+        <li>When an on-chain curve sells out, the token graduates to a DEX pool on Zero with the ZRO raised and the 200M reserved tokens. LP tokens go to the dead address, so the liquidity is locked forever. The DEX is confirmed at Zero mainnet: we wait to see which DEXes are live on day one, and choosing it never changes any reserved address.</li>
       </ol>
       <p><b>Taxes on Zero.</b> The creator's marketing and burn taxes keep working the same way. Holder rewards change form: on-chain they are paid in the token itself to wallets that hold it, instead of in ZRO on the pre-market ledger. Withdraw to your own wallet to receive them.</p>
       <p><b>GIWA and LitVM</b> follow the same steps when their mainnets launch.</p>

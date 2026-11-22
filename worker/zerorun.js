@@ -37,7 +37,9 @@ export function fitBytes(s, max) {
 
 /**
  * io: { rpc(method, params), send(role, {to?, data, value?}) -> receipt, addr: {deployer, dex, custody, feeTo}, load(), save(state), log(line) }
- * plan: { snapshot, artifacts, creators: {u<id>: address}, chainId, vNative (wei, virtual reserve for future native launches), build?: 'auto'|'cancun'|'paris', only?: [ids], dryRun? }
+ * plan: { snapshot, artifacts, creators: {u<id>: address}, chainId, vNative (wei, virtual reserve for future native launches), build?: 'auto'|'cancun'|'paris', only?: [ids], dryRun?,
+ *         dex: 'own' (deploy official Uniswap V2 + WZRO from the dex wallet) | { weth, factoryV2, router } (an existing V2-compatible DEX on Zero) }
+ * The DEX is chosen on migration day on purpose: it is a constructor argument of the curve, so it never changes any reserved address.
  */
 export async function zeroRun(io, plan) {
   const st = (await io.load()) || { v: 1, steps: {}, imports: {} };
@@ -50,6 +52,7 @@ export async function zeroRun(io, plan) {
   const rep = { chainId: 0, predicted: { curve: P.curve, factory: P.factory, dex: P.dex }, steps: [] };
 
   // 0 · preflight
+  if (!plan.dex) throw new Error("choose the graduation DEX first: dex 'own' or { weth, factoryV2, router }");
   rep.chainId = Number(BigInt(await io.rpc('eth_chainId', [])));
   if (plan.chainId && rep.chainId !== Number(plan.chainId)) throw new Error(`wrong chain id ${rep.chainId}, expected ${plan.chainId}`);
   const curveCode = await code(P.curve);
@@ -70,20 +73,30 @@ export async function zeroRun(io, plan) {
   if (plan.dryRun) return { ...rep, dryRun: true, state: st };
 
   // 1 · curve build that this EVM accepts (estimate only: no transaction, no nonce spent)
+  let DEX = P.dex;
+  if (plan.dex !== 'own') {
+    DEX = { weth: getAddress(plan.dex.weth), factoryV2: getAddress(plan.dex.factoryV2), router: getAddress(plan.dex.router) };
+    for (const [k, a] of Object.entries(DEX)) if ((await code(a)) === '0x') throw new Error(`dex ${k} has no code at ${a}`);
+    // must be a Uniswap V2-style factory: allPairsLength() answers
+    try { await io.rpc('eth_call', [{ to: DEX.factoryV2, data: '0x574f2ba3' }, 'latest']); } catch { throw new Error('factoryV2 is not Uniswap V2-compatible (allPairsLength)'); }
+  }
+  rep.dex = { mode: plan.dex === 'own' ? 'own' : 'external', ...DEX };
   const ctorArgs = (dex) => coder.encode(['address', 'address', 'address', 'address', 'uint256'], [dex.weth, dex.factoryV2, dex.router, io.addr.feeTo, BigInt(plan.vNative)]).slice(2);
   if (!st.build) {
     const tries = plan.build && plan.build !== 'auto' ? [plan.build] : ['cancun', 'paris'];
     for (const b of tries) {
-      try { await io.rpc('eth_estimateGas', [{ from: io.addr.deployer, data: plan.artifacts['RookeryCurve2_' + b].bytecode + ctorArgs(P.dex) }]); st.build = b; break; }
+      try { await io.rpc('eth_estimateGas', [{ from: io.addr.deployer, data: plan.artifacts['RookeryCurve2_' + b].bytecode + ctorArgs(DEX) }]); st.build = b; break; }
       catch (e) { log(`build ${b} rejected by this EVM: ${String(e.message || e).slice(0, 80)}`); }
     }
     if (!st.build) throw new Error('no curve build accepted by this EVM');
     await save();
   }
   rep.build = st.build;
+  if (st.dex && JSON.stringify(st.dex) !== JSON.stringify(rep.dex)) throw new Error('this run already chose another DEX: ' + JSON.stringify(st.dex));
+  st.dex = rep.dex; await save();
 
-  // 2 · DEX: WZRO (WETH9), Uniswap V2 factory + router02, from the dedicated dex wallet at nonces 0, 1, 2
-  for (const [i, k, art, args] of [[0, 'weth', 'WETH9', ''], [1, 'factoryV2', 'UniswapV2Factory', coder.encode(['address'], [io.addr.custody]).slice(2)],
+  // 2 · DEX: WZRO (WETH9), Uniswap V2 factory + router02, from the dedicated dex wallet at nonces 0, 1, 2 (own mode only)
+  if (plan.dex === 'own') for (const [i, k, art, args] of [[0, 'weth', 'WETH9', ''], [1, 'factoryV2', 'UniswapV2Factory', coder.encode(['address'], [io.addr.custody]).slice(2)],
     [2, 'router', 'UniswapV2Router02', coder.encode(['address', 'address'], [P.dex.factoryV2, P.dex.weth]).slice(2)]]) {
     if ((await code(P.dex[k])) !== '0x') { st.steps[k] = 'ok'; continue; }
     const n = await nonce(io.addr.dex);
@@ -95,7 +108,7 @@ export async function zeroRun(io, plan) {
 
   // 3 · curve: the deployer's FIRST transaction on this chain
   if ((await code(P.curve)) === '0x') {
-    const rc = await io.send('deployer', { data: plan.artifacts['RookeryCurve2_' + st.build].bytecode + ctorArgs(P.dex) });
+    const rc = await io.send('deployer', { data: plan.artifacts['RookeryCurve2_' + st.build].bytecode + ctorArgs(DEX) });
     if (getAddress(rc.contractAddress) !== getAddress(P.curve)) throw new Error(`curve landed at ${rc.contractAddress}, expected ${P.curve}`);
     st.steps.curve = rc.transactionHash; log(`RookeryCurve2 (${st.build}) → ${P.curve}`); await save();
   }

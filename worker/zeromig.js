@@ -124,7 +124,8 @@ export function installZeroMig(Cls, H) {
       load: async () => JSON.parse(this.meta('zero_run') || 'null'), save: async (s) => this.setMeta('zero_run', JSON.stringify(s)),
       log: () => {},
     };
-    const plan = { snapshot, artifacts, creators, chainId: Number(b.chainId || 33002), vNative: (3150n * WEI).toString(), build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
+    if (!b.dex) throw new Error("choose the graduation DEX: dex 'own' or { weth, factoryV2, router }");
+    const plan = { dex: b.dex, snapshot, artifacts, creators, chainId: Number(b.chainId || 33002), vNative: (3150n * WEI).toString(), build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
     if (plan.dryRun) return zeroRun(io, plan);
     if (this._zeroRunning) return { running: true };
     this._zeroRunning = true;

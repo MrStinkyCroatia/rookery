@@ -38,9 +38,9 @@ for (const a of [K.deployer.address, K.dex.address, K.custody.address]) await rp
 
 const out = { hardfork: HF, keys: { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address } };
 try {
-  out.dry = (await bk.zeroMigrate({ rpc: RPC, allowUnverified: true, dryRun: true })).funds;
-  out.start = await bk.zeroMigrate({ rpc: RPC, allowUnverified: true });
-  out.second = await bk.zeroMigrate({ rpc: RPC, allowUnverified: true });     // must say "running", not start twice
+  out.dry = (await bk.zeroMigrate({ rpc: RPC, allowUnverified: true, dryRun: true, dex: 'own' })).funds;
+  out.start = await bk.zeroMigrate({ rpc: RPC, allowUnverified: true, dex: 'own' });
+  out.second = await bk.zeroMigrate({ rpc: RPC, allowUnverified: true, dex: 'own' });     // must say "running", not start twice
   await Promise.all(jobs);
   const st = JSON.parse(meta.get('zero_run_status'));
   out.status = { state: st.state, error: st.error, build: st.report?.build, imported: st.report?.imported, checks: st.report?.checks, seconds: st.finished && ((st.finished - st.started) / 1000).toFixed(1) };

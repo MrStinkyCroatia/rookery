@@ -45,7 +45,7 @@ const ERC = new Interface(['function balanceOf(address) view returns (uint256)']
 const balOf = async (tok, a) => BigInt(await rpc('eth_call', [{ to: tok, data: ERC.encodeFunctionData('balanceOf', [a]) }, 'latest']));
 const out = {};
 try {
-  await bk.zeroMigrate({ rpc: RPC });
+  await bk.zeroMigrate({ rpc: RPC, dex: 'own' });
   await Promise.all(jobs.splice(0));
   const st = JSON.parse(meta.get('zero_run_status'));
   out.migration = { state: st.state, checks: st.report?.checks?.failed === 0 ? '60/60' : st.report?.checks, finalized: st.report?.finalized };
