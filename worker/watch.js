@@ -112,7 +112,8 @@ export function installWatch(Cls, H) {
 
   // ───────────── Zero (LayerZero L1, EID / chain id 33002) fast watcher ─────────────
   // Signals, all verified against the 21 Nov one-hour window (9 ETH transfers, DELIVERED on "zerointerop"):
-  //  · bridge open  : ZRO OFT quoteSend(dstEid 33002) succeeds; while closed it reverts Executor_EidNotSupported
+  //  · bridge open  : ZRO OFT quoteSend(dstEid 33002) succeeds; while closed LayerZero's executor answers
+  //                  Executor_EidNotSupported(33002) — the destination entry exists only in their short windows
   //  · transfers    : OFTSent logs on the ZRO OFT whose dstEid word == 33002
   //  · delivered    : LayerZero Scan API status for the source tx == DELIVERED
   //  · rpc live     : chain id 33002 + LayerZero endpoint code present + blocks advancing (filters impostor "zero" chains)
@@ -186,7 +187,9 @@ export function installWatch(Cls, H) {
     catch (e) {
       if (e.reverted) {
         const data = String(e.rpc?.data || '');
-        return { state: 'closed', why: /c3baa0b7/i.test(data) || /EidNotSupported/i.test(e.message) ? 'Executor_EidNotSupported' : e.message.slice(0, 80) };
+        // 0xc3baa0b7 = Executor_EidNotSupported(uint32): LayerZero's executor has no entry for Zero at this moment
+        if (/c3baa0b7/i.test(data)) { const eid = parseInt(String(data).slice(10, 74), 16); return { state: 'closed', why: `Executor_EidNotSupported(${eid})` }; }
+        return { state: 'closed', why: /EidNotSupported/i.test(e.message) ? 'Executor_EidNotSupported' : e.message.slice(0, 80) };
       }
       return { state: 'unknown', why: String(e.message || e).slice(0, 80) };
     }
