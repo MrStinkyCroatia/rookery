@@ -94,7 +94,7 @@ Every Rookery pre-market token for Zero moves on-chain 1:1 when Zero launches. N
 - `tools/zero_wd_test.mjs`: migrate → finalize → withdrawals on a real SQLite ledger (EOA ok, contract refused, pre-broadcast failure refunded, crash-resume never sends twice, custody covers every balance).
 - Contract bytecode used on launch day and its SHA-256: [`migration/zero_artifacts.json`](migration/zero_artifacts.json).
 
-GIWA and LitVM follow the same steps at their mainnets.
+GIWA and LitVM follow the same steps at their mainnets. The same process, in plain words, is on the site: [Docs → Mainnet migration](https://rookery.stinkypenguin.xyz/#/docs).
 
 ## Before serious volume
 1. Offline copy of the phrase, moved into a hardware wallet.
