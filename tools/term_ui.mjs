@@ -11,10 +11,10 @@ const cmd = (method, params = {}) => new Promise(r => { const i = ++id; pend[i] 
 const ev = async (e) => (await cmd('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true })).result?.result?.value;
 await cmd('Page.enable'); await cmd('Runtime.enable');
 const out = {};
-for (const [name, w, h, mobile, hash] of [['desk_all', 1400, 1300, false, '#/terminal'], ['desk_pad', 1400, 900, false, '#/terminal/tzero'], ['mob_all', 390, 844, true, '#/terminal']]) {
+for (const [name, w, h, mobile, hash] of [['desk_all', 1400, 1300, false, '#/terminal'], ['desk_pad', 1400, 900, false, '#/terminal/tzero'], ['desk_new', 1400, 900, false, '#/terminal/zero/new'], ['desk_giwa', 1400, 900, false, '#/terminal/giwa'], ['mob_giwa', 390, 844, true, '#/terminal/giwa'], ['mob_all', 390, 844, true, '#/terminal']]) {
   await cmd('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: mobile ? 2 : 1, mobile });
   await cmd('Page.navigate', { url: `${BASE}/?nocache=${Date.now()}${hash}` }); await sleep(7000);
-  out[name] = await ev(`({ h1: document.querySelector('.term h1')?.innerText, tabs: document.querySelectorAll('.term-tab').length, pads: document.querySelectorAll('.term-pad').length, rows: document.querySelectorAll('.term-table tbody tr').length,
+  out[name] = await ev(`({ h1: document.querySelector('.term h1')?.innerText, tabs: document.querySelectorAll('.term-si').length, sideLeft: (() => { const a = document.querySelector('.term-side'), m = document.querySelector('.term-main'); return a && m ? a.getBoundingClientRect().right <= m.getBoundingClientRect().left + 1 : null; })(), pads: document.querySelectorAll('.term-pad').length, stripH: Math.round(document.querySelector('.term-strip')?.getBoundingClientRect().height || 0), net: document.querySelector('.term-net .on')?.innerText, rows: document.querySelectorAll('.term-table tbody tr').length,
     imgsBroken: [...document.querySelectorAll('.term img')].filter(i => i.complete && i.naturalWidth === 0).length, overflowX: document.documentElement.scrollWidth > innerWidth,
     mnavOverflow: (() => { const n = document.querySelector('.mnav'); return n && getComputedStyle(n).display !== 'none' ? n.scrollWidth > n.clientWidth + 2 : null; })(), empty: document.querySelector('.term-empty')?.innerText || null })`);
   const shot = await cmd('Page.captureScreenshot', { format: 'png' }); writeFileSync(`out/term_${name}.png`, Buffer.from(shot.result.data, 'base64'));

@@ -2865,6 +2865,7 @@ export class Books {
           timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('watch', this.watchRun().catch(e => ({ error: String(e?.message || e) }))),
+          timed('termgiwa', this.meta('giwa_rpc') && this.termTick ? this.termTick(this.netRpcFn('giwa'), 'giwa').catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
           timed('zerowd', (this.meta('zero_finalized') || this.meta('giwa_finalized')) ? this.zeroWdTick().catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
@@ -2891,7 +2892,7 @@ export class Books {
 
       /* public */
       if (method === 'GET' && p === '/terminal') {
-        return json(this.termView({ pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
+        return json(this.termView({ net: url.searchParams.get('net') || 'zero', pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
       }
       const migM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)(\/addresses|\/snapshot\.json)?$/);
       if (migM) {
