@@ -238,6 +238,35 @@ export function installWatch(Cls, H) {
   };
 
   const short = (h) => h.slice(0, 10) + '…' + h.slice(-6);
+  const LZH = { 'user-agent': 'Mozilla/5.0 (compatible; rookery-watch/1.0)', accept: 'application/json', origin: 'https://layerzeroscan.com', referer: 'https://layerzeroscan.com/' };
+  const seenAdd = (st, key, list = 'seenTx', cap = 400) => { st[list] = (st[list] || []); if (st[list].includes(key)) return false; st[list].push(key); if (st[list].length > cap) st[list] = st[list].slice(-cap); return true; };
+
+  // every LayerZero message on all 110+ chains (~8/min) — keep the ones whose pathway touches Zero
+  P.zwFeed = async function (st, limit = 100, eid = ZW.eid) {
+    const r = await fetch('https://scan.layerzero-api.com/v1/messages/latest?limit=' + limit, { headers: LZH, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error('scan feed HTTP ' + r.status);
+    const j = await r.json();
+    const hits = [];
+    for (const m of j.data || []) {
+      const pw = m.pathway || {};
+      if (pw.srcEid !== eid && pw.dstEid !== eid) continue;
+      const g = String(m.guid || m.source?.tx?.txHash || '').slice(0, 18);
+      if (!seenAdd(st, g, 'seenGuid', 300)) continue;
+      hits.push({ dir: pw.srcEid === eid ? 'from' : 'to', other: pw.srcEid === eid ? (pw.receiver?.chain || pw.dstEid) : (pw.sender?.chain || pw.srcEid),
+        app: [pw.sender?.name, pw.receiver?.name, pw.sender?.id].find(x => x && x !== 'unknown') || (pw.sender?.address ? 'app ' + pw.sender.address.slice(0, 8) + '…' + pw.sender.address.slice(-4) : 'unknown app'), status: m.status?.name || '', tx: m.source?.tx?.txHash || '', created: m.created });
+    }
+    return hits;
+  };
+
+  // what is happening inside Zero itself, read from any verified live RPC
+  P.zwActivity = async function (url, st) {
+    const b = await zwRpc([url], 'eth_getBlockByNumber', ['latest', false]);
+    if (!b) return null;
+    const num = parseInt(b.number, 16), txs = (b.transactions || []).length;
+    const a = st.act || (st.act = { since: now(), fromBlock: num, samples: 0, txSum: 0, maxTx: 0 });
+    a.head = num; a.samples++; a.txSum += txs; a.maxTx = Math.max(a.maxTx, txs); a.rpc = url;
+    return { num, txs, a };
+  };
 
   P.zwTick = async function (opts = {}) {
     if (this._zwBusy && !opts.force) return { busy: true };
@@ -265,7 +294,7 @@ export function installWatch(Cls, H) {
         const fresh = [];
         st.logErr = {};
         const got = await Promise.all(Object.keys(ZW.chains).map(k => this.zwLogs(k, st).catch(e => { st.logErr[k] = String(e.message || e).slice(0, 60); return []; })));
-        for (const g of got) fresh.push(...g);
+        for (const g of got) fresh.push(...g.filter(f => seenAdd(st, f.tx.slice(0, 18))));
         if (fresh.length) {
           st.transfers = (st.transfers || 0) + fresh.length;
           st.pending = (st.pending || []).concat(fresh.map(f => ({ ...f, seen: t }))).slice(-200);
@@ -276,6 +305,44 @@ export function installWatch(Cls, H) {
           await this.zwSay(`${first ? '🚀 <b>FIRST ZRO transfers to Zero detected</b>' : '📦 <b>ZRO → Zero transfers</b>'}\n${fresh.length} tx · ${sum.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO\n${lines}${fresh.length > 4 ? `\n+${fresh.length - 4} more` : ''}`, st);
         }
         out.newTransfers = fresh.length;
+      }
+
+      // 2b · global LayerZero feed: any app, any chain, to or from Zero
+      if (n % 3 === 1 || opts.force) {
+        try {
+          const hits = await this.zwFeed(st);
+          const fresh = hits.filter(h => !h.tx || seenAdd(st, h.tx.slice(0, 18)));
+          for (const h of fresh) if (h.dir === 'to' && h.tx) st.pending = (st.pending || []).concat([{ chain: 'lz', tx: h.tx, amount: 0, seen: t, app: h.app }]).slice(-200);
+          const from = fresh.filter(h => h.dir === 'from'), to = fresh.filter(h => h.dir === 'to');
+          st.feedFrom = (st.feedFrom || 0) + from.length; st.feedTo = (st.feedTo || 0) + to.length;
+          const fmt = (h) => `• ${h.dir === 'from' ? 'Zero → ' + h.other : h.other + ' → Zero'} · ${h.app} · ${h.status}${h.tx ? ` · <a href="https://layerzeroscan.com/tx/${h.tx}">${short(h.tx)}</a>` : ''}`;
+          if (from.length) {
+            const first = !st.firstFromZero; if (first) st.firstFromZero = t;
+            await this.zwSay(`${first ? '🚨 <b>FIRST message sent FROM Zero</b>\nThe chain is executing transactions.' : '📡 <b>Messages from Zero</b>'}\n${from.slice(0, 5).map(fmt).join('\n')}${from.length > 5 ? `\n+${from.length - 5} more` : ''}`, st);
+          }
+          if (to.length) await this.zwSay(`➡️ <b>LayerZero → Zero</b> (${to.length})\n${to.slice(0, 5).map(fmt).join('\n')}${to.length > 5 ? `\n+${to.length - 5} more` : ''}`, st);
+          st.feedErr = '';
+          out.feed = fresh.length;
+        } catch (e) { st.feedErr = String(e.message || e).slice(0, 60); }
+      }
+
+      // 2c · inside Zero: first transactions + 30-min digest from any verified live RPC
+      const liveRpc = Object.entries(st.rpc || {}).find(([, v]) => v.live)?.[0];
+      if (liveRpc && (n % 5 === 0 || opts.force)) {
+        try {
+          const r = await this.zwActivity(liveRpc, st);
+          if (r && r.txs > 0 && !st.firstZeroTx) {
+            st.firstZeroTx = t;
+            await this.zwSay(`🚨 <b>First transactions on Zero</b>\nblock ${r.num} · ${r.txs} tx\nvia <code>${liveRpc}</code>`, st);
+          }
+          if (r && t - (st.act.since || t) > 30 * 60e3) {
+            const a = st.act;
+            let supply = 0;
+            try { supply = Number(BigInt(await zwRpc([liveRpc], 'eth_call', [{ to: ZW.zeroZro, data: '0x18160ddd' }, 'latest']))) / 1e18; } catch { /* optional */ }
+            await this.zwSay(`📊 <b>Zero · last 30 min</b>\nblocks ${a.fromBlock} → ${a.head} (+${a.head - a.fromBlock})\ntx per sampled block: avg ${(a.txSum / Math.max(1, a.samples)).toFixed(1)}, max ${a.maxTx}${supply ? `\nZRO on Zero: ${supply.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : ''}`, st);
+            st.act = { since: t, fromBlock: a.head, samples: 0, txSum: 0, maxTx: 0 };
+          }
+        } catch (e) { st.actErr = String(e.message || e).slice(0, 60); }
       }
 
       // 3 · delivery confirmation via LayerZero Scan (up to 4 pending per tick, each re-checked ≥ 10 s apart)
@@ -289,7 +356,7 @@ export function installWatch(Cls, H) {
           st.delivered = (st.delivered || 0) + 1;
           if (!st.firstDelivered) {
             st.firstDelivered = t;
-            await this.zwSay(`✅ <b>Bridge works end-to-end</b>\n${p.amount.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO from ${ZW.chains[p.chain].name} DELIVERED on Zero\n<a href="https://layerzeroscan.com/tx/${p.tx}">LayerZero Scan</a>${s.dstTx ? `\nZero tx ${short(s.dstTx)}` : ''}`, st);
+            await this.zwSay(`✅ <b>Bridge works end-to-end</b>\n${p.chain === 'lz' ? (p.app || 'LayerZero message') : p.amount.toLocaleString('en-US', { maximumFractionDigits: 2 }) + ' ZRO from ' + ZW.chains[p.chain].name} DELIVERED on Zero\n<a href="https://layerzeroscan.com/tx/${p.tx}">LayerZero Scan</a>${s.dstTx ? `\nZero tx ${short(s.dstTx)}` : ''}`, st);
           }
         } else if (/FAILED|BLOCKED|PAYLOAD_STORED/.test(s.status)) {
           p.done = true;

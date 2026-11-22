@@ -2664,6 +2664,24 @@ export class Books {
     const target = (arg) => { const id = arg ? this.parseMarketRef(arg) : null; return id ? ' AND market=' + `'${id.replace(/'/g, '')}'` : ''; };
     const url = (u) => { u = String(u || '').trim(); if (!u) return ''; if (!/^https?:\/\//i.test(u)) u = 'https://' + u; return /^https:\/\/[^\s]+$/.test(u) ? u.slice(0, 200) : ''; };
 
+    // Zero watcher controls — owner chat only
+    if ((cmd === '/zero' || cmd === '/zerorpc') && String(chat.id) === this.meta('tg_owner_chat')) {
+      const st = this.zwState();
+      if (cmd === '/zerorpc') {
+        const rm = (args[0] || '').toLowerCase() === 'remove';
+        const u = url(rm ? args[1] : args[0]);
+        if (!u) return reply('Usage: <code>/zerorpc https://…</code> or <code>/zerorpc remove https://…</code>');
+        if (rm) { st.extraRpcs = (st.extraRpcs || []).filter(x => x !== u); this.zwSave(st); return reply('Removed ' + u); }
+        st.extraRpcs = [...new Set([...(st.extraRpcs || []), u])].slice(0, 10);
+        const c = await this.zwRpcCheck(u, st);
+        if (c.live) st.rpc = { ...(st.rpc || {}), [u]: { live: true, why: '', block: c.block, supply: c.supply || 0, checked: now() } };
+        this.zwSave(st);
+        return reply(c.live ? `🟢 Verified Zero RPC — watching it\n<code>${u}</code>\nblock ${c.block}` : `👀 Added to watch list, not live yet: ${c.why}\n<code>${u}</code>\nI will ping you the moment it serves real Zero blocks.`);
+      }
+      const b = st.bridge || {};
+      const live = Object.entries(st.rpc || {}).filter(([, v]) => v.live).map(([k]) => k);
+      return reply(`🛰 <b>Zero watch</b>\nbridge: ${['eth', 'arb', 'base'].map(k => `${k} ${b[k]?.state || '?'}`).join(' · ')}\nZRO transfers seen: ${st.transfers || 0} · delivered: ${st.delivered || 0}\nLZ msgs to/from Zero: ${st.feedTo || 0}/${st.feedFrom || 0}\nRPC live: ${live.length ? live.join(', ') : 'none yet'}\nwatching ${(st.extraRpcs || []).length} community RPC(s) + ${(st.metaRpcs || []).length} official`);
+    }
     if (cmd === '/owner') {
       if (isGroup) return reply('Send this in a private chat with the bot, not in a group.');
       const code = String(args[0] || '').trim();
@@ -3570,6 +3588,13 @@ export class Books {
             if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
             if (b.zero) return json({ ok: true, tick: await this.zwTick({ force: true, meta: !!b.meta }), state: this.zwState() });
             if (b.zeroBacktest) return json({ ok: true, backtest: await this.zwBacktest(b.zeroBacktest) });
+            if (b.zeroFeedTest) { const hits = await this.zwFeed({}, 100, Number(b.zeroFeedTest)); return json({ ok: true, eid: Number(b.zeroFeedTest), hits: hits.length, sample: hits.slice(0, 3) }); }
+            if (b.zeroActTest) { const st = {}; return json({ ok: true, act: await this.zwActivity(String(b.zeroActTest), st) }); }
+            if (b.zeroCmdTest) {
+              const chat = this.meta('tg_owner_chat');
+              await this.tgUpdate({ message: { text: String(b.zeroCmdTest), chat: { id: Number(chat), type: 'private' } } }, 'test');
+              return json({ ok: true, sent: String(b.zeroCmdTest) });
+            }
             if (b.zeroRpc) {
               const url = String(b.zeroRpc).trim();
               if (!/^https:\/\/[^\s]+$/.test(url)) return json({ ok: false, error: 'https url required' });
@@ -3597,7 +3622,7 @@ export class Books {
           }
           const zs = this.zwState();
           return json({ ok: true, zero: { bridge: zs.bridge, rpc: zs.rpc, transfers: zs.transfers || 0, delivered: zs.delivered || 0, pending: (zs.pending || []).length,
-            metaRpcs: zs.metaRpcs, metaStatus: zs.metaStatus, peer: zs.peer, ticks: zs.n, last: zs.last, lastMs: zs.lastMs, cur: zs.cur, gaps: zs.gaps || 0,
+            metaRpcs: zs.metaRpcs, metaStatus: zs.metaStatus, peer: zs.peer, feedTo: zs.feedTo || 0, feedFrom: zs.feedFrom || 0, feedErr: zs.feedErr, extraRpcs: zs.extraRpcs, act: zs.act, ticks: zs.n, last: zs.last, lastMs: zs.lastMs, cur: zs.cur, gaps: zs.gaps || 0,
             logErr: zs.logErr, metaErr: zs.metaErr, log: (zs.log || []).slice(-10), alarm: await this.ctx.storage.getAlarm(), off: this.meta('zw_off') === '1' },
             targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
         }
