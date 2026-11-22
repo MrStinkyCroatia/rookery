@@ -2891,6 +2891,10 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      if (method === 'GET' && p === '/terminal/token') {
+        const d = this.termToken(url.searchParams.get('net') === 'giwa' ? 'giwa' : 'zero', url.searchParams.get('addr'));
+        return d ? json(d) : json({ error: 'Token not indexed yet' }, 404);
+      }
       if (method === 'GET' && p === '/terminal') {
         return json(this.termView({ net: url.searchParams.get('net') || 'zero', pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
       }

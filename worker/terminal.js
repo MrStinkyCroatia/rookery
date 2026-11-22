@@ -58,6 +58,14 @@ export function installTerminal(Cls, H) {
       decimals INTEGER, supply TEXT, tx TEXT, block INTEGER, ts INTEGER, transfers INTEGER DEFAULT 0, last_activity INTEGER DEFAULT 0, chain TEXT DEFAULT 'zero')`);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS term_pad ON term_tokens (pad, block)`);
     try { this.sql.exec('ALTER TABLE markets ADD COLUMN zero_token TEXT'); } catch { /* exists */ }
+    for (const col of ['pool TEXT', 'holders INTEGER DEFAULT 0', 'top10 REAL DEFAULT 0', 'creator_pct REAL DEFAULT 0', "price_native TEXT DEFAULT '0'",
+      'buys INTEGER DEFAULT 0', 'sells INTEGER DEFAULT 0', "vol_native TEXT DEFAULT '0'", 'last_trade INTEGER DEFAULT 0']) {
+      try { this.sql.exec(`ALTER TABLE term_tokens ADD COLUMN ${col}`); } catch { /* exists */ }
+    }
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS term_bal (chain TEXT, token TEXT, holder TEXT, bal TEXT, PRIMARY KEY (chain, token, holder))`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS term_tx (chain TEXT, token TEXT, tx TEXT, idx INTEGER, block INTEGER, ts INTEGER, kind TEXT, from_a TEXT, to_a TEXT,
+      amount TEXT, value TEXT DEFAULT '0', PRIMARY KEY (chain, tx, idx))`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS term_tx_tok ON term_tx (chain, token, block)`);
   };
   P.termFactories = function () { try { return JSON.parse(this.meta('term_factories') || '{}'); } catch { return {}; } };
   P.termPadStatus = function () { try { return JSON.parse(this.meta('term_pad_status') || '{}'); } catch { return {}; } };
@@ -72,7 +80,7 @@ export function installTerminal(Cls, H) {
     for (const l of logs || []) {
       const a = l.address.toLowerCase();
       if (seen.has(a) || fresh.some(f => f.addr === a) || l.topics.length !== 3) continue;   // ERC-20 Transfer has 3 topics (ERC-721 has 4)
-      fresh.push({ addr: a, tx: l.transactionHash, block: parseInt(l.blockNumber, 16) });
+      fresh.push({ addr: a, tx: l.transactionHash, block: parseInt(l.blockNumber, 16), firstTo: hexAddr(l.topics[2]) });
       if (fresh.length >= maxNew) break;
     }
     const call = (to2, data) => rpc('eth_call', [{ to: to2, data }, 'latest']).catch(() => '0x');
@@ -81,22 +89,103 @@ export function installTerminal(Cls, H) {
         rpc('eth_getTransactionByHash', [f.tx]).catch(() => null), call(f.addr, '0x06fdde03'), call(f.addr, '0x95d89b41'),
         call(f.addr, '0x313ce567'), call(f.addr, '0x18160ddd'), rpc('eth_getBlockByNumber', ['0x' + f.block.toString(16), false]).catch(() => null)]);
       const factory = (tx?.to || '').toLowerCase() || null;
+      const firstTo = f.firstTo;
+      let pool = factory;
+      if (firstTo) { const code = await rpc('eth_getCode', [firstTo, 'latest']).catch(() => '0x'); if (code && code !== '0x') pool = firstTo; }
       const pad = (factory && fac[factory]) || (factory ? 'unknown' : 'direct');
       const dec = dc && dc !== '0x' ? Number(BigInt(dc)) : 18;
       if (dec > 36) continue;                                                             // not an ERC-20
-      this.sql.exec(`INSERT OR IGNORE INTO term_tokens (addr,pad,factory,creator,name,symbol,decimals,supply,tx,block,ts,chain) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      this.sql.exec(`INSERT OR IGNORE INTO term_tokens (addr,pad,factory,creator,name,symbol,decimals,supply,tx,block,ts,chain,pool) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         f.addr, pad, factory, (tx?.from || '').toLowerCase(), decodeString(nm).slice(0, 64), decodeString(sy).slice(0, 24), dec,
-        ts && ts !== '0x' ? BigInt(ts).toString() : '0', f.tx, f.block, blk ? Number(BigInt(blk.timestamp)) * 1000 : now(), chain);
+        ts && ts !== '0x' ? BigInt(ts).toString() : '0', f.tx, f.block, blk ? Number(BigInt(blk.timestamp)) * 1000 : now(), chain, pool);
     }
-    // activity: Transfer counts for the newest tracked tokens (100 per pass)
-    const tracked = this.sql.exec('SELECT addr FROM term_tokens WHERE chain=? ORDER BY block DESC LIMIT 100', chain).toArray().map(r => r.addr);
+    // every Transfer of the tracked tokens: balances, trades (buy/sell/mint/burn/transfer), buy price from the native value paid
+    const tracked = this.sql.exec('SELECT addr, pool, creator FROM term_tokens WHERE chain=? ORDER BY block DESC LIMIT 100', chain).toArray();
+    let trades = 0;
     if (tracked.length) {
-      const act = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: tracked, topics: [TRANSFER] }]).catch(() => []);
-      const cnt = {};
-      for (const l of act || []) { const a = l.address.toLowerCase(); cnt[a] = (cnt[a] || 0) + 1; }
-      for (const [a, n] of Object.entries(cnt)) this.sql.exec('UPDATE term_tokens SET transfers=transfers+?, last_activity=? WHERE addr=?', n, now(), a);
+      const meta = Object.fromEntries(tracked.map(t => [t.addr, t]));
+      const act = await rpc('eth_getLogs', [{ fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16), address: tracked.map(t => t.addr), topics: [TRANSFER] }]).catch(() => []);
+      // timestamps: interpolate inside the range (2 block reads instead of one per block)
+      const [b0, b1] = await Promise.all([rpc('eth_getBlockByNumber', ['0x' + from.toString(16), false]).catch(() => null), rpc('eth_getBlockByNumber', ['0x' + to.toString(16), false]).catch(() => null)]);
+      const t0 = b0 ? Number(BigInt(b0.timestamp)) * 1000 : now(), t1 = b1 ? Number(BigInt(b1.timestamp)) * 1000 : now();
+      const tsOf = (bn) => (to === from ? t1 : Math.round(t0 + (t1 - t0) * (bn - from) / (to - from)));
+      const DEAD = '0x000000000000000000000000000000000000dead', Z = '0x0000000000000000000000000000000000000000';
+      const touched = new Set(), buys = [];
+      const bal = (tok, h) => BigInt(this.sql.exec('SELECT bal FROM term_bal WHERE chain=? AND token=? AND holder=?', chain, tok, h).toArray()[0]?.bal || '0');
+      const setBal = (tok, h, v) => this.sql.exec(`INSERT INTO term_bal (chain,token,holder,bal) VALUES (?,?,?,?) ON CONFLICT(chain,token,holder) DO UPDATE SET bal=excluded.bal`, chain, tok, h, v.toString());
+      for (const l of (act || []).sort((x, y) => parseInt(x.blockNumber, 16) - parseInt(y.blockNumber, 16) || parseInt(x.logIndex, 16) - parseInt(y.logIndex, 16))) {
+        if (l.topics.length !== 3) continue;
+        const tok = l.address.toLowerCase(), m = meta[tok]; if (!m) continue;
+        const fa = hexAddr(l.topics[1]), ta = hexAddr(l.topics[2]), amt = BigInt(l.data === '0x' ? 0 : l.data.slice(0, 66));
+        const idx = parseInt(l.logIndex, 16), bn = parseInt(l.blockNumber, 16);
+        if (this.sql.exec('SELECT 1 FROM term_tx WHERE chain=? AND tx=? AND idx=?', chain, l.transactionHash, idx).toArray().length) continue;   // already applied
+        if (fa !== Z) setBal(tok, fa, bal(tok, fa) - amt);
+        if (ta !== Z) setBal(tok, ta, bal(tok, ta) + amt);
+        const pool = m.pool;
+        const kind = fa === Z ? (ta === pool ? 'mint' : 'buy') : fa === pool ? 'buy' : ta === pool ? 'sell' : ta === Z ? 'sell' : ta === DEAD ? 'burn' : 'transfer';
+        this.sql.exec(`INSERT INTO term_tx (chain,token,tx,idx,block,ts,kind,from_a,to_a,amount) VALUES (?,?,?,?,?,?,?,?,?,?)`, chain, tok, l.transactionHash, idx, bn, tsOf(bn), kind, fa, ta, amt.toString());
+        if (kind === 'buy') buys.push({ tok, tx: l.transactionHash, idx, amt });
+        if (kind === 'buy' || kind === 'sell') { trades++; this.sql.exec(`UPDATE term_tokens SET ${kind === 'buy' ? 'buys=buys+1' : 'sells=sells+1'}, last_trade=? WHERE chain=? AND addr=?`, tsOf(bn), chain, tok); }
+        this.sql.exec('UPDATE term_tokens SET transfers=transfers+1, last_activity=? WHERE chain=? AND addr=?', tsOf(bn), chain, tok);
+        touched.add(tok);
+      }
+      // what each buy paid (native coin sent with the transaction): price and volume, capped per pass
+      const txv = {};
+      for (const h of [...new Set(buys.map(x => x.tx))].slice(0, 40)) { const t = await rpc('eth_getTransactionByHash', [h]).catch(() => null); txv[h] = t ? BigInt(t.value || '0x0') : 0n; }
+      for (const x of buys) {
+        const v = txv[x.tx]; if (!v || !x.amt) continue;
+        this.sql.exec('UPDATE term_tx SET value=? WHERE chain=? AND tx=? AND idx=?', v.toString(), chain, x.tx, x.idx);
+        const tk = this.sql.exec('SELECT vol_native FROM term_tokens WHERE chain=? AND addr=?', chain, x.tok).one();
+        this.sql.exec('UPDATE term_tokens SET price_native=?, vol_native=? WHERE chain=? AND addr=?', ((v * 10n ** 18n) / x.amt).toString(), (BigInt(tk.vol_native || '0') + v).toString(), chain, x.tok);
+      }
+      for (const tok of touched) this.termStats(chain, tok);
     }
-    return { scanned: [from, to], newTokens: fresh.length, logs: (logs || []).length };
+    return { scanned: [from, to], newTokens: fresh.length, logs: (logs || []).length, trades };
+  };
+
+  // holders (without curve / pool, dead and zero), top-10 share and creator share of the supply
+  P.termStats = function (chain, tok) {
+    const t = this.sql.exec('SELECT * FROM term_tokens WHERE chain=? AND addr=?', chain, tok).toArray()[0]; if (!t) return;
+    const skip = [t.pool, '0x000000000000000000000000000000000000dead', '0x0000000000000000000000000000000000000000'].filter(Boolean);
+    const rows = this.sql.exec(`SELECT holder, bal FROM term_bal WHERE chain=? AND token=? AND bal!='0'`, chain, tok).toArray()
+      .filter(r => !skip.includes(r.holder) && BigInt(r.bal) > 0n).sort((x, y) => (BigInt(y.bal) > BigInt(x.bal) ? 1 : -1));
+    const supply = BigInt(t.supply || '0') || rows.reduce((a, r) => a + BigInt(r.bal), 0n) || 1n;
+    const pct = (v) => Number((v * 1000000n) / supply) / 10000;
+    const top10 = pct(rows.slice(0, 10).reduce((a, r) => a + BigInt(r.bal), 0n));
+    const cr = rows.find(r => r.holder === t.creator);
+    this.sql.exec('UPDATE term_tokens SET holders=?, top10=?, creator_pct=? WHERE chain=? AND addr=?', rows.length, top10, cr ? pct(BigInt(cr.bal)) : 0, chain, tok);
+  };
+
+  P.termNativeUsd = function (net) { try { return net === 'giwa' ? this.ethUsd() : this.zroUsd(); } catch { return 0; } };
+  P.termRow = function (net, r, usd) {
+    const px = Number(BigInt(r.price_native || '0')) / 1e18;           // native per whole token
+    const sup = Number(BigInt(r.supply || '0')) / 10 ** (r.decimals ?? 18);
+    return { address: r.addr, pad: r.pad, name: r.name, symbol: r.symbol, supply: r.supply, decimals: r.decimals, creator: r.creator, factory: r.factory, pool: r.pool,
+      ts: r.ts, block: r.block, transfers: r.transfers, holders: r.holders, top10: r.top10, creatorPct: r.creator_pct, buys: r.buys, sells: r.sells,
+      priceUsd: px ? px * usd : null, mcapUsd: px ? px * sup * usd : null, volumeUsd: Number(BigInt(r.vol_native || '0')) / 1e18 * usd || 0, lastTrade: r.last_trade, onchain: true, priceEstimated: true };
+  };
+
+  // token page payload for an on-chain token of any launchpad
+  P.termToken = function (net, addr) {
+    this.termInit();
+    const a = String(addr || '').toLowerCase();
+    const r = this.sql.exec('SELECT * FROM term_tokens WHERE chain=? AND addr=?', net, a).toArray()[0];
+    if (!r) return null;
+    const usd = this.termNativeUsd(net);
+    const row = this.termRow(net, r, usd);
+    const supply = BigInt(r.supply || '0') || 1n;
+    const label = (h) => h === r.pool ? 'curve / pool' : h === r.creator ? 'creator' : h === '0x000000000000000000000000000000000000dead' ? 'burned' : h === r.factory ? 'launchpad' : '';
+    const holders = this.sql.exec(`SELECT holder, bal FROM term_bal WHERE chain=? AND token=? AND bal!='0'`, net, a).toArray()
+      .filter(x => BigInt(x.bal) > 0n).sort((x, y) => (BigInt(y.bal) > BigInt(x.bal) ? 1 : -1)).slice(0, 50)
+      .map(x => ({ address: x.holder, amount: x.bal, pct: Number((BigInt(x.bal) * 1000000n) / supply) / 10000, tag: label(x.holder) }));
+    const txs = this.sql.exec('SELECT tx, block, ts, kind, from_a, to_a, amount, value FROM term_tx WHERE chain=? AND token=? ORDER BY block DESC, idx DESC LIMIT 100', net, a).toArray()
+      .map(x => ({ ...x, valueUsd: Number(BigInt(x.value || '0')) / 1e18 * usd }));
+    const points = this.sql.exec(`SELECT ts, amount, value FROM term_tx WHERE chain=? AND token=? AND kind='buy' AND value!='0' ORDER BY block, idx LIMIT 3000`, net, a).toArray()
+      .map(x => ({ ts: x.ts, priceUsd: Number((BigInt(x.value) * 10n ** 18n) / (BigInt(x.amount) || 1n)) / 1e18 * usd }));
+    const pad = PADS.find(p => p.id === r.pad) || null;
+    const zs = net === 'zero' ? (this.zwState?.() || {}) : {};
+    const explorer = net === 'zero' ? (Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null) : (this.meta(net + '_explorer') || null);
+    return { net, nets: TERM_NETS, token: row, pad, holders, txs, points, explorer, native: net === 'giwa' ? 'ETH' : 'ZRO', nativeUsd: usd };
   };
 
   // called from the Zero watcher loop once a verified RPC exists: follow the chain from block 1, a capped range per pass
@@ -123,26 +212,36 @@ export function installTerminal(Cls, H) {
     const st = this.termPadStatus();
     const fac = this.termFactories();
     const counts = Object.fromEntries(this.sql.exec(`SELECT pad, COUNT(*) c FROM term_tokens WHERE chain=? GROUP BY pad`, net).toArray().map(r => [r.pad, r.c]));
-    const rook = this.sql.exec(`SELECT id, name, symbol, image, created, trades, migrated, zero_token FROM markets WHERE network=? ORDER BY created DESC LIMIT 300`, net).toArray();
+    const rook = this.sql.exec(`SELECT * FROM markets WHERE network=? ORDER BY created DESC LIMIT 300`, net).toArray();
+    const usd = this.termNativeUsd(net);
     counts.rookery = rook.length;
     const pads = PADS.filter(p => p.net === net || p.net === 'both')
       .map(p => ({ ...p, status: st[p.id] || p.status, tokens: counts[p.id] || 0, factories: Object.entries(fac).filter(([, v]) => v === p.id).map(([k]) => k) }));
     const chainPad = pad !== 'all' && pad !== 'new' && pad !== 'rookery';
-    const order = sort === 'active' ? 'transfers DESC, block DESC' : 'block DESC';
+    const order = sort === 'active' ? 'transfers DESC, block DESC' : sort === 'holders' ? 'holders DESC, block DESC' : 'block DESC';
     const rows = this.sql.exec(`SELECT * FROM term_tokens WHERE chain=? ${chainPad ? 'AND pad=?' : ''} ORDER BY ${order} LIMIT 200`, ...(chainPad ? [net, pad] : [net])).toArray();
     const newDeploys24h = this.sql.exec(`SELECT COUNT(*) c FROM term_tokens WHERE chain=? AND ts>?`, net, now() - 864e5).one().c;
     const deploysTotal = this.sql.exec(`SELECT COUNT(*) c FROM term_tokens WHERE chain=?`, net).one().c;
     // "New deploys": every on-chain deployment on that chain, newest first (Rookery's pre-market tokens are not deployed yet)
-    let tokens = pad === 'rookery' ? [] : rows.map(r => ({ address: r.addr, pad: r.pad, name: r.name, symbol: r.symbol, supply: r.supply, decimals: r.decimals,
-      creator: r.creator, factory: r.factory, ts: r.ts, block: r.block, transfers: r.transfers, onchain: true }));
+    let tokens = pad === 'rookery' ? [] : rows.map(r => this.termRow(net, r, usd));
     if (pad === 'all' || pad === 'rookery') {
       const own = rook.map(m => {
         let address = m.zero_token;
         if (!address) { try { address = this.netTokenAddr(net, m.id); } catch { address = null; } }
-        return { address, pad: 'rookery', name: m.name, symbol: m.symbol, image: m.image, ts: m.created, transfers: m.trades, market: m.id, onchain: !!m.migrated, reserved: !m.migrated };
+        let v = {}; try { v = this.view(m) || {}; } catch { /* market view unavailable */ }
+        // holder concentration from the ledger: top 10 accounts' share of the 1B supply (curve inventory is not an account)
+        const bals = this.sql.exec(`SELECT amount FROM balances WHERE asset=? AND amount!='0'`, 't:' + m.id).toArray().map(x => BigInt(x.amount)).sort((x, y) => (y > x ? 1 : -1));
+        const sup = 10n ** 27n;
+        const top10 = Number((bals.slice(0, 10).reduce((x, y) => x + y, 0n) * 1000000n) / sup) / 10000;
+        const cb = BigInt(this.sql.exec(`SELECT amount FROM balances WHERE user_id=? AND asset=?`, m.creator_id, 't:' + m.id).toArray()[0]?.amount || '0');
+        return { address, pad: 'rookery', name: m.name, symbol: m.symbol, image: m.image, ts: m.created, transfers: m.trades, market: m.id, onchain: !!m.migrated, reserved: !m.migrated,
+          holders: bals.length, top10, creatorPct: Number((cb * 1000000n) / sup) / 10000, priceUsd: v.priceUsd ?? null, mcapUsd: v.mcapUsd ?? null, volumeUsd: v.volumeUsd ?? 0,
+          liquidityUsd: v.liquidityUsd ?? null, progress: v.progress ?? null, buys: null, sells: null, lastTrade: m.last_trade };
       });
-      tokens = pad === 'rookery' ? own : [...tokens, ...own].sort((x, y) => (sort === 'active' ? (y.transfers - x.transfers) : (y.ts - x.ts))).slice(0, 250);
+      const key = { active: 'transfers', holders: 'holders', mcap: 'mcapUsd', volume: 'volumeUsd' }[sort];
+      tokens = (pad === 'rookery' ? own : [...tokens, ...own]).sort((x, y) => (key ? ((y[key] || 0) - (x[key] || 0)) : (y.ts - x.ts))).slice(0, 250);
     }
+    if (pad !== 'all' && pad !== 'rookery' && (sort === 'mcap' || sort === 'volume')) { const k = sort === 'mcap' ? 'mcapUsd' : 'volumeUsd'; tokens.sort((x, y) => (y[k] || 0) - (x[k] || 0)); }
     if (q) { const s2 = q.toLowerCase(); tokens = tokens.filter(t => (t.name || '').toLowerCase().includes(s2) || (t.symbol || '').toLowerCase().includes(s2) || (t.address || '').toLowerCase() === s2); }
     let chainLive = false, explorer = null;
     if (net === 'zero') { const zs = this.zwState?.() || {}; chainLive = Object.values(zs.rpc || {}).some(v => v.live); explorer = Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null; }

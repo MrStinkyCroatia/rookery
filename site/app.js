@@ -3238,6 +3238,7 @@ async function route() {
   try {
     if (!a) await viewExplore();
     else if (a === 'trading') await viewTrading();
+    else if (a === 'terminal' && c === 'token') await viewTermToken(b, d);
     else if (a === 'terminal') await viewTerminal(b, c);
     else if (a === 't') await viewToken(b);
     else if (a === 'create') await viewCreate(b);
@@ -3644,25 +3645,118 @@ async function viewTerminal(arg1, arg2) {
       <p class="mu">${esc(p.kind)}</p><div class="term-pad-l"><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">@${esc(p.handle)}</a>${p.followers ? `<span class="mu">${p.followers.toLocaleString('en-US')} followers</span>` : ''}${p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">site ↗</a>` : ''}<span class="mu">${p.tokens} token${p.tokens === 1 ? '' : 's'}</span></div></div></div>`;
     const newHead = st.pad === 'new' ? `<div class="term-one term-newh"><b>⚡ New deploys</b><p class="mu">Every token deployed on ${NL}, from every launchpad, newest first. ${d.chainLive ? '' : 'The feed starts with the first block of ${NL} mainnet (${NM}).'}</p></div>` : '';
     const dir = st.pad === 'all' ? `<div class="term-strip">${pads.map(padCard).join('')}</div>` : cur ? `<div class="term-one">${padCard(cur)}${cur.factories?.length ? `<p class="mu term-fac">Factory: ${cur.factories.map(f => `<span class="mono">${esc(short(f))}</span>`).join(', ')}</p>` : ''}</div>` : '';
-    const ctrl = `<div class="term-ctrl"><div class="term-sort"><button data-sort="new" class="${st.sort === 'new' ? 'on' : ''}">New</button><button data-sort="active" class="${st.sort === 'active' ? 'on' : ''}">Active</button></div>
+    const ctrl = `<div class="term-ctrl"><div class="term-sort">${[['new', 'New'], ['mcap', 'Market cap'], ['holders', 'Holders'], ['volume', 'Volume'], ['active', 'Active']].map(([k, l]) => `<button data-sort="${k}" class="${st.sort === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <input class="inp" id="termQ" placeholder="Search name, ticker or 0x address" value="${esc(st.q)}"></div>`;
     const ex = d.explorer;
+    const pctCls = (v) => v == null ? '' : v >= 30 ? 'dn' : v >= 15 ? 'warn' : 'up';
     const rows = d.tokens.map(t => { const p = byId[t.pad] || { name: t.pad === 'unknown' ? 'Unattributed' : t.pad, id: t.pad };
-      const link = t.market ? `#/t/${esc(t.market)}` : ex && t.address ? `${esc(ex.replace(/\/$/, ''))}/token/${esc(t.address)}` : '';
-      return `<tr>${'<td><div class="term-tok">' + (t.image ? `<img src="${esc(t.image)}" alt="">` : `<span class="term-av-t">${esc((t.symbol || '?')[0])}</span>`) + `<div><b>${esc(t.name || 'Unnamed')}</b><span class="mu">$${esc(t.symbol || '?')}</span></div></div></td>`}
+      const href = t.market ? `#/t/${esc(t.market)}` : t.address ? `#/terminal/${d.net}/token/${esc(t.address)}` : '';
+      return `<tr class="term-row" data-href="${href}">
+        <td><div class="term-tok">${t.image ? `<img src="${esc(t.image)}" alt="">` : `<span class="term-av-t">${esc((t.symbol || '?')[0])}</span>`}<div><b>${esc(t.name || 'Unnamed')}</b><span class="mu">$${esc(t.symbol || '?')}${t.progress != null ? ` · ${Number(t.progress).toFixed(0)}% bonded` : ''}</span></div></div></td>
         <td><span class="term-chip">${byId[t.pad] ? av(byId[t.pad], 'term-av-xs') : ''}${esc(p.name)}</span></td>
-        <td>${t.address ? `<button class="mono zr-mini" data-copy="${esc(t.address)}">${esc(short(t.address))} ⧉</button>${t.reserved ? ' <span class="mu">reserved</span>' : ''}` : '—'}</td>
-        <td class="mu">${t.ts ? ago(t.ts) : '—'}</td><td class="num">${(t.transfers || 0).toLocaleString('en-US')}</td>
-        <td>${link ? `<a class="btn sm ghost" href="${link}" ${t.market ? '' : 'target="_blank" rel="noopener"'}>${t.market ? 'Open' : 'Explorer ↗'}</a>` : ''}</td></tr>`; }).join('');
+        <td class="num">${t.priceEstimated && t.mcapUsd ? '<span class="mu" title="Estimated from the native value paid in buys">≈ </span>' : ''}${t.mcapUsd ? fmtUsd(t.mcapUsd) : '—'}</td>
+        <td class="num">${t.volumeUsd ? fmtUsd(t.volumeUsd) : '—'}</td>
+        <td class="num">${t.holders != null ? Number(t.holders).toLocaleString('en-US') : '—'}</td>
+        <td class="num ${pctCls(t.top10)}">${t.top10 != null ? t.top10.toFixed(1) + '%' : '—'}</td>
+        <td class="num">${t.buys != null ? `<span class="up">${t.buys}</span> / <span class="dn">${t.sells}</span>` : (t.transfers || 0).toLocaleString('en-US')}</td>
+        <td class="mu">${t.ts ? ago(t.ts) : '—'}</td>
+        <td>${t.address ? `<button class="mono zr-mini" data-copy="${esc(t.address)}" onclick="event.stopPropagation()">${esc(short(t.address))} ⧉</button>${t.reserved ? ' <span class="mu">reserved</span>' : ''}` : '—'}</td></tr>`; }).join('');
     const empty = cur && !cur.ours ? `${cur.name} goes live with ${NL} mainnet. Its tokens appear here automatically from the first block.` : st.pad === 'new' ? (d.chainLive ? 'No deploys yet.' : `No deploys yet: ${NL} mainnet starts ${NM === 'TBA' ? 'soon (date TBA)' : 'on ' + NM}. Every new token on ${NL} lands here the second it is deployed.`) : 'No tokens match.';
-    const table = `<div class="panel term-table"><table class="tbl"><thead><tr><th>Token</th><th>Launchpad</th><th>${NL} address</th><th>Age</th><th>${st.pad === 'rookery' ? 'Trades' : 'Activity'}</th><th></th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="6" class="mu term-empty">${esc(empty)}</td></tr>`}</tbody></table></div>`;
+    const table = `<div class="panel term-table"><table class="tbl"><thead><tr><th>Token</th><th>Launchpad</th><th class="num">Market cap</th><th class="num">Volume</th><th class="num">Holders</th><th class="num">Top 10</th><th class="num">Buys / sells</th><th>Age</th><th>${NL} address</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="9" class="mu term-empty">${esc(empty)}</td></tr>`}</tbody></table></div>`;
     app.innerHTML = `<div class="wrap term">${head}<div class="term-layout">${side}<div class="term-main">${newHead}${dir}${ctrl}${table}</div></div><p class="mu term-foot">Community view of public launchpads on ${NL}. Not affiliated with them or with ${d.net === 'giwa' ? 'Upbit or GIWA' : 'LayerZero'}. Always check a token's address on its launchpad before trading. NFA.</p></div>`;
     $$('[data-pad]').forEach(b => b.onclick = () => { st.pad = b.dataset.pad; go(); load(); });
     $$('[data-net]').forEach(b => b.onclick = () => { if (st.net === b.dataset.net) return; st.net = b.dataset.net; st.pad = 'all'; st.q = ''; go(); load(); });
     $$('[data-sort]').forEach(b => b.onclick = () => { st.sort = b.dataset.sort; load(); });
+    $$('.term-row').forEach(r => r.onclick = (e) => { if (e.target.closest('button,a')) return; if (r.dataset.href) location.hash = r.dataset.href.slice(1); });
     const q = $('#termQ'); let t0; q.oninput = () => { clearTimeout(t0); t0 = setTimeout(() => { st.q = q.value.trim(); load().then(() => { const n = $('#termQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 350); };
   }
   await load();
   S.timer = setInterval(() => { if (location.hash.startsWith('#/terminal') && document.activeElement?.id !== 'termQ') load().catch(() => {}); }, 15000);
+}
+
+
+// ───────────── Terminal token page: any token of any launchpad on Zero / GIWA (ArcTools-style)
+async function viewTermToken(net, addr) {
+  net = net === 'giwa' ? 'giwa' : 'zero';
+  const app = $('#app');
+  const short = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
+  const ago = (ts) => { const s = Math.max(0, (Date.now() - ts) / 1000); return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
+  let tab = 'txs';
+  async function load(first) {
+    let d;
+    try { d = await api(`/terminal/token?net=${net}&addr=${encodeURIComponent(addr)}`); }
+    catch (e) { app.innerHTML = `<div class="wrap term"><a class="term-back" href="#/terminal/${net}">← ${net === 'giwa' ? 'GIWA' : 'Zero'} Terminal</a><div class="panel pb term-empty">This token is not indexed yet. New tokens show up within seconds of their first transaction.</div></div>`; return; }
+    const t = d.token, p = d.pad, NL = d.nets[net].label, N = d.native;
+    const ex = d.explorer ? d.explorer.replace(/\/$/, '') : null;
+    const exA = (a, kind = 'address') => ex ? `<a href="${esc(ex)}/${kind}/${esc(a)}" target="_blank" rel="noopener" class="mono">${esc(short(a))}</a>` : `<span class="mono">${esc(short(a))}</span>`;
+    const tok = (v) => fmtT(v);
+    const warn = [];
+    if (t.top10 >= 30) warn.push(`Top 10 wallets hold ${t.top10.toFixed(1)}% of the supply`);
+    if (t.creatorPct >= 10) warn.push(`Creator holds ${t.creatorPct.toFixed(1)}%`);
+    const stat = (l, v, cls = '') => `<div class="tt-stat"><span>${l}</span><b class="${cls}">${v}</b></div>`;
+    const pctCls = (v) => v >= 30 ? 'dn' : v >= 15 ? 'warn' : 'up';
+    const kindCls = { buy: 'up', sell: 'dn', mint: 'mu', burn: 'dn', transfer: 'mu' };
+    app.innerHTML = `<div class="wrap term tt">
+      <a class="term-back" href="#/terminal/${net}${t.pad ? '/' + esc(t.pad) : ''}">← ${esc(NL)} Terminal${p ? ' · ' + esc(p.name) : ''}</a>
+      <div class="tt-head panel pb">
+        <div class="tt-id"><span class="term-av-t tt-av">${esc((t.symbol || '?')[0])}</span><div><h1>${esc(t.name || 'Unnamed')} <span class="mu">$${esc(t.symbol || '?')}</span></h1>
+          <div class="tt-sub">${p ? `<a class="term-chip" href="#/terminal/${net}/${esc(p.id)}">${p.avatar ? `<img class="term-av-xs" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}${esc(p.name)}</a>` : '<span class="term-chip">Unattributed</span>'}
+          <span class="tag term-test">${esc(NL.toUpperCase())}</span><button class="mono zr-mini" data-copy="${esc(t.address)}"><span class="tt-full">${esc(t.address)}</span><span class="tt-short">${esc(short(t.address))}</span> ⧉</button></div></div></div>
+        <div class="tt-px"><b>${t.priceUsd ? fmtUsd(t.priceUsd) : '—'}</b><span class="mu">${t.priceUsd ? 'price ≈ from the last buy' : 'no priced buy yet'}</span>
+          <div class="tt-btns">${p?.site ? `<a class="btn" href="${esc(p.site)}" target="_blank" rel="noopener">Trade on ${esc(p.name)} ↗</a>` : ''}${ex ? `<a class="btn ghost" href="${esc(ex)}/token/${esc(t.address)}" target="_blank" rel="noopener">Explorer ↗</a>` : ''}</div></div>
+      </div>
+      <div class="tt-stats">
+        ${stat('Market cap', t.mcapUsd ? '<span class="mu">≈</span> ' + fmtUsd(t.mcapUsd) : '—')}${stat('Volume (buys)', t.volumeUsd ? fmtUsd(t.volumeUsd) : '—')}
+        ${stat('Holders', Number(t.holders || 0).toLocaleString('en-US'))}${stat('Top 10', (t.top10 || 0).toFixed(1) + '%', pctCls(t.top10 || 0))}
+        ${stat('Creator holds', (t.creatorPct || 0).toFixed(1) + '%', (t.creatorPct || 0) >= 10 ? 'dn' : '')}${stat('Buys / sells', `<span class="up">${t.buys || 0}</span> / <span class="dn">${t.sells || 0}</span>`)}
+        ${stat('Supply', tok(t.supply))}${stat('Age', ago(t.ts))}
+      </div>
+      ${warn.length ? `<div class="tt-warn">⚠ ${warn.map(esc).join(' · ')}</div>` : ''}
+      <div class="tt-grid">
+        <div class="tt-main">
+          <div class="panel tt-chart"><div class="tt-ch"><b>Price</b><span class="mu">USD · from buys on-chain</span></div><div id="ttChart"></div>${d.points.length < 2 ? '<div class="tt-nochart mu">The chart appears after the first priced trades.</div>' : ''}</div>
+          <div class="panel"><div class="tb-tabs tt-tabs"><button data-tt="txs" class="${tab === 'txs' ? 'on' : ''}">Transactions (${d.txs.length})</button><button data-tt="holders" class="${tab === 'holders' ? 'on' : ''}">Holders (${t.holders || 0})</button></div>
+            <div id="ttBody"></div></div>
+        </div>
+        <aside class="tt-side">
+          <div class="panel pb"><h4>Contract</h4>
+            <div class="kv"><span>Token</span><b>${exA(t.address, 'token')}</b></div>
+            <div class="kv"><span>Curve / pool</span><b>${t.pool ? exA(t.pool) : '—'}</b></div>
+            <div class="kv"><span>Factory</span><b>${t.factory ? exA(t.factory) : '—'}</b></div>
+            <div class="kv"><span>Creator</span><b>${t.creator ? exA(t.creator) : '—'}</b></div>
+            <div class="kv"><span>Supply</span><b>${tok(t.supply)}</b></div><div class="kv"><span>Decimals</span><b>${t.decimals}</b></div>
+            <div class="kv"><span>Launched</span><b>block ${Number(t.block).toLocaleString('en-US')}</b></div>
+          </div>
+          ${p ? `<div class="panel pb tt-pad">${p.avatar ? `<img class="term-av" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}<div><b>${esc(p.name)}</b><p class="mu">${esc(p.kind)}</p>
+            <div class="term-pad-l"><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener">@${esc(p.handle)}</a>${p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener">site ↗</a>` : ''}</div></div></div>` : ''}
+          <p class="mu tt-note">Data is read directly from ${esc(NL)}: holders and trades from token transfers, price from the ${esc(N)} paid in buys. Trade on the launchpad itself. NFA.</p>
+        </aside>
+      </div></div>`;
+    const body = () => {
+      const el = $('#ttBody'); if (!el) return;
+      el.innerHTML = tab === 'txs'
+        ? `<div class="term-table"><table class="tbl"><thead><tr><th>Type</th><th class="num">Tokens</th><th class="num">${esc(N)} / USD</th><th>From</th><th>To</th><th>Age</th><th>Tx</th></tr></thead><tbody>${d.txs.map(x => `<tr>
+            <td class="${kindCls[x.kind] || ''}">${esc(x.kind.toUpperCase())}</td><td class="num">${tok(x.amount)}</td>
+            <td class="num">${x.value && x.value !== '0' ? `${(Number(BigInt(x.value)) / 1e18).toFixed(4)} · ${fmtUsd(x.valueUsd)}` : '—'}</td>
+            <td>${exA(x.from_a)}</td><td>${exA(x.to_a)}</td><td class="mu">${ago(x.ts)}</td><td>${exA(x.tx, 'tx')}</td></tr>`).join('') || '<tr><td colspan="7" class="mu term-empty">No transactions yet.</td></tr>'}</tbody></table></div>`
+        : `<div class="term-table"><table class="tbl"><thead><tr><th>#</th><th>Holder</th><th class="num">Tokens</th><th class="num">Share</th><th></th></tr></thead><tbody>${d.holders.map((h, i) => `<tr>
+            <td class="mu">${i + 1}</td><td>${exA(h.address)} ${h.tag ? `<span class="tag term-soon">${esc(h.tag)}</span>` : ''}</td><td class="num">${tok(h.amount)}</td>
+            <td class="num">${h.pct.toFixed(2)}%</td><td style="width:30%"><div class="tt-bar"><i style="width:${Math.min(100, h.pct)}%"></i></div></td></tr>`).join('') || '<tr><td colspan="5" class="mu term-empty">No holders yet.</td></tr>'}</tbody></table></div>`;
+    };
+    body();
+    $$('[data-tt]').forEach(b => b.onclick = () => { tab = b.dataset.tt; $$('[data-tt]').forEach(x => x.classList.toggle('on', x === b)); body(); });
+    const LW = window.LightweightCharts, el = $('#ttChart');
+    if (LW && el && d.points.length >= 2) {
+      if (S.chart) { try { S.chart.remove(); } catch {} }
+      S.chart = LW.createChart(el, { autoSize: true, layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#76767E', fontFamily: 'JetBrains Mono', fontSize: 10 },
+        grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.035)' } }, rightPriceScale: { borderColor: '#1E1E23' }, timeScale: { borderColor: '#1E1E23', timeVisible: true } });
+      const ser = S.chart.addAreaSeries({ lineColor: '#3DDC97', topColor: 'rgba(61,220,151,.25)', bottomColor: 'rgba(61,220,151,0)', lineWidth: 2, priceFormat: { type: 'custom', formatter: (v) => '$' + (v >= 1 ? v.toFixed(4) : Number(v).toPrecision(5)), minMove: 1e-14 } });
+      const seen = new Map(); for (const x of d.points) seen.set(Math.floor(x.ts / 1000), x.priceUsd);
+      ser.setData([...seen.entries()].sort((a, b) => a[0] - b[0]).map(([time, value]) => ({ time, value })));
+      S.chart.timeScale().fitContent();
+    }
+  }
+  await load(true);
+  S.timer = setInterval(() => { if (location.hash.includes('/token/')) load().catch(() => {}); }, 15000);
 }
