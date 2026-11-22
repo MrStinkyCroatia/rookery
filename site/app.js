@@ -3238,6 +3238,7 @@ async function route() {
   try {
     if (!a) await viewExplore();
     else if (a === 'trading') await viewTrading();
+    else if (a === 'terminal') await viewTerminal(b);
     else if (a === 't') await viewToken(b);
     else if (a === 'create') await viewCreate(b);
     else if (a === 'points') await viewPoints();
@@ -3611,3 +3612,45 @@ const ZW = {
     };
   },
 };
+
+
+// ───────────── Zero Terminal: every launchpad on Zero, ArcTools-style (All · New · one tab per launchpad)
+async function viewTerminal(padArg) {
+  const st = { pad: padArg || 'all', sort: 'new', q: '' };
+  const app = $('#app');
+  const ago = (ts) => { const s = Math.max(0, (Date.now() - ts) / 1000); return s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd'; };
+  const short = (a) => a ? a.slice(0, 6) + '…' + a.slice(-4) : '—';
+  const badge = (s) => s === 'live' ? '<span class="tag term-live">LIVE</span>' : s === 'testnet' ? '<span class="tag term-test">TESTNET</span>' : '<span class="tag term-soon">SOON</span>';
+  const av = (p, cls = 'term-av') => p.avatar ? `<img class="${cls}" src="${esc(p.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : p.ours ? `<img class="${cls}" src="/assets/logo-64.png" alt="">` : `<span class="${cls} term-av-t">${esc(p.name[0])}</span>`;
+  async function load() {
+    const d = await api(`/terminal?pad=${encodeURIComponent(st.pad)}&sort=${st.sort}&q=${encodeURIComponent(st.q)}`);
+    const pads = d.pads, cur = pads.find(p => p.id === st.pad);
+    const byId = Object.fromEntries(pads.map(p => [p.id, p]));
+    const tabs = [['all', 'All', null, d.tokens.length], ['new', 'New · 15m', null, null], ...pads.map(p => [p.id, p.name, p, p.tokens])];
+    const head = `<div class="page-h"><div><h1>Zero Terminal</h1><p>Every launchpad on Zero by LayerZero in one place. Tokens show up here the second they launch on-chain, sorted by launchpad.</p></div>
+      <div class="term-chain">${d.chainLive ? `<span class="tag term-live">ZERO LIVE</span><span class="mu mono">indexed to block ${d.cursor.toLocaleString('en-US')}</span>` : `<span class="tag term-soon">ZERO MAINNET 30.11</span><span class="mu">indexing starts with the first block</span>`}</div></div>`;
+    const tabBar = `<div class="term-tabs">${tabs.map(([id, label, p, n]) => `<button class="term-tab ${st.pad === id ? 'on' : ''}" data-pad="${id}">${p ? av(p, 'term-av-xs') : ''}<span>${esc(label)}</span>${n != null ? `<em>${n}</em>` : ''}</button>`).join('')}</div>`;
+    const padCard = (p) => `<div class="term-pad ${p.ours ? 'ours' : ''}" data-pad="${p.id}">${av(p)}<div class="term-pad-b"><div class="term-pad-t"><b>${esc(p.name)}</b>${badge(p.status)}</div>
+      <p class="mu">${esc(p.kind)}</p><div class="term-pad-l"><a href="https://x.com/${esc(p.handle)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">@${esc(p.handle)}</a>${p.followers ? `<span class="mu">${p.followers.toLocaleString('en-US')} followers</span>` : ''}${p.site ? `<a href="${esc(p.site)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">site ↗</a>` : ''}<span class="mu">${p.tokens} token${p.tokens === 1 ? '' : 's'}</span></div></div></div>`;
+    const dir = st.pad === 'all' ? `<div class="term-grid">${pads.map(padCard).join('')}</div>` : cur ? `<div class="term-one">${padCard(cur)}${cur.factories?.length ? `<p class="mu term-fac">Factory: ${cur.factories.map(f => `<span class="mono">${esc(short(f))}</span>`).join(', ')}</p>` : ''}</div>` : '';
+    const ctrl = `<div class="term-ctrl"><div class="term-sort"><button data-sort="new" class="${st.sort === 'new' ? 'on' : ''}">New</button><button data-sort="active" class="${st.sort === 'active' ? 'on' : ''}">Active</button></div>
+      <input class="inp" id="termQ" placeholder="Search name, ticker or 0x address" value="${esc(st.q)}"></div>`;
+    const ex = d.explorer;
+    const rows = d.tokens.map(t => { const p = byId[t.pad] || { name: t.pad === 'unknown' ? 'Unattributed' : t.pad, id: t.pad };
+      const link = t.market ? `#/t/${esc(t.market)}` : ex && t.address ? `${esc(ex.replace(/\/$/, ''))}/token/${esc(t.address)}` : '';
+      return `<tr>${'<td class="term-tok">' + (t.image ? `<img src="${esc(t.image)}" alt="">` : `<span class="term-av-t">${esc((t.symbol || '?')[0])}</span>`) + `<div><b>${esc(t.name || 'Unnamed')}</b><span class="mu">$${esc(t.symbol || '?')}</span></div></td>`}
+        <td><span class="term-chip">${byId[t.pad] ? av(byId[t.pad], 'term-av-xs') : ''}${esc(p.name)}</span></td>
+        <td>${t.address ? `<button class="mono zr-mini" data-copy="${esc(t.address)}">${esc(short(t.address))} ⧉</button>${t.reserved ? ' <span class="mu">reserved</span>' : ''}` : '—'}</td>
+        <td class="mu">${t.ts ? ago(t.ts) : '—'}</td><td class="num">${(t.transfers || 0).toLocaleString('en-US')}</td>
+        <td>${link ? `<a class="btn sm ghost" href="${link}" ${t.market ? '' : 'target="_blank" rel="noopener"'}>${t.market ? 'Open' : 'Explorer ↗'}</a>` : ''}</td></tr>`; }).join('');
+    const empty = cur && !cur.ours ? `${cur.name} goes live with Zero mainnet. Its tokens appear here automatically from the first block.` : st.pad === 'new' ? 'No launches in the last 15 minutes yet.' : 'No tokens match.';
+    const table = `<div class="panel term-table"><table class="tbl"><thead><tr><th>Token</th><th>Launchpad</th><th>Zero address</th><th>Age</th><th>${st.pad === 'rookery' ? 'Trades' : 'Activity'}</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="6" class="mu term-empty">${esc(empty)}</td></tr>`}</tbody></table></div>`;
+    app.innerHTML = `<div class="wrap term">${head}${tabBar}${dir}${ctrl}${table}<p class="mu term-foot">Community view of public launchpads on Zero. Not affiliated with them or with LayerZero. Always check a token's address on its launchpad before trading. NFA.</p></div>`;
+    $$('[data-pad]').forEach(b => b.onclick = () => { st.pad = b.dataset.pad; history.replaceState(null, '', '#/terminal' + (st.pad === 'all' ? '' : '/' + st.pad)); load(); });
+    $$('[data-sort]').forEach(b => b.onclick = () => { st.sort = b.dataset.sort; load(); });
+    const q = $('#termQ'); let t0; q.oninput = () => { clearTimeout(t0); t0 = setTimeout(() => { st.q = q.value.trim(); load().then(() => { const n = $('#termQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 350); };
+  }
+  await load();
+  S.timer = setInterval(() => { if (location.hash.startsWith('#/terminal') && document.activeElement?.id !== 'termQ') load().catch(() => {}); }, 15000);
+}

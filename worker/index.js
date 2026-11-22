@@ -7,6 +7,7 @@ import { installLtcdep } from './ltcdep.js';
 import { installLtcaddr } from './ltcaddr.js';
 import { installWatch } from './watch.js';
 import { installZeroMig } from './zeromig.js';
+import { installTerminal } from './terminal.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2889,6 +2890,9 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      if (method === 'GET' && p === '/terminal') {
+        return json(this.termView({ pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
+      }
       const migM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)(\/addresses|\/snapshot\.json)?$/);
       if (migM) {
         const net = migM[1], sub = migM[2] || '', label = net === 'zero' ? 'Zero by LayerZero' : 'GIWA by Upbit';
@@ -3473,6 +3477,25 @@ export class Books {
             report.reserveEth = Number(resEth) / 1e18;
           });
           return json({ ok: true, ...report });
+        }
+        if (p === '/admin/terminal') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          this.termInit();
+          if (b.factory && b.pad) {                                   // map a launchpad factory, also for tokens already indexed
+            const f = String(b.factory).toLowerCase(), fac = this.termFactories();
+            if (b.remove) delete fac[f]; else fac[f] = String(b.pad);
+            this.setMeta('term_factories', JSON.stringify(fac));
+            this.sql.exec('UPDATE term_tokens SET pad=? WHERE factory=?', b.remove ? 'unknown' : String(b.pad), f);
+          }
+          if (b.status) this.setMeta('term_pad_status', JSON.stringify({ ...this.termPadStatus(), ...b.status }));
+          if (b.index) {                                              // test hook: index any EVM range into a separate chain tag
+            const u = String(b.index.rpc || '');
+            const rpc = async (m2, p2) => { const r = await fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: m2, params: p2 }) }); const j = await r.json(); if (j.error) throw new Error(j.error.message); return j.result; };
+            return json(await this.termIndex(rpc, { from: Number(b.index.from), to: Number(b.index.to), chain: b.index.chain || 'test' }));
+          }
+          if (b.testTokens) return json({ tokens: this.sql.exec('SELECT * FROM term_tokens WHERE chain=? ORDER BY block DESC LIMIT 50', b.testTokens).toArray() });
+          if (b.clearTest) this.sql.exec(`DELETE FROM term_tokens WHERE chain=?`, b.clearTest);
+          return json({ ok: true, factories: this.termFactories(), status: this.termPadStatus(), cursor: this.meta('term_cursor'), err: this.meta('term_err') });
         }
         if (p === '/admin/migration') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
@@ -4173,3 +4196,4 @@ installLtcdep(Books, { B, WEI, now, randHex });
 installLtcaddr(Books, { B, WEI, now });
 installWatch(Books, { now });
 installZeroMig(Books, { B, WEI, now, vQuote });
+installTerminal(Books, { now });
