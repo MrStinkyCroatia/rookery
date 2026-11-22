@@ -131,6 +131,10 @@ export function installWatch(Cls, H) {
       base: { name: 'Base', rpcs: ['https://mainnet.base.org', 'https://base.llamarpc.com', 'https://base-rpc.publicnode.com', 'https://base.drpc.org'], tx: 'https://basescan.org/tx/', quote: true, maxRange: 90 },
       bsc: { name: 'BNB Chain', rpcs: ['https://bsc-dataseed.bnbchain.org', 'https://bsc.drpc.org', 'https://bsc-rpc.publicnode.com'], tx: 'https://bscscan.com/tx/', quote: false, maxRange: 90 },
     },
+    // LayerZero's testnet explorer lives at explorer.testnet.zero.layerzero.network; explorer.zero.network is Zerion's
+    // sunset "ZERϴ" chain and must never be treated as Zero
+    explorerCandidates: ['https://explorer.zero.layerzero.network', 'https://zero-explorer.layerzero.network', 'https://scan.zero.layerzero.network'],
+    explorerDeny: /(^|\.)zero\.network$/i,
     rpcCandidates: ['https://mainnet.zero.layerzero.network', 'https://rpc.zero.layerzero.network', 'https://zero.layerzero.network', 'https://rpc.zerointerop.layerzero.network'],
   };
   P.ZW = ZW;
@@ -267,6 +271,62 @@ export function installWatch(Cls, H) {
     return hits;
   };
 
+  // every block since the last pass, in one JSON-RPC batch: no block is skipped even at 500 ms block time
+  P.zwBlocks = async function (url, st, cap = 60) {
+    const head = parseInt(await zwRpc([url], 'eth_blockNumber', []), 16);
+    const a = st.blk || (st.blk = { last: head - 1 });
+    let from = a.last + 1;
+    if (head - from + 1 > cap) { a.skipped = (a.skipped || 0) + (head - cap + 1 - from); from = head - cap + 1; }
+    if (from > head) return { head, blocks: 0, txs: [] };
+    const batch = [];
+    for (let n = from; n <= head; n++) batch.push({ jsonrpc: '2.0', id: n, method: 'eth_getBlockByNumber', params: ['0x' + n.toString(16), true] });
+    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(batch), signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error('batch HTTP ' + r.status);
+    const res = await r.json();
+    const txs = [];
+    let seen = 0;
+    for (const x of Array.isArray(res) ? res : []) {
+      const b = x.result; if (!b) continue;
+      seen++;
+      for (const t of b.transactions || []) txs.push({ hash: t.hash, from: t.from, to: t.to, value: Number(BigInt(t.value || '0x0')) / 1e18, block: parseInt(b.number, 16), create: !t.to });
+    }
+    if (!seen) throw new Error('rpc refused batch');
+    a.last = head;
+    return { head, blocks: seen, txs };
+  };
+
+  // explorer: online? which API? does it leak an RPC endpoint? (polite: one page + one API call per pass)
+  P.zwExplorer = async function (base, st) {
+    const out = { base, up: false, kind: '', why: '' };
+    try {
+      if (ZW.explorerDeny.test(new URL(base).hostname)) return { ...out, why: 'denied (not LayerZero Zero)' };
+      const r = await fetch(base, { headers: { 'user-agent': 'rookery-watch/1.0 (+https://rookery.stinkypenguin.xyz)' }, redirect: 'follow', signal: AbortSignal.timeout(9000) });
+      if (r.status === 429 || r.status === 403) return { ...out, why: 'HTTP ' + r.status + ' (explorer refuses automated access)', blocked: true };
+      if (!r.ok) return { ...out, why: 'HTTP ' + r.status };
+      const html = (await r.text()).slice(0, 400000);
+      out.up = true;
+      // RPC endpoints printed on the page ("RPC Endpoint" buttons, add-network configs)
+      out.rpcs = [...new Set((html.match(/https:\/\/[a-z0-9.\-]+(?:\/[a-z0-9_\-\/]*)?/gi) || [])
+        .filter(u => /rpc/i.test(u) && !ZW.explorerDeny.test(new URL(u).hostname) && !/\.(js|css|svg|png)$/i.test(u)))].slice(0, 6);
+      // Blockscout v2 API → total tx counter + latest transactions
+      const s2 = await fetch(base.replace(/\/$/, '') + '/api/v2/stats', { headers: { accept: 'application/json', 'user-agent': 'rookery-watch/1.0' }, signal: AbortSignal.timeout(8000) }).catch(() => null);
+      if (s2?.ok && /json/.test(s2.headers.get('content-type') || '')) {
+        const j = await s2.json().catch(() => null);
+        if (j && (j.total_transactions !== undefined || j.total_blocks !== undefined)) {
+          out.kind = 'blockscout'; out.totalTx = Number(j.total_transactions || 0); out.totalBlocks = Number(j.total_blocks || 0);
+        }
+      }
+    } catch (e) { out.why = String(e.message || e).slice(0, 60); }
+    return out;
+  };
+
+  P.zwExplorerTxs = async function (base) {
+    const r = await fetch(base.replace(/\/$/, '') + '/api/v2/transactions', { headers: { accept: 'application/json', 'user-agent': 'rookery-watch/1.0' }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error('explorer txs HTTP ' + r.status);
+    const j = await r.json().catch(() => ({}));
+    return (j.items || []).slice(0, 50).map(t => ({ hash: t.hash, from: t.from?.hash, to: t.to?.hash, value: Number(t.value || 0) / 1e18, block: t.block_number ?? t.block, create: !t.to }));
+  };
+
   // what is happening inside Zero itself, read from any verified live RPC
   P.zwActivity = async function (url, st) {
     const b = await zwRpc([url], 'eth_getBlockByNumber', ['latest', false]);
@@ -335,21 +395,61 @@ export function installWatch(Cls, H) {
         } catch (e) { st.feedErr = String(e.message || e).slice(0, 60); }
       }
 
-      // 2c · inside Zero: first transactions + 30-min digest from any verified live RPC
+      // 2c · inside Zero: every block from any verified live RPC — sees every tx, whichever RPC sent it
       const liveRpc = Object.entries(st.rpc || {}).find(([, v]) => v.live)?.[0];
+      const exBase = Object.entries(st.explorers || {}).find(([, v]) => v.up)?.[0];
+      const txLink = (h) => exBase ? `<a href="${exBase.replace(/\/$/, '')}/tx/${h}">${short(h)}</a>` : `<code>${short(h)}</code>`;
+      const pingTxs = async (txs, src) => {
+        if (!txs.length) return;
+        st.chainTx = (st.chainTx || 0) + txs.length;
+        st.txBuf = (st.txBuf || []).concat(txs.map(x => ({ h: x.hash, v: x.value, c: x.create, b: x.block }))).slice(-200);
+        const first = !st.firstZeroTx;
+        if (!first && t - (st.lastTxPing || 0) < 60e3) return; // at most one activity ping per minute, nothing is lost
+        const buf = st.txBuf; st.txBuf = []; st.lastTxPing = t;
+        if (first) st.firstZeroTx = t;
+        const creates = buf.filter(x => x.c).length, vol = buf.reduce((a, x) => a + (x.v || 0), 0);
+        const top = [...buf].sort((a, b) => (b.v || 0) - (a.v || 0)).slice(0, 3).map(x => `• ${txLink(x.h)}${x.v ? ` · ${x.v.toLocaleString('en-US', { maximumFractionDigits: 4 })} ZRO` : ''}${x.c ? ' · contract deploy' : ''}`).join('\n');
+        await this.zwSay(`${first ? '🚨 <b>First transactions on Zero</b>' : '⚡ <b>Activity on Zero</b>'}\n${buf.length} tx${creates ? ` · ${creates} contract deploy(s)` : ''}${vol ? ` · ${vol.toLocaleString('en-US', { maximumFractionDigits: 2 })} ZRO moved` : ''} · blocks ${Math.min(...buf.map(x => x.b))}–${Math.max(...buf.map(x => x.b))}\n${top}\nsource: ${src}`, st);
+      };
+      if (liveRpc && (n % 3 === 2 || opts.force)) {
+        try {
+          const r = await this.zwBlocks(liveRpc, st);
+          st.blkErr = '';
+          await pingTxs(r.txs, 'RPC ' + new URL(liveRpc).hostname);
+        } catch (e) { st.blkErr = String(e.message || e).slice(0, 60); }
+      }
+
+      // 2d · Zero explorer (official from LayerZero metadata + likely hosts), ~every 30 s, politely
+      if (n % 10 === 5 || opts.force) {
+        st.explorers = st.explorers || {};
+        const bases = [...new Set([...ZW.explorerCandidates, ...(st.metaExplorers || [])])].filter(u => { try { return !ZW.explorerDeny.test(new URL(u).hostname); } catch { return false; } });
+        for (const base of bases) {
+          const e = await this.zwExplorer(base, st);
+          const was = st.explorers[base] || {};
+          st.explorers[base] = { up: e.up, kind: e.kind, why: e.why, blocked: !!e.blocked, totalTx: e.totalTx ?? was.totalTx, checked: t };
+          if (e.up && !was.up) await this.zwSay(`🔎 <b>Zero explorer is online</b>\n${base}${e.kind ? ` · ${e.kind}` : ''}${e.totalTx !== undefined ? ` · ${e.totalTx} tx so far` : ''}`, st);
+          for (const u of e.rpcs || []) if (!(st.extraRpcs || []).includes(u) && !(ZW.rpcCandidates.includes(u))) {
+            st.extraRpcs = [...new Set([...(st.extraRpcs || []), u])].slice(0, 12);
+            await this.zwSay(`🧭 <b>RPC found on the Zero explorer</b>\n<code>${u}</code>\nverifying it now (chain id 33002 + LayerZero endpoint + moving blocks)`, st);
+          }
+          // explorer-only mode: no RPC of ours yet, count new tx via the explorer API
+          if (e.kind === 'blockscout' && !liveRpc && e.totalTx !== undefined && was.totalTx !== undefined && e.totalTx > was.totalTx) {
+            const fresh = (await this.zwExplorerTxs(base).catch(() => [])).filter(x => seenAdd(st, 'x' + String(x.hash).slice(0, 17)));
+            if (fresh.length) await pingTxs(fresh, 'explorer ' + new URL(base).hostname);
+            else await this.zwSay(`⚡ <b>Activity on Zero</b> (explorer)\n+${e.totalTx - was.totalTx} tx · total ${e.totalTx}`, st);
+          }
+        }
+      }
+
       if (liveRpc && (n % 5 === 0 || opts.force)) {
         try {
           const r = await this.zwActivity(liveRpc, st);
-          if (r && r.txs > 0 && !st.firstZeroTx) {
-            st.firstZeroTx = t;
-            await this.zwSay(`🚨 <b>First transactions on Zero</b>\nblock ${r.num} · ${r.txs} tx\nvia <code>${liveRpc}</code>`, st);
-          }
           if (r && t - (st.act.since || t) > 30 * 60e3) {
             const a = st.act;
             let supply = 0;
             try { supply = Number(BigInt(await zwRpc([liveRpc], 'eth_call', [{ to: ZW.zeroZro, data: '0x18160ddd' }, 'latest']))) / 1e18; } catch { /* optional */ }
-            await this.zwSay(`📊 <b>Zero · last 30 min</b>\nblocks ${a.fromBlock} → ${a.head} (+${a.head - a.fromBlock})\ntx per sampled block: avg ${(a.txSum / Math.max(1, a.samples)).toFixed(1)}, max ${a.maxTx}${supply ? `\nZRO on Zero: ${supply.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : ''}`, st);
-            st.act = { since: t, fromBlock: a.head, samples: 0, txSum: 0, maxTx: 0 };
+            await this.zwSay(`📊 <b>Zero · last 30 min</b>\nblocks ${a.fromBlock} → ${a.head} (+${a.head - a.fromBlock})\ntransactions: ${(st.chainTx || 0) - (a.chainTx0 || 0)} (every block scanned)${supply ? `\nZRO on Zero: ${supply.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : ''}`, st);
+            st.act = { since: t, fromBlock: a.head, samples: 0, txSum: 0, maxTx: 0, chainTx0: st.chainTx || 0 };
           }
         } catch (e) { st.actErr = String(e.message || e).slice(0, 60); }
       }

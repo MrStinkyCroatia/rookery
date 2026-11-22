@@ -3601,6 +3601,8 @@ export class Books {
             if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
             if (b.zero) return json({ ok: true, tick: await this.zwTick({ force: true, meta: !!b.meta }), state: this.zwState() });
             if (b.zeroBacktest) return json({ ok: true, backtest: await this.zwBacktest(b.zeroBacktest) });
+            if (b.zeroBlocksTest) { const st = { blk: { last: 0 } }; const head = parseInt((await (await fetch(b.zeroBlocksTest.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }) })).json()).result, 16); st.blk.last = head - (b.zeroBlocksTest.back || 5) - 1; const r = await this.zwBlocks(b.zeroBlocksTest.url, st); return json({ ok: true, head: r.head, blocks: r.blocks, txs: r.txs.length, creates: r.txs.filter(x => x.create).length, sample: r.txs.slice(0, 2) }); }
+            if (b.zeroExplorerTest) { const e = await this.zwExplorer(b.zeroExplorerTest, {}); let txs = 0, txErr = ''; if (e.kind === 'blockscout') { try { txs = (await this.zwExplorerTxs(b.zeroExplorerTest)).length; } catch (x) { txErr = String(x.message || x); } } return json({ ok: true, explorer: e, latestTxs: txs, txErr }); }
             if (b.zbotSetup) return json({ ok: true, setup: await this.zbSetup(this.meta('public_host') || url.host) });
             if (b.zbotSubs) { this.zbInit(); return json({ ok: true, subs: this.sql.exec('SELECT chat_id,type,title,active,added FROM zw_subs ORDER BY added').toArray(), outbox: this.sql.exec('SELECT COUNT(*) c FROM zw_outbox').one().c, status: this.zwStatusText() }); }
             if (b.zbotUpdate) { await this.zbUpdate(b.zbotUpdate); return json({ ok: true }); }
@@ -3638,7 +3640,7 @@ export class Books {
           }
           const zs = this.zwState();
           return json({ ok: true, zero: { bridge: zs.bridge, rpc: zs.rpc, transfers: zs.transfers || 0, delivered: zs.delivered || 0, pending: (zs.pending || []).length,
-            metaRpcs: zs.metaRpcs, metaStatus: zs.metaStatus, peer: zs.peer, feedTo: zs.feedTo || 0, feedFrom: zs.feedFrom || 0, feedErr: zs.feedErr, extraRpcs: zs.extraRpcs, act: zs.act, ticks: zs.n, last: zs.last, lastMs: zs.lastMs, cur: zs.cur, gaps: zs.gaps || 0,
+            metaRpcs: zs.metaRpcs, metaStatus: zs.metaStatus, peer: zs.peer, feedTo: zs.feedTo || 0, feedFrom: zs.feedFrom || 0, feedErr: zs.feedErr, extraRpcs: zs.extraRpcs, act: zs.act, explorers: zs.explorers, chainTx: zs.chainTx || 0, blkErr: zs.blkErr, ticks: zs.n, last: zs.last, lastMs: zs.lastMs, cur: zs.cur, gaps: zs.gaps || 0,
             logErr: zs.logErr, metaErr: zs.metaErr, log: (zs.log || []).slice(-10), alarm: await this.ctx.storage.getAlarm(), off: this.meta('zw_off') === '1' },
             targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
         }
