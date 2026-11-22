@@ -101,7 +101,6 @@ GIWA and LitVM follow the same steps at their mainnets.
 2. Automated sweeping of deposits into the hot wallet and a cold wallet.
 3. Email verification and password reset (needs a mail provider such as Resend).
 4. 2FA for withdrawals.
-5. Licensing: custody and trading in the EU mean CASP/MiCA.
 
 ## Deploy
 
