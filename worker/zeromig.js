@@ -36,42 +36,52 @@ export function installZeroMig(Cls, H) {
   const P = Cls.prototype;
   const LABEL = { zero: 'Zero', giwa: 'GIWA', litvm: 'LitVM' };
 
-  P.zeroAddrs = function () {
-    if (this._zeroAddrs) return this._zeroAddrs;
-    const deployer = this.master().deriveChild(ZERO_DEPLOYER_INDEX).address;
+  // ───── per-network config: every network has its OWN deployer / dex / custody HD children, so a mistake on one
+  //       chain can never touch another. Addresses depend only on the deployer key (not on the chain id).
+  const MIGNET = {
+    zero: { label: 'Zero', chainId: 33002, idx: [ZERO_DEPLOYER_INDEX, ZERO_DEX_INDEX, ZERO_CUSTODY_INDEX], pin: 'zero_addrs_v2', native: 'ZRO', reserveMeta: 'migrated_zro_reserve' },
+    giwa: { label: 'GIWA', chainId: null, idx: [2_000_091_002, 2_000_091_003, 2_000_091_004], pin: 'giwa_addrs_v1', native: 'ETH', reserveMeta: 'giwa_onchain_reserve' },
+  };
+  P.MIGNET = MIGNET;
+  const cfg = (net) => { const c = MIGNET[net]; if (!c) throw new Error('unknown migration network ' + net); return c; };
+  const K = (net) => (net === 'zero' ? 'zero' : net);           // meta prefix (zero keeps its existing keys)
+
+  P.netChainId = function (net) { return cfg(net).chainId || Number(this.meta(net + '_chainid') || 0) || null; };
+  P.netKeys = function (net) {
+    const [d, x, c] = cfg(net).idx, m = this.master();
+    return { deployer: m.deriveChild(d), dex: m.deriveChild(x), custody: m.deriveChild(c) };
+  };
+  P.netAddrs = function (net) {
+    this._netAddrs = this._netAddrs || {}; this._netTok = this._netTok || {};
+    if (this._netAddrs[net]) return this._netAddrs[net];
+    const deployer = this.master().deriveChild(cfg(net).idx[0]).address;
     const curve = getCreateAddress({ from: deployer, nonce: 0 });
     const factory = getCreateAddress({ from: curve, nonce: 1 });
-    const a = { deployer, curve, factory, stubHash: ZERO_STUB_HASH, chainId: 33002 };
+    const a = { network: net, deployer, curve, factory, stubHash: ZERO_STUB_HASH, chainId: this.netChainId(net) };
     // pin the first computation: if derivation or constants ever change, refuse to show different addresses
-    const pinned = this.meta('zero_addrs_v2');            // v2 = standard CREATE3 proxy (v1 used a compiler-dependent stub)
-    if (!pinned) this.setMeta('zero_addrs_v2', JSON.stringify(a));
-    else { const p = JSON.parse(pinned); if (p.curve !== a.curve || p.factory !== a.factory || p.stubHash !== a.stubHash) throw new Error('reserved Zero addresses changed: refusing'); }
-    this._zeroAddrs = a; this._zeroTok = new Map();
+    const pinned = this.meta(cfg(net).pin);
+    if (!pinned) this.setMeta(cfg(net).pin, JSON.stringify({ ...a, chainId: undefined }));
+    else { const q = JSON.parse(pinned); if (q.curve !== a.curve || q.factory !== a.factory || q.stubHash !== a.stubHash) throw new Error(`reserved ${net} addresses changed: refusing`); }
+    this._netAddrs[net] = a; this._netTok[net] = new Map();
     return a;
   };
-  P.zeroTokenAddr = function (id) {
-    const a = this.zeroAddrs();
-    let t = this._zeroTok.get(id);
-    if (!t) {
-      const stub = getCreate2Address(a.factory, keccak256(toUtf8Bytes(String(id))), ZERO_STUB_HASH);
-      t = getCreateAddress({ from: stub, nonce: 1 });
-      this._zeroTok.set(id, t);
-    }
+  P.netTokenAddr = function (net, id) {
+    const a = this.netAddrs(net);
+    let t = this._netTok[net].get(id);
+    if (!t) { t = getCreateAddress({ from: getCreate2Address(a.factory, keccak256(toUtf8Bytes(String(id))), ZERO_STUB_HASH), nonce: 1 }); this._netTok[net].set(id, t); }
     return t;
   };
 
-  P.zeroKeys = function () {
-    const m = this.master();
-    return { deployer: m.deriveChild(ZERO_DEPLOYER_INDEX), dex: m.deriveChild(ZERO_DEX_INDEX), custody: m.deriveChild(ZERO_CUSTODY_INDEX) };
-  };
-
-  // signed transaction on Zero through any verified RPC; EIP-1559 when the chain has a base fee, legacy otherwise
-  P.zeroSend = async function (rpc, role, tx, onHash) {
-    const k = this.zeroKeys()[role];
+  // signed transaction through the network's RPC; EIP-1559 when the chain has a base fee, legacy otherwise
+  P.netSend = async function (net, rpc, role, tx, onHash) {
+    const k = this.netKeys(net)[role];
     if (!k) throw new Error('unknown signer ' + role);
+    const chainId = Number(BigInt(await rpc('eth_chainId', [])));
+    const want = this.netChainId(net);
+    if (want && chainId !== want) throw new Error(`${net}: rpc answers chain id ${chainId}, expected ${want}`);
     const w = new Wallet(k.privateKey);
     const nonce = Number(BigInt(await rpc('eth_getTransactionCount', [w.address, 'pending'])));
-    const base = { chainId: 33002, nonce, to: tx.to || null, data: tx.data || '0x', value: tx.value || 0n };
+    const base = { chainId, nonce, to: tx.to || null, data: tx.data || '0x', value: tx.value || 0n };
     const est = BigInt(await rpc('eth_estimateGas', [{ from: w.address, to: tx.to || undefined, data: base.data, value: '0x' + BigInt(base.value).toString(16) }]));
     base.gasLimit = (est * 12n) / 10n + 50_000n;
     const blk = await rpc('eth_getBlockByNumber', ['latest', false]);
@@ -90,124 +100,135 @@ export function installZeroMig(Cls, H) {
     throw new Error('no receipt for ' + hash);
   };
 
-  P.zeroRpcUrl = function (b = {}) {
-    const st = this.zwState?.() || {};
-    const live = Object.entries(st.rpc || {}).filter(([, v]) => v.live).map(([u]) => u);
-    if (b.rpc && !live.includes(b.rpc) && !b.allowUnverified) throw new Error('rpc is not a verified Zero RPC (watcher)');
-    return b.rpc || live[0] || null;
+  // Zero: only an RPC the watcher verified (impostor chains exist). GIWA: the official RPC the owner sets (meta giwa_rpc).
+  P.netRpcUrl = function (net, b = {}) {
+    if (net === 'zero') {
+      const st = this.zwState?.() || {};
+      const live = Object.entries(st.rpc || {}).filter(([, v]) => v.live).map(([u]) => u);
+      if (b.rpc && !live.includes(b.rpc) && !b.allowUnverified) throw new Error('rpc is not a verified Zero RPC (watcher)');
+      return b.rpc || live[0] || null;
+    }
+    return b.rpc || this.meta(net + '_rpc') || null;
   };
-
-  // run (or dry-run) the 1:1 migration in the background; state persists after every transaction
-  P.zeroMigrate = async function (b = {}) {
-    const url = this.zeroRpcUrl(b);
-    if (!url) throw new Error('no verified Zero RPC yet');
-    const snapMeta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
-    if (!snapMeta) throw new Error('no official snapshot yet (it is taken when the Zero RPC is verified)');
-    if (!this.netPaused('zero')) throw new Error('Zero trading must be paused');
-    const obj = await this.env.BACKUPS.get(snapMeta.key);
-    const snapshot = JSON.parse(await obj.text());
-    const art = await this.env.BACKUPS.get('rookery/migration/zero_artifacts.json');
-    if (!art) throw new Error('artifacts missing in R2');
-    const artifacts = JSON.parse(await art.text());
-    const creators = Object.fromEntries(this.sql.exec(`SELECT DISTINCT u.id, u.wallet FROM markets m JOIN users u ON u.id=m.creator_id WHERE m.network='zero'`).toArray()
-      .map(r => ['u' + r.id, r.wallet && /^0x[0-9a-fA-F]{40}$/.test(r.wallet) ? r.wallet : null]));
-    const rpc = async (method, params) => {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(15000) });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message || 'rpc error');
-      return j.result;
-    };
-    const K = this.zeroKeys();
-    const io = {
-      rpc, send: (role, tx) => this.zeroSend(rpc, role, tx),
-      addr: { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address, feeTo: K.custody.address },
-      load: async () => JSON.parse(this.meta('zero_run') || 'null'), save: async (s) => this.setMeta('zero_run', JSON.stringify(s)),
-      log: () => {},
-    };
-    if (!b.dex) throw new Error("choose the graduation DEX: dex 'own' or { weth, factoryV2, router }");
-    const plan = { dex: b.dex, snapshot, artifacts, creators, chainId: Number(b.chainId || 33002), vNative: (3150n * WEI).toString(), build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
-    if (plan.dryRun) return zeroRun(io, plan);
-    if (this._zeroRunning) return { running: true };
-    this._zeroRunning = true;
-    this.setMeta('zero_run_status', JSON.stringify({ started: now(), rpc: url, state: 'running' }));
-    const job = zeroRun(io, plan).then(r => {
-      if (!r.checks?.failed) { try { r.finalized = this.zeroFinalize(); } catch (e) { r.finalizeError = String(e.message || e); } }
-      this.setMeta('zero_run_status', JSON.stringify({ started: JSON.parse(this.meta('zero_run_status')).started, finished: now(), state: r.checks?.failed ? 'checks-failed' : 'done', report: { ...r, state: undefined } }));
-      return r;
-    }).catch(e => this.setMeta('zero_run_status', JSON.stringify({ state: 'error', error: String(e.message || e).slice(0, 400), at: now() })))
-      .finally(() => { this._zeroRunning = false; });
-    this.ctx.waitUntil(job);
-    return { started: true, rpc: url };
-  };
-
-  // ───── after a successful run: the ledger now points at the chain
-  P.zeroFinalize = function (opts = {}) {
-    const run = JSON.parse(this.meta('zero_run') || 'null');
-    if (!run?.finished && !opts.force) throw new Error('migration not finished with all checks passing');
-    if (this.meta('zero_finalized') && !opts.force) return { already: JSON.parse(this.meta('zero_finalized')) };
-    try { this.sql.exec('ALTER TABLE markets ADD COLUMN zero_token TEXT'); } catch { /* exists */ }
-    let moved = 0n, n = 0;
-    this.ctx.storage.transactionSync(() => {
-      for (const [id, imp] of Object.entries(run.imports || {})) {
-        const m = this.sql.exec('SELECT * FROM markets WHERE id=?', id).toArray()[0];
-        if (!m || m.network !== 'zero' || m.migrated) continue;
-        moved += B(m.reserve_zro);
-        this.sql.exec('UPDATE markets SET migrated=1, zero_token=? WHERE id=?', imp.token, id);
-        n++;
-      }
-      // the curve reserves left our books for the on-chain curves: same amount out of "held" and out of "inflow"
-      this.setMeta('migrated_zro_reserve', (B(this.meta('migrated_zro_reserve')) + moved).toString());
-      this.setMeta('zero_onchain_reserve', (B(this.meta('zero_onchain_reserve')) + moved).toString());
-    });
-    const fin = { ts: now(), markets: n, reserveWei: moved.toString() };
-    this.setMeta('zero_finalized', JSON.stringify(fin));
-    return fin;
-  };
-
-  // ───── withdrawals of migrated tokens from custody to the user's own Zero wallet
-  P.zwdInit = function () {
-    if (this._zwdInit) return; this._zwdInit = true;
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS zero_wd (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT, token TEXT, to_addr TEXT,
-      amount TEXT, status TEXT, txid TEXT DEFAULT '', err TEXT DEFAULT '', transfer_id INTEGER, created INTEGER, updated INTEGER)`);
-  };
-  P.zeroRpcFn = function () {
-    const url = this.zeroRpcUrl();
-    if (!url) throw new Error('Zero RPC is not available yet');
+  P.netRpcFn = function (net, b = {}) {
+    const url = this.netRpcUrl(net, b);
+    if (!url) throw new Error(`${cfg(net).label} RPC is not available yet`);
     return async (method, params) => {
       const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(15000) });
       const j = await r.json(); if (j.error) throw new Error(j.error.message || 'rpc error'); return j.result;
     };
   };
-  P.zeroWithdraw = async function (user, b) {
+
+  // run (or dry-run) the 1:1 migration of one network in the background; state persists after every transaction
+  P.netMigrate = async function (net, b = {}) {
+    const c = cfg(net);
+    const url = this.netRpcUrl(net, b);
+    if (!url) throw new Error(net === 'zero' ? 'no verified Zero RPC yet' : `set the official ${c.label} RPC first`);
+    const chainId = Number(b.chainId || this.netChainId(net) || 0);
+    if (!chainId) throw new Error(`${c.label}: pass the mainnet chainId (it is checked against the RPC)`);
+    if (!c.chainId) this.setMeta(net + '_chainid', String(chainId));
+    const snapMeta = JSON.parse(this.meta('mig_snapshot_' + net) || 'null');
+    if (!snapMeta) throw new Error(`no official ${c.label} snapshot yet`);
+    if (!this.netPaused(net)) throw new Error(`${c.label} trading must be paused`);
+    if (!b.dex) throw new Error("choose the graduation DEX: dex 'own' or { weth, factoryV2, router }");
+    const snapshot = JSON.parse(await (await this.env.BACKUPS.get(snapMeta.key)).text());
+    const art = await this.env.BACKUPS.get('rookery/migration/zero_artifacts.json');
+    if (!art) throw new Error('artifacts missing in R2');
+    const artifacts = JSON.parse(await art.text());
+    const creators = Object.fromEntries(this.sql.exec(`SELECT DISTINCT u.id, u.wallet FROM markets m JOIN users u ON u.id=m.creator_id WHERE m.network=?`, net).toArray()
+      .map(r => ['u' + r.id, r.wallet && /^0x[0-9a-fA-F]{40}$/.test(r.wallet) ? r.wallet : null]));
+    const rpc = this.netRpcFn(net, { ...b, rpc: url });
+    const Kk = this.netKeys(net);
+    const io = {
+      rpc, send: (role, tx) => this.netSend(net, rpc, role, tx),
+      addr: { deployer: Kk.deployer.address, dex: Kk.dex.address, custody: Kk.custody.address, feeTo: Kk.custody.address },
+      load: async () => JSON.parse(this.meta(K(net) + '_run') || 'null'), save: async (st) => this.setMeta(K(net) + '_run', JSON.stringify(st)),
+      log: () => {},
+    };
+    // virtual reserve for FUTURE native launches on that chain: same starting market cap as a ZRO launch (3,150 ZRO)
+    const vNative = b.vNative ? String(b.vNative) : net === 'zero' ? (3150n * WEI).toString()
+      : (BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n).toString();
+    const plan = { dex: b.dex, snapshot, artifacts, creators, chainId, vNative, build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
+    if (plan.dryRun) return zeroRun(io, plan);
+    this._netRunning = this._netRunning || {};
+    if (this._netRunning[net]) return { running: true };
+    this._netRunning[net] = true;
+    const sk = K(net) + '_run_status';
+    this.setMeta(sk, JSON.stringify({ started: now(), rpc: url, state: 'running' }));
+    const job = zeroRun(io, plan).then(r => {
+      if (!r.checks?.failed) { try { r.finalized = this.netFinalize(net); } catch (e) { r.finalizeError = String(e.message || e); } }
+      this.setMeta(sk, JSON.stringify({ started: JSON.parse(this.meta(sk)).started, finished: now(), state: r.checks?.failed ? 'checks-failed' : 'done', report: { ...r, state: undefined } }));
+      return r;
+    }).catch(e => this.setMeta(sk, JSON.stringify({ state: 'error', error: String(e.message || e).slice(0, 400), at: now() })))
+      .finally(() => { this._netRunning[net] = false; });
+    this.ctx.waitUntil(job);
+    return { started: true, rpc: url, network: net };
+  };
+
+  // ───── after a successful run: the ledger now points at the chain
+  P.netFinalize = function (net, opts = {}) {
+    const c = cfg(net);
+    const run = JSON.parse(this.meta(K(net) + '_run') || 'null');
+    if (!run?.finished && !opts.force) throw new Error('migration not finished with all checks passing');
+    if (this.meta(K(net) + '_finalized') && !opts.force) return { already: JSON.parse(this.meta(K(net) + '_finalized')) };
+    try { this.sql.exec('ALTER TABLE markets ADD COLUMN zero_token TEXT'); } catch { /* exists: the on-chain token address, any network */ }
+    let moved = 0n, n = 0;
+    this.ctx.storage.transactionSync(() => {
+      for (const [id, imp] of Object.entries(run.imports || {})) {
+        const m = this.sql.exec('SELECT * FROM markets WHERE id=?', id).toArray()[0];
+        if (!m || m.network !== net || m.migrated) continue;
+        moved += B(m.reserve_zro);
+        this.sql.exec('UPDATE markets SET migrated=1, zero_token=? WHERE id=?', imp.token, id);
+        n++;
+      }
+      // the curve reserves left our books for the on-chain curves: same amount out of "held" and out of "inflow"
+      this.setMeta(c.reserveMeta, (B(this.meta(c.reserveMeta)) + moved).toString());
+      if (net === 'zero') this.setMeta('zero_onchain_reserve', (B(this.meta('zero_onchain_reserve')) + moved).toString());
+    });
+    const fin = { ts: now(), markets: n, reserveWei: moved.toString(), asset: c.native };
+    this.setMeta(K(net) + '_finalized', JSON.stringify(fin));
+    return fin;
+  };
+
+  // ───── withdrawals of migrated tokens from the network's custody to the user's own wallet
+  P.zwdInit = function () {
+    if (this._zwdInit) return; this._zwdInit = true;
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS zero_wd (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, market TEXT, token TEXT, to_addr TEXT,
+      amount TEXT, status TEXT, txid TEXT DEFAULT '', err TEXT DEFAULT '', transfer_id INTEGER, created INTEGER, updated INTEGER)`);
+    try { this.sql.exec(`ALTER TABLE zero_wd ADD COLUMN net TEXT DEFAULT 'zero'`); } catch { /* exists */ }
+  };
+  P.netWithdraw = async function (user, b) {
     this.zwdInit();
     const m = this.sql.exec('SELECT * FROM markets WHERE id=?', String(b.market || '')).toArray()[0];
-    if (!m || m.network !== 'zero') throw new Error('Unknown Zero token');
-    if (!m.migrated || !m.zero_token) throw new Error('This token is not on Zero yet: withdrawals open right after the migration');
+    if (!m || !MIGNET[m.network]) throw new Error('Unknown token');
+    const c = cfg(m.network);
+    if (!m.migrated || !m.zero_token) throw new Error(`This token is not on ${c.label} yet: withdrawals open right after the migration`);
     let to; try { to = getAddress(String(b.to || '').trim()); } catch { throw new Error('Enter a valid 0x… address'); }
     const amt = B(b.amount);
     if (amt <= 0n) throw new Error('Enter an amount');
     // tokens refuse contract recipients until the curve graduates (EIP-7702 wallets are fine)
-    const code = await this.zeroRpcFn()('eth_getCode', [to, 'latest']);
+    const code = await this.netRpcFn(m.network)('eth_getCode', [to, 'latest']);
     if (code && code !== '0x' && !String(code).toLowerCase().startsWith('0xef0100')) throw new Error('Send to a regular wallet address: this token does not accept contract addresses before it bonds');
     let id;
     this.ctx.storage.transactionSync(() => {
       this.addBal(user.id, 't:' + m.id, -amt);
       const tr = this.sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,to_addr,status,note,ts,asset) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
-        user.id, 'withdrawal', 'zero', amt.toString(), to, 'pending', `$${m.symbol} to Zero`, now(), 't:' + m.id).one().id;
-      id = this.sql.exec(`INSERT INTO zero_wd (user_id,market,token,to_addr,amount,status,transfer_id,created,updated) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
-        user.id, m.id, m.zero_token, to, amt.toString(), 'pending', tr, now(), now()).one().id;
+        user.id, 'withdrawal', m.network, amt.toString(), to, 'pending', `$${m.symbol} to ${c.label}`, now(), 't:' + m.id).one().id;
+      id = this.sql.exec(`INSERT INTO zero_wd (user_id,market,token,to_addr,amount,status,transfer_id,created,updated,net) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`,
+        user.id, m.id, m.zero_token, to, amt.toString(), 'pending', tr, now(), now(), m.network).one().id;
     });
     this.ctx.waitUntil(this.zeroWdTick().catch(() => {}));
-    return { ok: true, id, status: 'pending', to, amount: amt.toString(), token: m.zero_token };
+    return { ok: true, id, status: 'pending', to, amount: amt.toString(), token: m.zero_token, network: m.network };
   };
-  // one at a time (custody nonce); the hash is stored BEFORE waiting, so a crash never leads to a second send
+  // one at a time per custody (nonce); the hash is stored BEFORE waiting, so a crash never leads to a second send
   P.zeroWdTick = async function (max = 5) {
     this.zwdInit();
     if (this._zwdBusy) return { busy: true }; this._zwdBusy = true;
     const done = [];
     try {
-      const rpc = this.zeroRpcFn();
       for (const w of this.sql.exec(`SELECT * FROM zero_wd WHERE status IN ('pending','sending') ORDER BY id LIMIT ?`, max).toArray()) {
+        const net = w.net || 'zero';
+        let rpc; try { rpc = this.netRpcFn(net); } catch { continue; }
         if (w.status === 'sending' && w.txid) {           // resume: only look the transaction up
           const rc = await rpc('eth_getTransactionReceipt', [w.txid]).catch(() => null);
           if (!rc) { if (now() - w.updated > 30 * 60e3) this.zeroWdFail(w, 'not mined after 30 min, check custody nonce'); continue; }
@@ -215,7 +236,7 @@ export function installZeroMig(Cls, H) {
         }
         this.sql.exec(`UPDATE zero_wd SET status='sending', updated=? WHERE id=?`, now(), w.id);
         try {
-          const rc = await this.zeroSend(rpc, 'custody', { to: w.token, data: ERC20T.encodeFunctionData('transfer', [w.to_addr, B(w.amount)]) },
+          const rc = await this.netSend(net, rpc, 'custody', { to: w.token, data: ERC20T.encodeFunctionData('transfer', [w.to_addr, B(w.amount)]) },
             (hash) => this.sql.exec('UPDATE zero_wd SET txid=?, updated=? WHERE id=?', hash, now(), w.id));
           this.zeroWdSettle({ ...w, txid: rc.transactionHash }, rc); done.push(w.id);
         } catch (e) {
@@ -231,7 +252,7 @@ export function installZeroMig(Cls, H) {
     if (Number(rc.status) === 1) {
       this.sql.exec(`UPDATE zero_wd SET status='sent', txid=?, updated=? WHERE id=?`, rc.transactionHash, now(), w.id);
       this.sql.exec(`UPDATE transfers SET status='sent', txid=? WHERE id=?`, rc.transactionHash, w.transfer_id);
-    } else this.zeroWdFail({ ...w, txid: rc.transactionHash }, 'reverted on Zero');
+    } else this.zeroWdFail({ ...w, txid: rc.transactionHash }, 'reverted on chain');
   };
   P.zeroWdFail = function (w, why) {
     this.ctx.storage.transactionSync(() => {
@@ -240,6 +261,17 @@ export function installZeroMig(Cls, H) {
       this.sql.exec(`UPDATE transfers SET status='failed', note=? WHERE id=?`, 'refunded: ' + String(why).slice(0, 120), w.transfer_id);
     });
   };
+
+  // ───── Zero names kept as thin wrappers (everything already wired and tested keeps working)
+  P.zeroAddrs = function () { return this.netAddrs('zero'); };
+  P.zeroTokenAddr = function (id) { return this.netTokenAddr('zero', id); };
+  P.zeroKeys = function () { return this.netKeys('zero'); };
+  P.zeroSend = function (rpc, role, tx, onHash) { return this.netSend('zero', rpc, role, tx, onHash); };
+  P.zeroRpcUrl = function (b = {}) { return this.netRpcUrl('zero', b); };
+  P.zeroRpcFn = function () { return this.netRpcFn('zero'); };
+  P.zeroMigrate = function (b = {}) { return this.netMigrate('zero', b); };
+  P.zeroFinalize = function (opts = {}) { return this.netFinalize('zero', opts); };
+  P.zeroWithdraw = function (user, b) { return this.netWithdraw(user, b); };
 
   // ───── ZRO to Zero through the ZRO OFT, from the hot wallet on one source chain (quote by default)
   P.zeroFund = async function (b = {}) {
@@ -329,7 +361,7 @@ export function installZeroMig(Cls, H) {
       built = this.migBuild(net);
     });
     const doc = {
-      v: 2, network: net, chain: net === 'zero' ? { name: 'Zero by LayerZero', chainId: 33002 } : { name: net },
+      v: 2, network: net, chain: net === 'zero' ? { name: 'Zero by LayerZero', chainId: 33002 } : net === 'giwa' ? { name: 'GIWA by Upbit', chainId: this.netChainId('giwa') } : { name: net },
       takenAt: new Date(ts).toISOString(), reason, rule: 'every holder receives exactly this balance 1:1; burned tokens stay burned',
       units: 'all amounts in wei (18 decimals)', rewardsSettledBeforeSnapshot: paid,
       totals: { markets: built.markets.length, holderRows: built.holderRows, quoteReserveWei: built.quoteReserve.toString() },

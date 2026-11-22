@@ -6,8 +6,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { HDNodeWallet, Wallet, Interface } from 'ethers';
 import { installZeroMig } from '../worker/zeromig.js';
 
-const PORT = 8620, RPC = `http://127.0.0.1:${PORT}`;
-const anvil = spawn(process.env.HOME + '/.foundry/bin/anvil', ['--chain-id', '33002', '--port', String(PORT), '--silent', '--gas-limit', '60000000'], { stdio: 'ignore' });
+const NET = process.env.NET || 'zero', CHAIN = NET === 'giwa' ? 91342 : 33002;
+const PORT = NET === 'giwa' ? 8621 : 8620, RPC = `http://127.0.0.1:${PORT}`;
+const anvil = spawn(process.env.HOME + '/.foundry/bin/anvil', ['--chain-id', String(CHAIN), '--port', String(PORT), '--silent', '--gas-limit', '60000000'], { stdio: 'ignore' });
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const rpc = async (m, p = []) => { const r = await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: m, params: p }) }); const j = await r.json(); if (j.error) throw new Error(j.error.message); return j.result; };
 for (let i = 0; i < 60; i++) { try { await rpc('eth_chainId'); break; } catch { await sleep(250); } }
@@ -19,9 +20,10 @@ db.exec(`CREATE TABLE markets (id TEXT PRIMARY KEY, network TEXT, symbol TEXT, r
   CREATE TABLE balances (user_id INTEGER, asset TEXT, amount TEXT, PRIMARY KEY (user_id, asset));
   CREATE TABLE users (id INTEGER PRIMARY KEY, wallet TEXT);
   CREATE TABLE transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, chain TEXT, amount TEXT, txid TEXT DEFAULT '', to_addr TEXT DEFAULT '', status TEXT, note TEXT DEFAULT '', ts INTEGER, asset TEXT);`);
-const snap = JSON.parse(readFileSync('.rehearsal/snapshot.json', 'utf8'));
+const SNAPF = NET === 'giwa' ? '.rehearsal/giwa_snapshot.json' : '.rehearsal/snapshot.json';
+const snap = JSON.parse(readFileSync(SNAPF, 'utf8'));
 for (const m of snap.markets) {
-  db.prepare('INSERT INTO markets (id,network,symbol,reserve_zro,creator_id) VALUES (?,?,?,?,?)').run(m.id, 'zero', m.symbol, m.curve.quoteReserve, Number(m.creator.slice(1)));
+  db.prepare('INSERT INTO markets (id,network,symbol,reserve_zro,creator_id) VALUES (?,?,?,?,?)').run(m.id, NET, m.symbol, m.curve.quoteReserve, Number(m.creator.slice(1)));
   db.prepare('INSERT OR IGNORE INTO users (id) VALUES (?)').run(Number(m.creator.slice(1)));
   for (const h of m.holders) db.prepare('INSERT OR REPLACE INTO balances VALUES (?,?,?)').run(Number(h.u.slice(1)), 't:' + m.id, h.amount);
 }
@@ -36,24 +38,25 @@ class Books {
 }
 installZeroMig(Books, { B, WEI, now: () => Date.now(), vQuote: () => 3150n * WEI });
 const bk = new Books();
-r2.set('snap.json', readFileSync('.rehearsal/snapshot.json', 'utf8'));
+r2.set('snap.json', readFileSync(SNAPF, 'utf8'));
 r2.set('rookery/migration/zero_artifacts.json', readFileSync('out/zero_artifacts.json', 'utf8'));
-meta.set('mig_snapshot_zero', JSON.stringify({ key: 'snap.json' })); meta.set('net_paused_zero', '1');
-const K = bk.zeroKeys();
+meta.set('mig_snapshot_' + NET, JSON.stringify({ key: 'snap.json' })); meta.set('net_paused_' + NET, '1');
+if (NET !== 'zero') { meta.set(NET + '_rpc', RPC); meta.set(NET + '_chainid', String(CHAIN)); }
+const K = bk.netKeys(NET);
 for (const a of [K.deployer.address, K.dex.address, K.custody.address]) await rpc('anvil_setBalance', [a, '0x' + (5000n * WEI).toString(16)]);
 const ERC = new Interface(['function balanceOf(address) view returns (uint256)']);
 const balOf = async (tok, a) => BigInt(await rpc('eth_call', [{ to: tok, data: ERC.encodeFunctionData('balanceOf', [a]) }, 'latest']));
 const out = {};
 try {
-  await bk.zeroMigrate({ rpc: RPC, dex: 'own' });
+  await bk.netMigrate(NET, { rpc: RPC, dex: 'own', chainId: CHAIN, vNative: (2n * WEI).toString() });
   await Promise.all(jobs.splice(0));
-  const st = JSON.parse(meta.get('zero_run_status'));
-  out.migration = { state: st.state, checks: st.report?.checks?.failed === 0 ? '60/60' : st.report?.checks, finalized: st.report?.finalized };
+  const st = JSON.parse(meta.get(NET + '_run_status'));
+  out.migration = { net: NET, chainId: CHAIN, error: st.error, state: st.state, checks: st.report?.checks?.failed === 0 ? `${snap.markets.length}/${snap.markets.length}` : st.report?.checks, finalized: st.report?.finalized };
   out.ledgerAfter = { migratedMarkets: sql.exec('SELECT COUNT(*) c FROM markets WHERE migrated=1 AND zero_token IS NOT NULL').one().c,
-    movedReserveEqualsLedger: B(meta.get('migrated_zro_reserve')) === snap.markets.reduce((a, m) => a + B(m.curve.quoteReserve), 0n) };
+    movedReserveEqualsLedger: B(meta.get(NET === 'zero' ? 'migrated_zro_reserve' : NET + '_onchain_reserve')) === snap.markets.reduce((a, m) => a + B(m.curve.quoteReserve), 0n) };
 
   const m = [...snap.markets].sort((a, b) => b.holders.length - a.holders.length)[0];
-  const h = m.holders[0], uid = Number(h.u.slice(1)), tok = bk.zeroTokenAddr(m.id);
+  const h = [...m.holders].sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1))[0], uid = Number(h.u.slice(1)), tok = bk.netTokenAddr(NET, m.id);
   const userWallet = Wallet.createRandom().address;
   const half = B(h.amount) / 2n;
   // 1 · EOA withdrawal
@@ -64,13 +67,13 @@ try {
     transferRow: sql.exec('SELECT status FROM transfers WHERE id=(SELECT transfer_id FROM zero_wd WHERE id=?)', w1.id).one().status };
   // 2 · contract recipient refused, nothing debited
   const before = bk.bal(uid, 't:' + m.id);
-  try { await bk.zeroWithdraw({ id: uid }, { market: m.id, amount: '1', to: bk.zeroAddrs().curve }); out.withdrawContract = 'NOT REFUSED'; }
+  try { await bk.zeroWithdraw({ id: uid }, { market: m.id, amount: '1', to: bk.netAddrs(NET).curve }); out.withdrawContract = 'NOT REFUSED'; }
   catch (e) { out.withdrawContract = { refused: true, why: e.message.slice(0, 70), ledgerUntouched: bk.bal(uid, 't:' + m.id) === before }; }
   // 3 · failure before broadcast -> refund (point the row at a non-token address so estimateGas reverts)
   const recip0 = await balOf(tok, userWallet);
   bk.addBal(uid, 't:' + m.id, -1000n);                                   // same debit zeroWithdraw does
   const tr3 = sql.exec(`INSERT INTO transfers (user_id,kind,chain,amount,to_addr,status,ts,asset) VALUES (?,?,?,?,?,?,?,?) RETURNING id`, uid, 'withdrawal', 'zero', '1000', userWallet, 'pending', Date.now(), 't:' + m.id).one().id;
-  const w3 = sql.exec(`INSERT INTO zero_wd (user_id,market,token,to_addr,amount,status,transfer_id,created,updated) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`, uid, m.id, bk.zeroAddrs().curve, userWallet, '1000', 'pending', tr3, Date.now(), Date.now()).one().id;
+  const w3 = sql.exec(`INSERT INTO zero_wd (user_id,market,token,to_addr,amount,status,transfer_id,created,updated,net) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`, uid, m.id, bk.netAddrs(NET).curve, userWallet, '1000', 'pending', tr3, Date.now(), Date.now(), NET).one().id;
   await bk.zeroWdTick();
   out.preBroadcastFailure = { status: sql.exec('SELECT status FROM zero_wd WHERE id=?', w3).one().status, refunded: bk.bal(uid, 't:' + m.id) === before,
     transferRow: sql.exec('SELECT status FROM transfers WHERE id=?', tr3).one().status, recipientUnchanged: (await balOf(tok, userWallet)) === recip0 };

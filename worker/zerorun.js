@@ -152,14 +152,16 @@ export async function zeroRun(io, plan) {
     const real = requiredReserve(vq, sold);
     const held = BigInt(m.heldByUsers);
     const priceChain = ((vq + real) * 10n ** 18n) / (V_TOKEN - sold);
-    const priceLedger = BigInt(m.lastPrice || 0);
+    // the price users see on the ledger: (virtual + real reserve) / tokens left on the virtual curve. Not m.lastPrice,
+    // which only moves on the next trade and can be stale (e.g. a market whose pair was converted ZRO -> ETH)
+    const priceLedger = ((vq + BigInt(m.curve.quoteReserve)) * 10n ** 18n) / (V_TOKEN - sold);
     const drift = priceLedger ? Number(priceChain - priceLedger) / Number(priceLedger) : 0;
     const issues = [];
     if (cb !== held) issues.push(`custody ${cb} != held ${held}`);
     if (ts !== SUPPLY - burned) issues.push(`supply ${ts} != ${SUPPLY - burned}`);
     if (c.sold !== sold) issues.push(`sold ${c.sold} != ${sold}`);
     if (c.realQuote !== real) issues.push(`reserve ${c.realQuote} != ${real}`);
-    if (Math.abs(drift) > 1e-6) issues.push(`price drift ${drift}`);
+    if (Math.abs(drift) > 1e-9) issues.push(`price drift ${drift}`);
     if (sold > CURVE_TOKENS) issues.push('sold above curve');
     if (issues.length) bad.push({ id: m.id, issues });
   }

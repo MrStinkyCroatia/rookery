@@ -1419,7 +1419,8 @@ export class Books {
       poolZro: m.pool_zro, poolTok: m.pool_tok, gradAt: m.grad_at,
       volumeUsd: (Number(B(m.volume)) / 1e18) * usd,
       progress, curveProgress, graduated: !!m.graduated, migrated: !!m.migrated,
-      zeroContract: m.network === 'zero' ? (() => { try { return this.zeroTokenAddr(m.id); } catch { return null; } })() : undefined,
+      zeroContract: m.network === 'zero' ? (() => { try { return m.zero_token || this.zeroTokenAddr(m.id); } catch { return null; } })() : undefined,
+      chainContract: (m.network === 'zero' || m.network === 'giwa') ? (() => { try { return m.zero_token || this.netTokenAddr(m.network, m.id); } catch { return null; } })() : undefined,
       stellar: m.network === 'stellar' ? { code: m.st_code || null, issuer: m.st_issuer || null, pool: m.st_pool || null, keeper: m.st_keeper || null,
         net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer,
         gradUsd: Number(m.grad_usd) || ((m.graduated || m.migrated) ? Math.round(Number(B(m.v_wei || 0)) / 1e18 * 14.397 * this.xlmUsd()) : this.stGradUsd()),
@@ -1635,7 +1636,7 @@ export class Books {
       let m = this.market(market);
       if (this.netPaused(m.network)) throw new Error(this.netPauseMsg(m.network));
       if (m.rh_token) throw new Error('This token lives on Robinhood Chain: buy and sell it from your wallet');
-      if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : m.network === 'zero' ? 'This token is live on Zero now: withdraw it to your Zero wallet and trade it on-chain' : 'Token migrated to mainnet');
+      if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : m.network === 'zero' ? 'This token is live on Zero now: withdraw it to your Zero wallet and trade it on-chain' : m.network === 'giwa' ? 'This token is live on GIWA now: withdraw it to your GIWA wallet and trade it on-chain' : 'Token migrated to mainnet');
       // bonded Stellar tokens keep trading on the Rookery pool; only the graduation itself freezes the book
       if (m.network === 'stellar' && m.graduated && this.sql.exec('SELECT 1 FROM stellar_jobs WHERE market=?', m.id).toArray().length)
         throw new Error('Graduating to Aquarius right now: the pool opens in about a minute');
@@ -2863,7 +2864,7 @@ export class Books {
           timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('watch', this.watchRun().catch(e => ({ error: String(e?.message || e) }))),
-          timed('zerowd', this.meta('zero_finalized') ? this.zeroWdTick().catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
+          timed('zerowd', (this.meta('zero_finalized') || this.meta('giwa_finalized')) ? this.zeroWdTick().catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
@@ -2888,28 +2889,32 @@ export class Books {
       const user = this.session(req);
 
       /* public */
-      if (method === 'GET' && p === '/migration/zero') {
-        const meta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
-        const zs = this.zwState?.() || {};
-        const liveRpc = Object.entries(zs.rpc || {}).filter(([, v]) => v.live).map(([u]) => u)[0] || null;
-        const fin = JSON.parse(this.meta('zero_finalized') || 'null');
-        return json({ network: 'zero', paused: this.netPaused('zero'), live: !!fin, chainId: 33002, rpc: liveRpc, curve: this.zeroAddrs().curve,
-          explorer: Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null, snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: '/api/migration/zero/snapshot.json' } : null,
-          plan: 'Variant B: each curve moves 1:1 to an on-chain Rookery curve on Zero; balances stay in your account and can be withdrawn to your Zero wallet.' });
-      }
-      if (method === 'GET' && p === '/migration/zero/addresses') {
-        const a = this.zeroAddrs();
-        const tokens = this.sql.exec(`SELECT id, name, symbol FROM markets WHERE network='zero' ORDER BY created`).toArray()
-          .map(r => ({ id: r.id, symbol: r.symbol, name: r.name, address: this.zeroTokenAddr(r.id) }));
-        return json({ chain: 'Zero by LayerZero', chainId: 33002, status: 'reserved (deployed at Zero mainnet)',
-          curve: a.curve, tokenFactory: a.factory, deployer: a.deployer,
-          rule: 'token = CREATE(CREATE2(tokenFactory, keccak256(utf8(tokenId)), stubHash), nonce 1); verify on-chain with curve.predictImported(tokenId)',
-          stubHash: a.stubHash, count: tokens.length, tokens });
-      }
-      if (method === 'GET' && p === '/migration/zero/snapshot.json') {
-        const d = await this.migSnapshotDoc('zero');
-        if (!d) return json({ error: 'snapshot not taken yet' }, 404);
-        return new Response(d.body, { headers: { 'content-type': 'application/json', 'x-sha256': d.meta.sha256, 'cache-control': 'public, max-age=300' } });
+      const migM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)(\/addresses|\/snapshot\.json)?$/);
+      if (migM) {
+        const net = migM[1], sub = migM[2] || '', label = net === 'zero' ? 'Zero by LayerZero' : 'GIWA by Upbit';
+        if (sub === '/addresses') {
+          const a = this.netAddrs(net);
+          const tokens = this.sql.exec(`SELECT id, name, symbol FROM markets WHERE network=? ORDER BY created`, net).toArray()
+            .map(r => ({ id: r.id, symbol: r.symbol, name: r.name, address: this.netTokenAddr(net, r.id) }));
+          return json({ chain: label, chainId: this.netChainId(net), status: `reserved (deployed at ${net === 'zero' ? 'Zero' : 'GIWA'} mainnet)`,
+            curve: a.curve, tokenFactory: a.factory, deployer: a.deployer,
+            rule: 'token = CREATE(CREATE2(tokenFactory, keccak256(utf8(tokenId)), stubHash), nonce 1); verify on-chain with curve.predictImported(tokenId)',
+            stubHash: a.stubHash, count: tokens.length, tokens });
+        }
+        if (sub === '/snapshot.json') {
+          const d = await this.migSnapshotDoc(net);
+          if (!d) return json({ error: 'snapshot not taken yet' }, 404);
+          return new Response(d.body, { headers: { 'content-type': 'application/json', 'x-sha256': d.meta.sha256, 'cache-control': 'public, max-age=300' } });
+        }
+        const meta = JSON.parse(this.meta('mig_snapshot_' + net) || 'null');
+        const zs = net === 'zero' ? (this.zwState?.() || {}) : {};
+        const rpc = net === 'zero' ? (Object.entries(zs.rpc || {}).filter(([, v]) => v.live).map(([u]) => u)[0] || null) : (this.meta('giwa_rpc') || null);
+        const fin = JSON.parse(this.meta(net + '_finalized') || 'null');
+        return json({ network: net, label, paused: this.netPaused(net), live: !!fin, chainId: this.netChainId(net), rpc, native: this.MIGNET[net].native,
+          curve: this.netAddrs(net).curve,
+          explorer: net === 'zero' ? (Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null) : (this.meta('giwa_explorer') || null),
+          snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: `/api/migration/${net}/snapshot.json` } : null,
+          plan: `Each curve moves 1:1 to an on-chain Rookery curve on ${net === 'zero' ? 'Zero' : 'GIWA'} at its reserved address; balances stay in your account and can be withdrawn to your wallet. Nothing to claim.` });
       }
       if (method === 'GET' && p === '/stats') {
         const volUsd = this.sql.exec('SELECT volume, quote, rh_quote FROM markets').toArray().reduce((a, r) => a + (Number(B(r.volume)) / 1e18) * (r.rh_quote ? this.rhMarketUsd(r) : this.usdOf(qa(r))), 0);
@@ -3488,17 +3493,27 @@ export class Books {
             const a = JSON.parse(body);
             return json({ ok: true, stored: Object.fromEntries(Object.entries(a).filter(([k]) => k !== '_meta').map(([k, v]) => [k, v.sha256])) });
           }
-          if (b.run) return json(await this.zeroMigrate(b.run));
-          if (b.finalize) return json(this.zeroFinalize(b.finalize === 'force' ? { force: true } : {}));
+          if (b.run) return json(await this.netMigrate(net, b.run));
+          if (b.finalize) return json(this.netFinalize(net, b.finalize === 'force' ? { force: true } : {}));
+          if (b.rpcSet && net !== 'zero') {                                 // official RPC (and chain id) published by the network
+            const r = await fetch(b.rpcSet, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }) }).then(x => x.json());
+            const id = Number(BigInt(r.result));
+            if (b.chainId && id !== Number(b.chainId)) throw new Error(`rpc answers chain id ${id}, expected ${b.chainId}`);
+            this.setMeta(net + '_rpc', b.rpcSet); this.setMeta(net + '_chainid', String(id));
+            if (b.explorer) this.setMeta(net + '_explorer', b.explorer);
+            return json({ ok: true, network: net, rpc: b.rpcSet, chainId: id });
+          }
           if (b.uiMarkMigrated && /staging/.test(url.host)) {           // staging only: preview the post-migration page
             try { this.sql.exec('ALTER TABLE markets ADD COLUMN zero_token TEXT'); } catch { /* exists */ }
-            this.sql.exec(`UPDATE markets SET migrated=?, zero_token=? WHERE id=? AND network='zero'`, b.undo ? 0 : 1, b.undo ? null : this.zeroTokenAddr(b.uiMarkMigrated), b.uiMarkMigrated);
+            const mk = this.sql.exec('SELECT network FROM markets WHERE id=?', b.uiMarkMigrated).toArray()[0];
+            if (!mk || !this.MIGNET[mk.network]) throw new Error('not a migratable market');
+            this.sql.exec(`UPDATE markets SET migrated=?, zero_token=? WHERE id=?`, b.undo ? 0 : 1, b.undo ? null : this.netTokenAddr(mk.network, b.uiMarkMigrated), b.uiMarkMigrated);
             return json({ ok: true });
           }
           if (b.fund) return json(await this.zeroFund(b.fund));
           if (b.wdTick) return json(await this.zeroWdTick());
-          if (b.runStatus) return json({ status: JSON.parse(this.meta('zero_run_status') || 'null'), state: JSON.parse(this.meta('zero_run') || 'null'),
-            keys: (() => { const K = this.zeroKeys(); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.zeroAddrs() });
+          if (b.runStatus) return json({ network: net, status: JSON.parse(this.meta(net + '_run_status') || 'null'), state: JSON.parse(this.meta(net + '_run') || 'null'),
+            keys: (() => { const K = this.netKeys(net); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.netAddrs(net) });
           if (b.creators) {
             const rows = this.sql.exec(`SELECT DISTINCT u.id, u.wallet FROM markets m JOIN users u ON u.id = m.creator_id WHERE m.network=?`, net).toArray();
             return json({ ok: true, creators: Object.fromEntries(rows.map(r => ['u' + r.id, r.wallet && /^0x[0-9a-fA-F]{40}$/.test(r.wallet) ? r.wallet : null])) });
@@ -3608,13 +3623,14 @@ export class Books {
             for (const m of mk.filter(m => qa(m) === a)) {
               if (m.network === 'stellar' && m.migrated) continue;           // its XLM left custody into Aquarius
               if (m.network === 'zero' && m.migrated) continue;              // its ZRO moved into the on-chain curve on Zero
+              if (m.network === 'giwa' && m.migrated) continue;              // its ETH moved into the on-chain curve on GIWA
               curves += B(m.graduated ? m.pool_zro : m.reserve_zro);
               if (B(m.acc_rew) > 0n) for (const h of this.sql.exec(`SELECT user_id FROM balances WHERE asset=? AND amount!='0'`, 't:' + m.id).toArray()) pend += this.pendingRewards(h.user_id, m);
             }
             const burnRes = B(this.meta(burnKey(a)));
             const jobs = a === 'zro' ? this.sql.exec('SELECT zro FROM burn_jobs').toArray().reduce((s, j) => s + B(j.zro), 0n) : 0n;
             const desk = B(this.meta('desk_' + a));
-            const mig = a === 'zro' ? -B(this.meta('migrated_zro_reserve')) : a === 'xlm' ? -B(this.meta('xlm_graduated_out')) : B(this.meta('migrated_eth_reserve'));
+            const mig = a === 'zro' ? -B(this.meta('migrated_zro_reserve')) : a === 'xlm' ? -B(this.meta('xlm_graduated_out')) : B(this.meta('migrated_eth_reserve')) - B(this.meta('giwa_onchain_reserve'));
             const adj = B(this.meta('adj_' + a));                            // manual credits/debits, listed separately
             const inflow = dep - wd - desk + mig - jobs + adj;
             const held = bal + curves + burnRes + pend;
@@ -3992,9 +4008,9 @@ export class Books {
       /* authed */
       if (!user) return json({ error: 'Log in to continue' }, 401);
 
-      if (method === 'GET' && p === '/migration/zero/me') return json(await this.migMine('zero', user.id));
-      if (method === 'POST' && p === '/zero/withdraw') return json(await this.zeroWithdraw(user, await req.json()));
-      if (method === 'GET' && p === '/zero/withdrawals') { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
+      if (method === 'GET' && /^\/migration\/(zero|giwa)\/me$/.test(p)) return json(await this.migMine(p.split('/')[2], user.id));
+      if (method === 'POST' && (p === '/zero/withdraw' || p === '/mig/withdraw')) return json(await this.netWithdraw(user, await req.json()));
+      if (method === 'GET' && (p === '/zero/withdrawals' || p === '/mig/withdrawals')) { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created,net FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
       if (method === 'GET' && p === '/me') {
         const hold = this.sql.exec(`SELECT asset, amount FROM balances WHERE user_id=? AND asset LIKE 't:%' AND amount!='0'`, user.id).toArray()
           .map(h => { const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) return null;

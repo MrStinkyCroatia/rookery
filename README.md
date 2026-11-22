@@ -94,7 +94,15 @@ Every Rookery pre-market token for Zero moves on-chain 1:1 when Zero launches. N
 - `tools/zero_wd_test.mjs`: migrate → finalize → withdrawals on a real SQLite ledger (EOA ok, contract refused, pre-broadcast failure refunded, crash-resume never sends twice, custody covers every balance).
 - Contract bytecode used on launch day and its SHA-256: [`migration/zero_artifacts.json`](migration/zero_artifacts.json).
 
-GIWA and LitVM follow the same steps at their mainnets. The same process, in plain words, is on the site: [Docs → Mainnet migration](https://rookery.stinkypenguin.xyz/#/docs).
+**GIWA (Upbit, OP Stack L2, ETH as gas)** uses the same code with its own deployer, DEX and custody wallets (HD children `2000091002-4`), so nothing done on one chain can touch the other. Its addresses are reserved too and shown on GIWA token pages; list in [`migration/giwa_reserved_addresses.json`](migration/giwa_reserved_addresses.json). The official RPC and chain id are set when GIWA mainnet launches, the curve reserves move through the official Ethereum → GIWA bridge, and the same end-to-end test passes on chain id 91342 (`NET=giwa node tools/zero_wd_test.mjs`: migrate, finalize, withdrawals).
+
+| | GIWA address |
+|---|---|
+| Curve | `0x09c4ea183C46EF8E725C5C1d9977B67c764aAddD` |
+| Token factory | `0x774F98794CC7828592AD65f1B54Fd70207729eef` |
+| Deployer | `0xe6b668870A7354E4E354cDb82D43c064C4B9d01e` |
+
+LitVM follows the same steps at its mainnet. The same process, in plain words, is on the site: [Docs → Mainnet migration](https://rookery.stinkypenguin.xyz/#/docs).
 
 ## Before serious volume
 1. Offline copy of the phrase, moved into a hardware wallet.
