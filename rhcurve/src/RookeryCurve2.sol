@@ -144,6 +144,38 @@ contract RookeryCurve2 {
         emit Created(token, msg.sender, quote, name, symbol, vq, taxMkt, taxBurn, taxRew);
     }
 
+    // ---------------------------------------------------------------- 1:1 migration of a Rookery pre-market curve
+    event Imported(address indexed token, string ledgerId, uint256 sold, uint256 burned, uint256 realQuote, address custody);
+
+    /// @notice Recreate a pre-market Rookery curve on-chain with exactly its ledger state (native-coin pair only).
+    ///         `sold` tokens left the curve: `sold - burned` go to `custody` (Rookery holds them for its users 1:1
+    ///         until each user withdraws), `burned` are burned. The real reserve is derived from the constant-product
+    ///         invariant k = vQuote * V_TOKEN, so the price continues exactly where the ledger stopped; any excess of
+    ///         msg.value is returned. Owner-only, and only used once per token during the migration.
+    function importCurve(string calldata name, string calldata symbol, address creator, uint16 taxMkt, uint16 taxBurn,
+        uint16 taxRew, uint256 vQuote, uint256 sold, uint256 burned, address custody, string calldata ledgerId)
+        external payable onlyOwner nonReentrant returns (address token)
+    {
+        if (creator == address(0) || custody == address(0) || vQuote == 0) revert Zero();
+        if (sold > CURVE_TOKENS || burned > sold) revert Zero();
+        if (bytes(name).length == 0 || bytes(symbol).length == 0 || bytes(name).length > 32 || bytes(symbol).length > 12) revert Zero();
+        if (taxMkt > MAX_TAX || taxBurn > MAX_TAX || taxRew > MAX_TAX || uint256(taxMkt) + taxBurn + taxRew > MAX_TAX_TOTAL) revert BadTax();
+        uint256 real = _divUp(vQuote * V_TOKEN, V_TOKEN - sold) - vQuote;
+        if (sold == 0) real = 0;
+        if (msg.value < real) revert Slippage();
+        token = deployer.deploy(name, symbol, SUPPLY, creator, taxMkt, taxBurn, taxRew);
+        curves[token] = Curve({ creator: creator, quote: ETH, vQuote: uint128(vQuote), realQuote: uint128(real), sold: uint128(sold),
+            createdAt: uint64(block.timestamp), complete: sold == CURVE_TOKENS, graduated: false, pair: address(0) });
+        allTokens.push(token);
+        RookeryToken2 t = RookeryToken2(token);
+        if (burned > 0) t.burn(burned);
+        if (sold - burned > 0) t.transfer(custody, sold - burned);
+        emit Created(token, creator, ETH, name, symbol, vQuote, taxMkt, taxBurn, taxRew);
+        emit Imported(token, ledgerId, sold, burned, real, custody);
+        if (sold == CURVE_TOKENS) emit Complete(token);
+        if (msg.value > real) _sendQuote(ETH, msg.sender, msg.value - real);
+    }
+
     // ---------------------------------------------------------------- trading
     function buy(address token, uint256 quoteIn, uint256 minTokensOut) external payable nonReentrant returns (uint256 out) {
         Curve storage c = curves[token];
