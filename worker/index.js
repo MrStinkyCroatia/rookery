@@ -1419,6 +1419,7 @@ export class Books {
       poolZro: m.pool_zro, poolTok: m.pool_tok, gradAt: m.grad_at,
       volumeUsd: (Number(B(m.volume)) / 1e18) * usd,
       progress, curveProgress, graduated: !!m.graduated, migrated: !!m.migrated,
+      zeroContract: m.network === 'zero' ? (() => { try { return this.zeroTokenAddr(m.id); } catch { return null; } })() : undefined,
       stellar: m.network === 'stellar' ? { code: m.st_code || null, issuer: m.st_issuer || null, pool: m.st_pool || null, keeper: m.st_keeper || null,
         net: this.stNet(), explorer: ST_NETS[this.stNet()].explorer,
         gradUsd: Number(m.grad_usd) || ((m.graduated || m.migrated) ? Math.round(Number(B(m.v_wei || 0)) / 1e18 * 14.397 * this.xlmUsd()) : this.stGradUsd()),
@@ -2890,6 +2891,15 @@ export class Books {
         const meta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
         return json({ network: 'zero', paused: this.netPaused('zero'), snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: '/api/migration/zero/snapshot.json' } : null,
           plan: 'Variant B: each curve moves 1:1 to an on-chain Rookery curve on Zero; balances stay in your account and can be withdrawn to your Zero wallet.' });
+      }
+      if (method === 'GET' && p === '/migration/zero/addresses') {
+        const a = this.zeroAddrs();
+        const tokens = this.sql.exec(`SELECT id, name, symbol FROM markets WHERE network='zero' ORDER BY created`).toArray()
+          .map(r => ({ id: r.id, symbol: r.symbol, name: r.name, address: this.zeroTokenAddr(r.id) }));
+        return json({ chain: 'Zero by LayerZero', chainId: 33002, status: 'reserved (deployed at Zero mainnet)',
+          curve: a.curve, tokenFactory: a.factory, deployer: a.deployer,
+          rule: 'token = CREATE(CREATE2(tokenFactory, keccak256(utf8(tokenId)), stubHash), nonce 1); verify on-chain with curve.predictImported(tokenId)',
+          stubHash: a.stubHash, count: tokens.length, tokens });
       }
       if (method === 'GET' && p === '/migration/zero/snapshot.json') {
         const d = await this.migSnapshotDoc('zero');

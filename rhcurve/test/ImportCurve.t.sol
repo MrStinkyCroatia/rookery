@@ -2,7 +2,7 @@
 pragma solidity 0.8.24;
 
 import "forge-std/Test.sol";
-import {RookeryCurve2} from "../src/RookeryCurve2.sol";
+import {RookeryCurve2, RookeryTokenDeployer} from "../src/RookeryCurve2.sol";
 import {RookeryToken2} from "../src/RookeryToken2.sol";
 
 /// 1:1 migration of Rookery pre-market curves to Zero (native ZRO pair). No fork: import never touches WETH/Uniswap.
@@ -102,5 +102,51 @@ contract ImportCurveTest is Test {
         uint256 need = _real(sold);
         vm.expectRevert();
         curve.importCurve{value: need}("X", "X", creator, 0, 0, 0, VQ, sold, 0, address(this), "x");
+    }
+
+    // ---------------------------------------------------------------- reserved (deterministic) addresses
+    function _imp(string memory id, uint256 sold) internal returns (address) {
+        return curve.importCurve{value: _real(sold)}("Tok", "TOK", creator, 0, 0, 0, VQ, sold, 0, custody, id);
+    }
+
+    function test_reserved_address_independent_of_order() public {
+        address want = curve.predictImported("merlin-1a2b3c");
+        _imp("bryan-77aa01", 10_000_000 ether);          // other tokens first, in any order
+        _imp("pengu-0c0c0c", 5_000_000 ether);
+        address got = _imp("merlin-1a2b3c", 1_000_000 ether);
+        assertEq(got, want, "token lands on its reserved address");
+        // the same prediction from a second curve with a different import order
+        RookeryCurve2 c2 = new RookeryCurve2(address(0x1001), address(0x1002), address(0x1003), feeTo, VQ);
+        assertTrue(c2.predictImported("merlin-1a2b3c") != want, "address is tied to the deployer");
+    }
+
+    function test_same_id_cannot_be_imported_twice() public {
+        _imp("merlin-1a2b3c", 1_000_000 ether);
+        vm.expectRevert();
+        this.reimport();
+    }
+    function reimport() external { _imp("merlin-1a2b3c", 1_000_000 ether); }
+
+    /// the worker computes: curve = CREATE(eoa, 0); deployer = CREATE(curve, 1); stub = CREATE2(deployer, keccak(id), STUB_HASH);
+    /// token = CREATE(stub, 1). This test runs that exact formula against a real deployment from a fresh EOA.
+    function test_offchain_formula_matches_fresh_eoa_deploy() public {
+        address eoa = address(0xD3910E);
+        vm.deal(eoa, 1000 ether);
+        assertEq(vm.getNonce(eoa), 0);
+        address predictedCurve = vm.computeCreateAddress(eoa, 0);
+        vm.prank(eoa);
+        RookeryCurve2 c = new RookeryCurve2(address(0x1001), address(0x1002), address(0x1003), feeTo, VQ);
+        assertEq(address(c), predictedCurve, "curve = first deploy of the fresh wallet");
+        address dep = vm.computeCreateAddress(address(c), 1);
+        assertEq(address(c.deployer()), dep, "deployer = first deploy of the curve");
+        bytes32 stubHash = RookeryTokenDeployer(dep).STUB_HASH();
+        emit log_named_bytes32("STUB_HASH", stubHash);
+        bytes32 salt = keccak256(bytes("merlin-1a2b3c"));
+        address stub = vm.computeCreate2Address(salt, stubHash, dep);
+        address token = vm.computeCreateAddress(stub, 1);
+        uint256 need = _real(1_000_000 ether);
+        vm.prank(eoa);
+        address got = c.importCurve{value: need}("Merlin", "MERLIN", creator, 100, 50, 0, VQ, 1_000_000 ether, 0, custody, "merlin-1a2b3c");
+        assertEq(got, token, "off-chain formula == on-chain address");
     }
 }

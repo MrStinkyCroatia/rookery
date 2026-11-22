@@ -1257,6 +1257,11 @@ async function viewToken(id) {
         <a class="btn lg wide ghost" style="margin-top:8px" href="#/wallet">Withdraw to my Stellar wallet</a>` : '<div class="prog big"><i style="width:70%"></i></div>'}
       </div>` : ''}
       ${m.rh ? `<div class="panel pb rh-pane" id="rhPane"></div>` : ''}
+      ${m.zeroContract ? `<div class="panel pb zero-res">
+        <div class="zr-h"><span class="tag net-zero">RESERVED</span><b>Zero contract</b></div>
+        <button class="zr-addr mono" data-copy="${esc(m.zeroContract)}" title="Copy address">${esc(m.zeroContract)}<span class="zr-cp">⧉</span></button>
+        <p class="mu zr-n">This is the address $${esc(m.symbol)} gets on Zero mainnet. Every balance moves here 1:1. Anything else claiming to be $${esc(m.symbol)} on Zero is fake.</p>
+      </div>` : ''}
       <div class="panel pb" ${(m.network === 'stellar' && (m.migrated || m.stellar?.job)) || m.rh ? 'style="display:none"' : ''}>
         <div class="tb-tabs"><button class="buy on" data-side="buy">Buy</button><button class="sell" data-side="sell">Sell</button></div>
         <div class="pay-sel" id="paySel" ${QA === 'xlm' ? 'style="display:none"' : ''}><span class="mu" id="payLbl">Pay with</span>${(QA === 'zltc' ? [['eth', 'ETH'], ['ltc', 'LTC'], ['zltc', 'zkLTC']] : [['zro', 'ZRO'], ['eth', 'ETH']]).map(([k, l]) => `<button data-a="${k}">${l}</button>`).join('')}</div>
@@ -1649,7 +1654,7 @@ async function viewToken(id) {
         <div class="kv"><span>On the bonding curve</span><b>800,000,000 (80%)</b></div>
         <div class="kv"><span>Reserved for mainnet pool</span><b>200,000,000 (20%)</b></div>
         <div class="kv"><span>${esc(Q)} rewards paid to holders</span><b>${fmtUsd(m.rewardsPaidUsd)}</b></div>
-        <div class="kv"><span>Contract</span><b>Minted at mainnet</b></div>
+        <div class="kv"><span>Contract</span><b>${m.zeroContract ? `<button class="mono zr-mini" data-copy="${esc(m.zeroContract)}">${esc(m.zeroContract.slice(0, 8))}…${esc(m.zeroContract.slice(-6))} ⧉</button> <span class="mu" style="font-weight:400">reserved on Zero</span>` : 'Minted at mainnet'}</b></div>
       </div>`;
     }
   }

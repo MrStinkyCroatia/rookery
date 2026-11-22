@@ -25,14 +25,46 @@ interface IUniswapV2Pair {
 }
 
 /// @notice deploys RookeryToken2 for the curve (kept apart so the curve stays under the contract size limit)
+/// @notice tiny CREATE3 helper: deployed with CREATE2 (salt = token id), it CREATEs the token at nonce 1, so the token
+///         address depends only on the deployer and the salt, never on the order, name, creator or taxes
+contract RookeryCreate3Stub {
+    address private immutable factory;
+    constructor() { factory = msg.sender; }
+    function create(bytes memory code) external returns (address a) {
+        require(msg.sender == factory, "factory");
+        assembly { a := create(0, add(code, 0x20), mload(code)) }
+        require(a != address(0), "create");
+    }
+}
+
 contract RookeryTokenDeployer {
     address public immutable curve;
+    bytes32 public constant STUB_HASH = keccak256(type(RookeryCreate3Stub).creationCode);
     constructor() { curve = msg.sender; }
+    function _code(string calldata name, string calldata symbol, uint256 supply, address creator, uint16 mkt, uint16 brn, uint16 rew)
+        internal view returns (bytes memory)
+    {
+        return abi.encodePacked(type(RookeryToken2).creationCode, abi.encode(name, symbol, supply, curve, creator, mkt, brn, rew));
+    }
     function deploy(string calldata name, string calldata symbol, uint256 supply, address creator, uint16 mkt, uint16 brn, uint16 rew)
+        external returns (address a)
+    {
+        require(msg.sender == curve, "curve");
+        bytes memory code = _code(name, symbol, supply, creator, mkt, brn, rew);
+        assembly { a := create(0, add(code, 0x20), mload(code)) }
+        require(a != address(0), "create");
+    }
+    /// @notice deterministic address: same salt -> same token address on any chain where this deployer has the same address
+    function deployAt(bytes32 salt, string calldata name, string calldata symbol, uint256 supply, address creator, uint16 mkt, uint16 brn, uint16 rew)
         external returns (address)
     {
         require(msg.sender == curve, "curve");
-        return address(new RookeryToken2(name, symbol, supply, curve, creator, mkt, brn, rew));
+        RookeryCreate3Stub stub = new RookeryCreate3Stub{salt: salt}();
+        return stub.create(_code(name, symbol, supply, creator, mkt, brn, rew));
+    }
+    function predict(bytes32 salt) public view returns (address) {
+        address stub = address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, STUB_HASH)))));
+        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xd6), bytes1(0x94), stub, bytes1(0x01))))));
     }
 }
 
@@ -144,6 +176,9 @@ contract RookeryCurve2 {
         emit Created(token, msg.sender, quote, name, symbol, vq, taxMkt, taxBurn, taxRew);
     }
 
+    /// @notice the address a Rookery pre-market token will have once imported (salt = keccak256(ledger id))
+    function predictImported(string calldata ledgerId) external view returns (address) { return deployer.predict(keccak256(bytes(ledgerId))); }
+
     // ---------------------------------------------------------------- 1:1 migration of a Rookery pre-market curve
     event Imported(address indexed token, string ledgerId, uint256 sold, uint256 burned, uint256 realQuote, address custody);
 
@@ -156,14 +191,14 @@ contract RookeryCurve2 {
         uint16 taxRew, uint256 vQuote, uint256 sold, uint256 burned, address custody, string calldata ledgerId)
         external payable onlyOwner nonReentrant returns (address token)
     {
-        if (creator == address(0) || custody == address(0) || vQuote == 0) revert Zero();
+        if (creator == address(0) || custody == address(0) || vQuote == 0 || bytes(ledgerId).length == 0) revert Zero();
         if (sold > CURVE_TOKENS || burned > sold) revert Zero();
         if (bytes(name).length == 0 || bytes(symbol).length == 0 || bytes(name).length > 32 || bytes(symbol).length > 12) revert Zero();
         if (taxMkt > MAX_TAX || taxBurn > MAX_TAX || taxRew > MAX_TAX || uint256(taxMkt) + taxBurn + taxRew > MAX_TAX_TOTAL) revert BadTax();
         uint256 real = _divUp(vQuote * V_TOKEN, V_TOKEN - sold) - vQuote;
         if (sold == 0) real = 0;
         if (msg.value < real) revert Slippage();
-        token = deployer.deploy(name, symbol, SUPPLY, creator, taxMkt, taxBurn, taxRew);
+        token = deployer.deployAt(keccak256(bytes(ledgerId)), name, symbol, SUPPLY, creator, taxMkt, taxBurn, taxRew);
         curves[token] = Curve({ creator: creator, quote: ETH, vQuote: uint128(vQuote), realQuote: uint128(real), sold: uint128(sold),
             createdAt: uint64(block.timestamp), complete: sold == CURVE_TOKENS, graduated: false, pair: address(0) });
         allTokens.push(token);

@@ -2,13 +2,46 @@
 // Variant B (owner decision 2026-11-22): every curve moves to an on-chain RookeryCurve on Zero with exactly this
 // state; holders stay custodial on Rookery and withdraw to their own Zero wallet (as the Docs promise).
 // The snapshot is taken once the Zero RPC is verified live (chain id 33002 + LayerZero endpoint code + moving blocks).
+import { getCreateAddress, getCreate2Address, keccak256, toUtf8Bytes } from 'ethers';
 const enc = new TextEncoder();
+
+// Reserved Zero addresses. A dedicated HD child signs ONLY the Zero deployment: its first transaction on Zero (nonce 0)
+// deploys RookeryCurve2, whose constructor deploys RookeryTokenDeployer (curve nonce 1). Each pre-market token is then
+// created through CREATE3 with salt keccak256(<Rookery token id>), so its address never depends on import order.
+export const ZERO_DEPLOYER_INDEX = 2_000_033_002;
+// keccak256(type(RookeryCreate3Stub).creationCode), solc 0.8.24 · via_ir · optimizer 200 · cancun (rhcurve/foundry.toml).
+// The deploy script re-checks it against the deployed factory's STUB_HASH() before the first import.
+export const ZERO_STUB_HASH = '0xa7a5d76d092cad36f5108b6c39199b2692528bee417fba9dcea4b54859a057a3';
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 
 export function installZeroMig(Cls, H) {
   const { B, WEI, now } = H;
   const P = Cls.prototype;
   const LABEL = { zero: 'Zero', giwa: 'GIWA', litvm: 'LitVM' };
+
+  P.zeroAddrs = function () {
+    if (this._zeroAddrs) return this._zeroAddrs;
+    const deployer = this.master().deriveChild(ZERO_DEPLOYER_INDEX).address;
+    const curve = getCreateAddress({ from: deployer, nonce: 0 });
+    const factory = getCreateAddress({ from: curve, nonce: 1 });
+    const a = { deployer, curve, factory, stubHash: ZERO_STUB_HASH, chainId: 33002 };
+    // pin the first computation: if derivation or constants ever change, refuse to show different addresses
+    const pinned = this.meta('zero_addrs');
+    if (!pinned) this.setMeta('zero_addrs', JSON.stringify(a));
+    else { const p = JSON.parse(pinned); if (p.curve !== a.curve || p.factory !== a.factory || p.stubHash !== a.stubHash) throw new Error('reserved Zero addresses changed: refusing'); }
+    this._zeroAddrs = a; this._zeroTok = new Map();
+    return a;
+  };
+  P.zeroTokenAddr = function (id) {
+    const a = this.zeroAddrs();
+    let t = this._zeroTok.get(id);
+    if (!t) {
+      const stub = getCreate2Address(a.factory, keccak256(toUtf8Bytes(String(id))), ZERO_STUB_HASH);
+      t = getCreateAddress({ from: stub, nonce: 1 });
+      this._zeroTok.set(id, t);
+    }
+    return t;
+  };
 
   P.netPaused = function (net) { return this.meta('net_paused_' + net) === '1'; };
   P.setNetPaused = function (net, on) { this.setMeta('net_paused_' + net, on ? '1' : '0'); };
