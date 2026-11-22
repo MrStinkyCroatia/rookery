@@ -3568,6 +3568,15 @@ export class Books {
             const b = await req.json().catch(() => ({}));
             if (Array.isArray(b.targets)) { this.setMeta('watch_targets', JSON.stringify(b.targets.slice(0, 20))); }
             if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
+            if (b.zero) return json({ ok: true, tick: await this.zwTick({ force: true, meta: !!b.meta }), state: this.zwState() });
+            if (b.zeroBacktest) return json({ ok: true, backtest: await this.zwBacktest(b.zeroBacktest) });
+            if (b.zeroOff !== undefined) { this.setMeta('zw_off', b.zeroOff ? '1' : '0'); if (!b.zeroOff) await this.zwArm(); return json({ ok: true, off: !!b.zeroOff }); }
+            if (b.zeroTest) {
+              const st = this.zwState();
+              const sent = await this.zwSay('🧪 <b>[TEST] Zero watcher armed</b>\nYou will get:\n🟢 bridge OPEN / 🔴 CLOSED (Ethereum, Arbitrum, Base)\n🚀 first ZRO transfers to Zero (+ every batch)\n✅ first transfer DELIVERED on Zero\n🟢 Zero RPC LIVE · 📣 RPC published by LayerZero\nChecks every 3 s.', st);
+              this.zwSave(st);
+              return json({ ok: sent, sent });
+            }
             if (b.test) {
               const chat = this.meta('tg_owner_chat') || this.meta('watch_chat');
               if (!chat) return json({ ok: false, error: 'no owner chat configured' });
@@ -3576,7 +3585,11 @@ export class Books {
             }
             return json({ ok: true, targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
           }
-          return json({ ok: true, targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
+          const zs = this.zwState();
+          return json({ ok: true, zero: { bridge: zs.bridge, rpc: zs.rpc, transfers: zs.transfers || 0, delivered: zs.delivered || 0, pending: (zs.pending || []).length,
+            metaRpcs: zs.metaRpcs, metaStatus: zs.metaStatus, peer: zs.peer, ticks: zs.n, last: zs.last, lastMs: zs.lastMs, cur: zs.cur, gaps: zs.gaps || 0,
+            logErr: zs.logErr, metaErr: zs.metaErr, log: (zs.log || []).slice(-10), alarm: await this.ctx.storage.getAlarm(), off: this.meta('zw_off') === '1' },
+            targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
         }
         if (p === '/admin/ltc') {
           this.ltcDepInit();
