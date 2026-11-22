@@ -140,6 +140,7 @@ contract ImportCurveTest is Test {
         address dep = vm.computeCreateAddress(address(c), 1);
         assertEq(address(c.deployer()), dep, "deployer = first deploy of the curve");
         bytes32 stubHash = RookeryTokenDeployer(dep).STUB_HASH();
+        assertEq(stubHash, keccak256(hex"67363d3d37363d34f03d5260086018f3"), "standard CREATE3 proxy hash");
         emit log_named_bytes32("STUB_HASH", stubHash);
         bytes32 salt = keccak256(bytes("merlin-1a2b3c"));
         address stub = vm.computeCreate2Address(salt, stubHash, dep);
@@ -148,5 +149,6 @@ contract ImportCurveTest is Test {
         vm.prank(eoa);
         address got = c.importCurve{value: need}("Merlin", "MERLIN", creator, 100, 50, 0, VQ, 1_000_000 ether, 0, custody, "merlin-1a2b3c");
         assertEq(got, token, "off-chain formula == on-chain address");
+        emit log_named_address("TOKEN_ADDR", got);
     }
 }

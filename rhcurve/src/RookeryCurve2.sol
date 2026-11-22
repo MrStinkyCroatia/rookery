@@ -25,21 +25,12 @@ interface IUniswapV2Pair {
 }
 
 /// @notice deploys RookeryToken2 for the curve (kept apart so the curve stays under the contract size limit)
-/// @notice tiny CREATE3 helper: deployed with CREATE2 (salt = token id), it CREATEs the token at nonce 1, so the token
-///         address depends only on the deployer and the salt, never on the order, name, creator or taxes
-contract RookeryCreate3Stub {
-    address private immutable factory;
-    constructor() { factory = msg.sender; }
-    function create(bytes memory code) external returns (address a) {
-        require(msg.sender == factory, "factory");
-        assembly { a := create(0, add(code, 0x20), mload(code)) }
-        require(a != address(0), "create");
-    }
-}
-
 contract RookeryTokenDeployer {
     address public immutable curve;
-    bytes32 public constant STUB_HASH = keccak256(type(RookeryCreate3Stub).creationCode);
+    /// @dev standard CREATE3 proxy (Solady / 0xSequence): 16 bytes of raw opcodes, no PUSH0, valid on every EVM version,
+    ///      so the hash below never depends on compiler settings. Proxy runtime `363d3d37363d34f0` = CREATE(calldata).
+    bytes16 private constant PROXY_INITCODE = 0x67363d3d37363d34f03d5260086018f3;
+    bytes32 public constant STUB_HASH = 0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f;
     constructor() { curve = msg.sender; }
     function _code(string calldata name, string calldata symbol, uint256 supply, address creator, uint16 mkt, uint16 brn, uint16 rew)
         internal view returns (bytes memory)
@@ -59,8 +50,18 @@ contract RookeryTokenDeployer {
         external returns (address)
     {
         require(msg.sender == curve, "curve");
-        RookeryCreate3Stub stub = new RookeryCreate3Stub{salt: salt}();
-        return stub.create(_code(name, symbol, supply, creator, mkt, brn, rew));
+        bytes memory code = _code(name, symbol, supply, creator, mkt, brn, rew);
+        address deployed = predict(salt);
+        address proxy;
+        assembly {
+            mstore(0x00, PROXY_INITCODE)                     // bytes16 is left-aligned: initcode sits at 0x00..0x0f
+            proxy := create2(0, 0x00, 0x10, salt)
+        }
+        require(proxy != address(0), "proxy");
+        // the proxy CREATEs the token from its calldata at nonce 1; it is created and used in this same call
+        (bool ok,) = proxy.call(code);
+        require(ok && deployed.code.length > 0, "create");
+        return deployed;
     }
     function predict(bytes32 salt) public view returns (address) {
         address stub = address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, STUB_HASH)))));

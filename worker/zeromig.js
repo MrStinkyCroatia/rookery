@@ -9,9 +9,10 @@ const enc = new TextEncoder();
 // deploys RookeryCurve2, whose constructor deploys RookeryTokenDeployer (curve nonce 1). Each pre-market token is then
 // created through CREATE3 with salt keccak256(<Rookery token id>), so its address never depends on import order.
 export const ZERO_DEPLOYER_INDEX = 2_000_033_002;
-// keccak256(type(RookeryCreate3Stub).creationCode), solc 0.8.24 · via_ir · optimizer 200 · cancun (rhcurve/foundry.toml).
+// keccak256 of the standard 16-byte CREATE3 proxy initcode 0x67363d3d37363d34f03d5260086018f3 (Solady / 0xSequence).
+// Raw opcodes, so it never changes with compiler settings or EVM version: the token addresses below are final.
 // The deploy script re-checks it against the deployed factory's STUB_HASH() before the first import.
-export const ZERO_STUB_HASH = '0xa7a5d76d092cad36f5108b6c39199b2692528bee417fba9dcea4b54859a057a3';
+export const ZERO_STUB_HASH = '0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f';
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 
 export function installZeroMig(Cls, H) {
@@ -26,8 +27,8 @@ export function installZeroMig(Cls, H) {
     const factory = getCreateAddress({ from: curve, nonce: 1 });
     const a = { deployer, curve, factory, stubHash: ZERO_STUB_HASH, chainId: 33002 };
     // pin the first computation: if derivation or constants ever change, refuse to show different addresses
-    const pinned = this.meta('zero_addrs');
-    if (!pinned) this.setMeta('zero_addrs', JSON.stringify(a));
+    const pinned = this.meta('zero_addrs_v2');            // v2 = standard CREATE3 proxy (v1 used a compiler-dependent stub)
+    if (!pinned) this.setMeta('zero_addrs_v2', JSON.stringify(a));
     else { const p = JSON.parse(pinned); if (p.curve !== a.curve || p.factory !== a.factory || p.stubHash !== a.stubHash) throw new Error('reserved Zero addresses changed: refusing'); }
     this._zeroAddrs = a; this._zeroTok = new Map();
     return a;
