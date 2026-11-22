@@ -3715,7 +3715,7 @@ async function viewTerminal(arg1, arg2, arg3) {
     if (st.sel.kind === 'm') {
       const m = T.market;
       return { m, name: m.name, symbol: m.symbol, image: m.image, pad: pads.rookery, ts: m.created, priceUsd: m.priceUsd, mcapUsd: m.mcapUsd, liqUsd: m.liquidityUsd, holders: m.holders ?? row.holders,
-        vol24h: row.vol24h, top10: row.top10, change24h: row.change24h, x: row.x, progress: m.progress, address: m.chainContract || m.zeroContract, reserved: !m.migrated,
+        vol24h: row.vol24h, top10: row.top10, creatorPct: row.creatorPct, change24h: row.change24h, x: row.x, progress: m.progress, address: m.chainContract || m.zeroContract, reserved: !m.migrated,
         trades: (T.trades || []).slice().reverse().map(t => ({ side: t.side, usd: Number(B(t.zro)) / 1e18 * (t.usd || 0), tok: t.tokens, who: t.username || 'trader', ts: t.ts })),
         holdersList: (T.holders || []).map(h => ({ who: h.username || short(h.address), amount: h.amount, pct: h.pct, tag: h.creator ? 'creator' : h.tag || '' })),
         points: (T.trades || []).map(t => ({ ts: t.ts, p: Number(B(t.price)) / 1e18 * (t.usd || 0) })), about: m.description, links: { x: m.x, tg: m.tg, web: m.web } };
@@ -3834,7 +3834,7 @@ async function viewTerminal(arg1, arg2, arg3) {
     }
     if (st.rtab === 'trade') {
       const it = (l, v, c = '') => `<div class="kv"><span>${l}</span><b class="${c}">${v}</b></div>`;
-      const cp = n.contract?.creatorPct ?? (st.selRow?.creatorPct);
+      const cp = n.contract?.creatorPct ?? n.creatorPct ?? st.selRow?.creatorPct;
       side.insertAdjacentHTML('beforeend', `<div class="tx-safe"><h4>Safety</h4>
         ${it('Top 10 holders', n.top10 != null ? n.top10.toFixed(1) + '%' : '—', n.top10 >= 30 ? 'dn' : n.top10 >= 15 ? 'warn' : 'up')}
         ${it('Creator holds', cp != null ? Number(cp).toFixed(1) + '%' : '—', cp >= 10 ? 'dn' : 'up')}
