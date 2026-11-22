@@ -3578,6 +3578,8 @@ export class Books {
             return json({ ok: true });
           }
           if (b.fund) return json(await this.zeroFund(b.fund));
+          if (b.fundPlan) return json(await this.zeroFundPlan(b.fundPlan));
+          if (b.fundStatus) return json(await this.zeroFundStatus());
           if (b.wdTick) return json(await this.zeroWdTick());
           if (b.runStatus) return json({ network: net, status: JSON.parse(this.meta(net + '_run_status') || 'null'), state: JSON.parse(this.meta(net + '_run') || 'null'),
             keys: (() => { const K = this.netKeys(net); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.netAddrs(net) });

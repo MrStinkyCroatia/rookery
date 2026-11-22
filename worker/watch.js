@@ -361,6 +361,9 @@ export function installWatch(Cls, H) {
       }
       out.bridge = Object.fromEntries(Object.entries(st.bridge).map(([k, v]) => [k, v.state]));
 
+      // 1b · armed ZRO reserves: each leg goes out in the first window where its source chain is open
+      if (this.zeroFundAuto) { try { const f = await this.zeroFundAuto(st); if (f) out.fund = f.map(x => x.tx); } catch (e) { out.fundErr = String(e.message || e).slice(0, 120); } }
+
       // 2 · transfers to Zero (every 2nd tick ≈ 6 s)
       if (n % 3 === 0 || opts.force) {
         const fresh = [];

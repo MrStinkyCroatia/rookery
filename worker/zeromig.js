@@ -297,6 +297,77 @@ export function installZeroMig(Cls, H) {
     return { ...out, tx: tx.hash, track: 'https://layerzeroscan.com/tx/' + tx.hash };
   };
 
+  // ── automatic ZRO funding: the ETH→Zero window lasts minutes, so the send has to run inside the watcher tick.
+  //    The plan is armed once by the owner (explicit ARM), fires each leg in the first window where that chain is open,
+  //    never repeats a leg, and disarms itself when every leg is done.
+  P.zeroFundPlan = function (b = {}) {
+    const cur = JSON.parse(this.meta('zero_fund_plan') || '{}');
+    if (!b.act) return cur;
+    if (b.act === 'disarm') { cur.armed = false; cur.disarmedAt = now(); this.setMeta('zero_fund_plan', JSON.stringify(cur)); return cur; }
+    if (b.act !== 'arm') throw new Error('act: arm | disarm');
+    if (b.confirm !== 'ARM') throw new Error('pass confirm: "ARM"');
+    const legs = (b.legs || []).map(l => ({ chain: String(l.chain), amountWei: ((B(l.amountWei || 0) / 10n ** 12n) * 10n ** 12n).toString(), done: false }));
+    if (!legs.length) throw new Error('legs required');
+    let total = 0n;
+    for (const l of legs) {
+      if (!FUND[l.chain]) throw new Error('chain: eth | arb | base | bsc');
+      if (BigInt(l.amountWei) <= 0n) throw new Error('leg amount must be positive');
+      total += BigInt(l.amountWei);
+    }
+    if (total > 3500n * WEI) throw new Error('plan above the 3500 ZRO cap');
+    const plan = { armed: true, dry: !!b.dry, to: b.to === 'custody' || b.to === 'dex' ? b.to : 'deployer', legs, totalWei: total.toString(), created: now(), tries: cur.tries || {} };
+    this.setMeta('zero_fund_plan', JSON.stringify(plan));
+    return plan;
+  };
+  P.zeroFundStatus = async function (plan) {
+    plan = plan || this.zeroFundPlan();
+    const out = { armed: !!plan.armed, dry: !!plan.dry, totalWei: plan.totalWei, legs: [] };
+    for (const l of plan.legs || []) {
+      const row = { chain: l.chain, amountWei: String(l.amountWei), done: !!l.done, tx: l.tx || null, sentAt: l.sentAt || null, dry: l.dry || null };
+      if (l.tx) {
+        try {
+          const r = await fetch(`https://scan.layerzero-api.com/v1/messages/tx/${l.tx}`, { signal: AbortSignal.timeout(12000) });
+          const j = await r.json();
+          const m = (j.data || [])[0];
+          row.delivered = m?.status?.name || m?.status || null;
+          row.dstTx = m?.dstTxHash || null;
+        } catch { row.delivered = 'check later'; }
+      }
+      out.legs.push(row);
+    }
+    return out;
+  };
+  P.zeroFundAuto = async function (st) {
+    const plan = this.zeroFundPlan();
+    if (!plan.armed) return null;
+    const sent = [];
+    for (const l of plan.legs) {
+      if (l.done) continue;
+      const br = st?.bridge?.[l.chain]?.state;
+      if (br && br !== 'open') continue;                 // bsc is not in the bridge monitor: quote decides
+      try {
+        if (plan.dry) {                                  // dry run: quote only, never sends
+          const q = await this.zeroFund({ chain: l.chain, amountWei: String(l.amountWei), to: plan.to });
+          l.dry = { ok: !!q.ok, route: q.route || 'open', why: q.why || null, fee: q.nativeFeeWei || null, ts: now() };
+          this.setMeta('zero_fund_plan', JSON.stringify(plan));
+          continue;
+        }
+        const r = await this.zeroFund({ chain: l.chain, amountWei: String(l.amountWei), to: plan.to, confirm: 'SEND' });
+        if (r.ok && r.tx) {
+          l.done = true; l.tx = r.tx; l.sentAt = now(); l.fee = r.nativeFeeWei;
+          this.setMeta('zero_fund_plan', JSON.stringify(plan));
+          sent.push(r);
+          if (this.zwSay) await this.zwSay(`💸 <b>ZRO reserves sent</b> · ${(Number(l.amountWei) / 1e18).toFixed(2)} ZRO from ${FUND[l.chain].eid ? l.chain.toUpperCase() : l.chain} → Zero (${plan.to})\n<a href="https://layerzeroscan.com/tx/${r.tx}">LayerZero Scan</a>`, st);
+        } else if (r.route === 'closed') { /* the window closed between the check and the send: retry on the next open tick */ }
+        else if (/not enough ZRO/i.test(r.why || r.error || '')) { l.done = true; l.error = 'not enough ZRO'; this.setMeta('zero_fund_plan', JSON.stringify(plan)); }
+      } catch (e) { plan.tries = plan.tries || {}; plan.tries[l.chain] = (plan.tries[l.chain] || 0) + 1; this.setMeta('zero_fund_plan', JSON.stringify(plan)); }
+    }
+    if (plan.legs.length && plan.legs.every(l => l.done)) {
+      plan.armed = false; plan.finished = now(); this.setMeta('zero_fund_plan', JSON.stringify(plan));
+      if (this.zwSay) await this.zwSay(`✅ <b>All ZRO reserves sent</b> · ${(Number(plan.totalWei) / 1e18).toFixed(2)} ZRO on the way to Zero (${plan.to}).`, st);
+    }
+    return sent.length ? sent : null;
+  };
   P.netPaused = function (net) { return this.meta('net_paused_' + net) === '1'; };
   P.setNetPaused = function (net, on) { this.setMeta('net_paused_' + net, on ? '1' : '0'); };
   P.netPauseMsg = function (net) {
