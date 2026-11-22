@@ -32,3 +32,4 @@ wrangler.jsonc
 
 # account id lives outside the repo
 .cf_account
+.rehearsal/

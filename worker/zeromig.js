@@ -2,13 +2,16 @@
 // Variant B (owner decision 2026-11-22): every curve moves to an on-chain RookeryCurve on Zero with exactly this
 // state; holders stay custodial on Rookery and withdraw to their own Zero wallet (as the Docs promise).
 // The snapshot is taken once the Zero RPC is verified live (chain id 33002 + LayerZero endpoint code + moving blocks).
-import { getCreateAddress, getCreate2Address, keccak256, toUtf8Bytes } from 'ethers';
+import { getCreateAddress, getCreate2Address, keccak256, toUtf8Bytes, Wallet, Transaction } from 'ethers';
+import { zeroRun } from './zerorun.js';
 const enc = new TextEncoder();
 
 // Reserved Zero addresses. A dedicated HD child signs ONLY the Zero deployment: its first transaction on Zero (nonce 0)
 // deploys RookeryCurve2, whose constructor deploys RookeryTokenDeployer (curve nonce 1). Each pre-market token is then
 // created through CREATE3 with salt keccak256(<Rookery token id>), so its address never depends on import order.
 export const ZERO_DEPLOYER_INDEX = 2_000_033_002;
+export const ZERO_DEX_INDEX = 2_000_033_003;       // deploys WZRO + Uniswap V2 factory/router at nonces 0, 1, 2
+export const ZERO_CUSTODY_INDEX = 2_000_033_004;   // holds every user's migrated tokens 1:1, pays withdrawals
 // keccak256 of the standard 16-byte CREATE3 proxy initcode 0x67363d3d37363d34f03d5260086018f3 (Solady / 0xSequence).
 // Raw opcodes, so it never changes with compiler settings or EVM version: the token addresses below are final.
 // The deploy script re-checks it against the deployed factory's STUB_HASH() before the first import.
@@ -16,7 +19,7 @@ export const ZERO_STUB_HASH = '0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e
 const hex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 
 export function installZeroMig(Cls, H) {
-  const { B, WEI, now } = H;
+  const { B, WEI, now, vQuote } = H;
   const P = Cls.prototype;
   const LABEL = { zero: 'Zero', giwa: 'GIWA', litvm: 'LitVM' };
 
@@ -42,6 +45,83 @@ export function installZeroMig(Cls, H) {
       this._zeroTok.set(id, t);
     }
     return t;
+  };
+
+  P.zeroKeys = function () {
+    const m = this.master();
+    return { deployer: m.deriveChild(ZERO_DEPLOYER_INDEX), dex: m.deriveChild(ZERO_DEX_INDEX), custody: m.deriveChild(ZERO_CUSTODY_INDEX) };
+  };
+
+  // signed transaction on Zero through any verified RPC; EIP-1559 when the chain has a base fee, legacy otherwise
+  P.zeroSend = async function (rpc, role, tx) {
+    const k = this.zeroKeys()[role];
+    if (!k) throw new Error('unknown signer ' + role);
+    const w = new Wallet(k.privateKey);
+    const nonce = Number(BigInt(await rpc('eth_getTransactionCount', [w.address, 'pending'])));
+    const base = { chainId: 33002, nonce, to: tx.to || null, data: tx.data || '0x', value: tx.value || 0n };
+    const est = BigInt(await rpc('eth_estimateGas', [{ from: w.address, to: tx.to || undefined, data: base.data, value: '0x' + BigInt(base.value).toString(16) }]));
+    base.gasLimit = (est * 12n) / 10n + 50_000n;
+    const blk = await rpc('eth_getBlockByNumber', ['latest', false]);
+    if (blk?.baseFeePerGas) {
+      let tip = 0n; try { tip = BigInt(await rpc('eth_maxPriorityFeePerGas', [])); } catch { /* chains without a tip market */ }
+      Object.assign(base, { type: 2, maxPriorityFeePerGas: tip, maxFeePerGas: BigInt(blk.baseFeePerGas) * 2n + tip });
+    } else Object.assign(base, { type: 0, gasPrice: BigInt(await rpc('eth_gasPrice', [])) });
+    const raw = await w.signTransaction(base);
+    const hash = await rpc('eth_sendRawTransaction', [raw]);
+    for (let i = 0; i < 240; i++) {
+      const rc = await rpc('eth_getTransactionReceipt', [hash]);
+      if (rc) return rc;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    throw new Error('no receipt for ' + hash);
+  };
+
+  P.zeroRpcUrl = function (b = {}) {
+    const st = this.zwState?.() || {};
+    const live = Object.entries(st.rpc || {}).filter(([, v]) => v.live).map(([u]) => u);
+    if (b.rpc && !live.includes(b.rpc) && !b.allowUnverified) throw new Error('rpc is not a verified Zero RPC (watcher)');
+    return b.rpc || live[0] || null;
+  };
+
+  // run (or dry-run) the 1:1 migration in the background; state persists after every transaction
+  P.zeroMigrate = async function (b = {}) {
+    const url = this.zeroRpcUrl(b);
+    if (!url) throw new Error('no verified Zero RPC yet');
+    const snapMeta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
+    if (!snapMeta) throw new Error('no official snapshot yet (it is taken when the Zero RPC is verified)');
+    if (!this.netPaused('zero')) throw new Error('Zero trading must be paused');
+    const obj = await this.env.BACKUPS.get(snapMeta.key);
+    const snapshot = JSON.parse(await obj.text());
+    const art = await this.env.BACKUPS.get('rookery/migration/zero_artifacts.json');
+    if (!art) throw new Error('artifacts missing in R2');
+    const artifacts = JSON.parse(await art.text());
+    const creators = Object.fromEntries(this.sql.exec(`SELECT DISTINCT u.id, u.wallet FROM markets m JOIN users u ON u.id=m.creator_id WHERE m.network='zero'`).toArray()
+      .map(r => ['u' + r.id, r.wallet && /^0x[0-9a-fA-F]{40}$/.test(r.wallet) ? r.wallet : null]));
+    const rpc = async (method, params) => {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(15000) });
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message || 'rpc error');
+      return j.result;
+    };
+    const K = this.zeroKeys();
+    const io = {
+      rpc, send: (role, tx) => this.zeroSend(rpc, role, tx),
+      addr: { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address, feeTo: K.custody.address },
+      load: async () => JSON.parse(this.meta('zero_run') || 'null'), save: async (s) => this.setMeta('zero_run', JSON.stringify(s)),
+      log: () => {},
+    };
+    const plan = { snapshot, artifacts, creators, chainId: Number(b.chainId || 33002), vNative: (3150n * WEI).toString(), build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
+    if (plan.dryRun) return zeroRun(io, plan);
+    if (this._zeroRunning) return { running: true };
+    this._zeroRunning = true;
+    this.setMeta('zero_run_status', JSON.stringify({ started: now(), rpc: url, state: 'running' }));
+    const job = zeroRun(io, plan).then(r => {
+      this.setMeta('zero_run_status', JSON.stringify({ started: JSON.parse(this.meta('zero_run_status')).started, finished: now(), state: r.checks?.failed ? 'checks-failed' : 'done', report: { ...r, state: undefined } }));
+      return r;
+    }).catch(e => this.setMeta('zero_run_status', JSON.stringify({ state: 'error', error: String(e.message || e).slice(0, 400), at: now() })))
+      .finally(() => { this._zeroRunning = false; });
+    this.ctx.waitUntil(job);
+    return { started: true, rpc: url };
   };
 
   P.netPaused = function (net) { return this.meta('net_paused_' + net) === '1'; };
@@ -84,8 +164,9 @@ export function installZeroMig(Cls, H) {
       markets.push({
         id: m.id, name: m.name, symbol: m.symbol, creator: 'u' + m.creator_id, quote: m.quote || 'ZRO',
         state: m.graduated ? 'bonded' : 'curve',
-        curve: { virtualQuote: B(m.quote === 'ETH' ? (m.v_wei || 0) : (m.v_zro || 0)).toString(), virtualTokens: B(m.v_tok).toString(),
-          quoteReserve: B(m.reserve_zro).toString(), tokensSold: sold.toString(), curveTokens: B(m.curve_tokens || 0).toString() },
+        // every amount in wei: the ledger keeps v_zro / v_tok / curve_tokens in whole units
+        curve: { virtualQuote: vQuote(m).toString(), virtualTokens: (B(m.v_tok) * WEI).toString(),
+          quoteReserve: B(m.reserve_zro).toString(), tokensSold: sold.toString(), curveTokens: (B(m.curve_tokens || 0) * WEI).toString() },
         pool: m.graduated ? { quote: B(m.pool_zro).toString(), tokens: poolTok.toString() } : null,
         taxesBps: { marketing: m.tax_mkt || 0, burn: m.tax_burn || 0, rewards: m.tax_rew || 0 },
         supply: supplyWei.toString(), burned: burned.toString(), heldByUsers: held.toString(), curveLeft: curveLeft.toString(),
@@ -107,7 +188,7 @@ export function installZeroMig(Cls, H) {
       built = this.migBuild(net);
     });
     const doc = {
-      v: 1, network: net, chain: net === 'zero' ? { name: 'Zero by LayerZero', chainId: 33002 } : { name: net },
+      v: 2, network: net, chain: net === 'zero' ? { name: 'Zero by LayerZero', chainId: 33002 } : { name: net },
       takenAt: new Date(ts).toISOString(), reason, rule: 'every holder receives exactly this balance 1:1; burned tokens stay burned',
       units: 'all amounts in wei (18 decimals)', rewardsSettledBeforeSnapshot: paid,
       totals: { markets: built.markets.length, holderRows: built.holderRows, quoteReserveWei: built.quoteReserve.toString() },

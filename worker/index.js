@@ -3471,6 +3471,25 @@ export class Books {
           if (b.auto !== undefined) this.setMeta('mig_auto_' + net, b.auto ? '1' : '0');
           if (b.snapshot) return json(await this.migSnapshot(net, { reason: b.reason || 'manual', pause: b.pauseOnSnapshot !== false, force: !!b.force, rehearsal: !!b.rehearsal }));
           if (b.clearSnapshot) { this.setMeta('mig_snapshot_' + net, ''); }
+          if (b.getSnapshot) {
+            const meta = JSON.parse(this.meta('mig_snapshot_' + net + (b.getSnapshot === 'rehearsal' ? '_rehearsal' : '')) || 'null');
+            const obj = meta && this.env.BACKUPS ? await this.env.BACKUPS.get(meta.key) : null;
+            if (!obj) return json({ error: 'no snapshot' }, 404);
+            return new Response(await obj.text(), { headers: { 'content-type': 'application/json', 'x-sha256': meta.sha256 } });
+          }
+          if (b.artifacts) {
+            const body = typeof b.artifacts === 'string' ? b.artifacts : JSON.stringify(b.artifacts);
+            await this.env.BACKUPS.put('rookery/migration/zero_artifacts.json', body, { httpMetadata: { contentType: 'application/json' } });
+            const a = JSON.parse(body);
+            return json({ ok: true, stored: Object.fromEntries(Object.entries(a).filter(([k]) => k !== '_meta').map(([k, v]) => [k, v.sha256])) });
+          }
+          if (b.run) return json(await this.zeroMigrate(b.run));
+          if (b.runStatus) return json({ status: JSON.parse(this.meta('zero_run_status') || 'null'), state: JSON.parse(this.meta('zero_run') || 'null'),
+            keys: (() => { const K = this.zeroKeys(); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.zeroAddrs() });
+          if (b.creators) {
+            const rows = this.sql.exec(`SELECT DISTINCT u.id, u.wallet FROM markets m JOIN users u ON u.id = m.creator_id WHERE m.network=?`, net).toArray();
+            return json({ ok: true, creators: Object.fromEntries(rows.map(r => ['u' + r.id, r.wallet && /^0x[0-9a-fA-F]{40}$/.test(r.wallet) ? r.wallet : null])) });
+          }
           return json({ ok: true, network: net, paused: this.netPaused(net), auto: this.meta('mig_auto_' + net) !== '0',
             snapshot: JSON.parse(this.meta('mig_snapshot_' + net) || 'null'), rehearsal: JSON.parse(this.meta('mig_snapshot_' + net + '_rehearsal') || 'null') });
         }
@@ -4121,4 +4140,4 @@ installRhpad(Books, { B, WEI, now, randHex, CHAINS });
 installLtcdep(Books, { B, WEI, now, randHex });
 installLtcaddr(Books, { B, WEI, now });
 installWatch(Books, { now });
-installZeroMig(Books, { B, WEI, now });
+installZeroMig(Books, { B, WEI, now, vQuote });
