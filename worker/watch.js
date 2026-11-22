@@ -157,18 +157,21 @@ export function installWatch(Cls, H) {
   P.zwState = function () { try { return JSON.parse(this.meta('zw') || '{}'); } catch { return {}; } };
   P.zwSave = function (st) { this.setMeta('zw', JSON.stringify(st)); };
 
-  P.zwSay = async function (text, st) {
+  P.zwSay = async function (text, st, opts = {}) {
     const chat = this.meta('tg_owner_chat') || this.meta('watch_chat');
-    st.log = (st.log || []).concat([{ ts: now(), text: text.replace(/<[^>]+>/g, '').slice(0, 200) }]).slice(-50);
+    if (!opts.heartbeat) st.log = (st.log || []).concat([{ ts: now(), text: text.replace(/<[^>]+>/g, '').slice(0, 200) }]).slice(-50);
     if (this.env.ZW_BOT_TOKEN) {
       this.zbInit();
-      const n = this.sql.exec('SELECT COUNT(*) c FROM zw_subs WHERE active=1').one().c;
+      const where = opts.heartbeat ? 'active=1 AND COALESCE(hb,1)=1' : 'active=1';
+      const n = this.sql.exec(`SELECT COUNT(*) c FROM zw_subs WHERE ${where}`).one().c;
       if (n) {
-        this.sql.exec('INSERT INTO zw_outbox (chat_id,text,tries,created) SELECT chat_id, ?, 0, ? FROM zw_subs WHERE active=1', text, now());
+        this.sql.exec(`INSERT INTO zw_outbox (chat_id,text,tries,created) SELECT chat_id, ?, 0, ? FROM zw_subs WHERE ${where}`, text, now());
         await this.zbDrain().catch(() => {});
         return true;
       }
+      if (opts.heartbeat) return false;
     }
+    if (opts.heartbeat) return false;
     if (chat && this.env.TG_BOT_TOKEN) {
       const r = await this.tg('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
       return !!(r && r.ok);
@@ -380,6 +383,7 @@ export function installWatch(Cls, H) {
       if (n % 3 === 1 || opts.force) {
         try {
           const hits = await this.zwFeed(st);
+          st.hb = st.hb || {}; st.hb.feed = (st.hb.feed || 0) + 1;
           const fresh = hits.filter(h => !h.tx || seenAdd(st, h.tx.slice(0, 18)));
           for (const h of fresh) if (h.dir === 'to' && h.tx) st.pending = (st.pending || []).concat([{ chain: 'lz', tx: h.tx, amount: 0, seen: t, app: h.app }]).slice(-200);
           const from = fresh.filter(h => h.dir === 'from'), to = fresh.filter(h => h.dir === 'to');
@@ -508,6 +512,15 @@ export function installWatch(Cls, H) {
           st.peer = peer;
         } catch { /* next round */ }
       }
+      // heartbeat every 10 min on the clock (:00, :10, …) with proof of work since the last one
+      st.hb = st.hb || {};
+      st.hb.checks = (st.hb.checks || 0) + 1;
+      const slot = Math.floor(t / 600e3);
+      if (st.hb.slot === undefined) Object.assign(st.hb, { slot, checks: 0, feed: 0, cur0: { ...(st.cur || {}) }, transfers0: st.transfers || 0, feedTo0: st.feedTo || 0, feedFrom0: st.feedFrom || 0, chainTx0: st.chainTx || 0 });
+      else if (slot !== st.hb.slot) {
+        if (this.env.ZW_BOT_TOKEN && !opts.noHeartbeat) await this.zwSay(this.zwHeartbeatText(st, t), st, { heartbeat: true }).catch(() => {});
+        st.hb = { slot, checks: 0, feed: 0, cur0: { ...(st.cur || {}) }, transfers0: st.transfers || 0, feedTo0: st.feedTo || 0, feedFrom0: st.feedFrom || 0, chainTx0: st.chainTx || 0, sent: t };
+      }
       if (this.env.ZW_BOT_TOKEN) await this.zbDrain().catch(() => {});
       st.last = t; st.lastMs = now() - t;
     } finally {
@@ -552,6 +565,7 @@ export function installWatch(Cls, H) {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_subs (chat_id TEXT PRIMARY KEY, type TEXT, title TEXT, active INTEGER DEFAULT 1, added INTEGER, updated INTEGER)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, text TEXT, tries INTEGER DEFAULT 0, created INTEGER)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS zw_upd (id INTEGER PRIMARY KEY, ts INTEGER)`);
+    try { this.sql.exec('ALTER TABLE zw_subs ADD COLUMN hb INTEGER DEFAULT 1'); } catch { /* already there */ }
   };
   P.zbSub = function (chat, on) {
     this.zbInit();
@@ -605,9 +619,37 @@ export function installWatch(Cls, H) {
       `Public Zero RPC: ${live.length ? live.map(u => `<code>${u}</code>`).join(', ') : 'none yet'}`,
       ago !== null ? `Last check: ${ago}s ago · checks every ~3s` : null,
       '',
-      'Alerts land here the moment the bridge opens, ZRO moves to Zero, the first message leaves Zero or an RPC goes live.',
+      'Alerts land here the moment the bridge opens, ZRO moves to Zero, the first message leaves Zero or an RPC goes live. A short status update follows every 10 minutes.',
       '<i>Community tool, not affiliated with LayerZero. Not financial advice.</i>',
     ].filter(x => x !== null).join('\n').replace(/<i>|<\/i>/g, '');
+  };
+
+  P.zwHeartbeatText = function (st, t) {
+    const hb = st.hb || {};
+    const b = st.bridge || {};
+    const live = Object.entries(st.rpc || {}).some(([, v]) => v.live) || st.firstFromZero || st.firstZeroTx;
+    const hhmm = (ms) => new Date(ms).toISOString().slice(11, 16);
+    const launch = Date.UTC(2026, 10, 30);
+    const left = launch - t;
+    const until = left > 0 ? ` · in ${Math.floor(left / 864e5)}d ${Math.floor((left % 864e5) / 36e5)}h` : '';
+    const blocks = Object.entries(ZW.chains).map(([k, c]) => [c.name.replace('BNB Chain', 'BNB'), Math.max(0, (st.cur?.[k] || 0) - (hb.cur0?.[k] || st.cur?.[k] || 0))]);
+    const totalBlocks = blocks.reduce((a, [, v]) => a + v, 0);
+    const events = (st.transfers || 0) - (hb.transfers0 || 0) + (st.feedTo || 0) - (hb.feedTo0 || 0) + (st.feedFrom || 0) - (hb.feedFrom0 || 0) + (st.chainTx || 0) - (hb.chainTx0 || 0);
+    const icon = (x) => x === 'open' ? '🟢 open' : x === 'closed' ? '🔴 closed' : '⚪ ?';
+    const fmt = (x) => x.toLocaleString('en-US');
+    return [
+      `🛰 <b>Zero watch · ${hhmm(t)} UTC</b> · still watching`,
+      `Network: ${live ? '🟢 LIVE' : `⏳ not live yet · launch Nov 30${until}`}`,
+      `Bridge ZRO → Zero: ETH ${icon(b.eth?.state)} · ARB ${icon(b.arb?.state)} · Base ${icon(b.base?.state)}`,
+      '',
+      `<b>Last 10 min</b>`,
+      `• ${fmt(hb.checks || 0)} bridge checks`,
+      `• ${fmt(totalBlocks)} blocks scanned (${blocks.map(([n, v]) => `${n} ${fmt(v)}`).join(' · ')})`,
+      `• LayerZero feed read ${fmt(hb.feed || 0)}× (all 110+ chains)`,
+      `• ${events ? `<b>${fmt(events)} Zero event(s)</b>` : 'no Zero activity yet'}`,
+      '',
+      `Next update ${hhmm(Math.floor(t / 600e3) * 600e3 + 600e3)} UTC · /status anytime · /quiet mutes these updates`,
+    ].join('\n');
   };
 
   P.zbUpdate = async function (u) {
@@ -647,6 +689,14 @@ export function installWatch(Cls, H) {
       return reply('✅ Subscribed to Zero alerts.\n\n' + this.zwStatusText(), { reply_markup: kb });
     }
     if (cmd === '/status' || cmd === '/zero') return reply(this.zwStatusText(), { reply_markup: kb });
+    if (cmd === '/quiet' || cmd === '/updates') {
+      if (!(await isAdmin())) return reply('Only group admins can change this.');
+      this.zbSub(chat, true);
+      const cur = this.sql.exec('SELECT COALESCE(hb,1) hb FROM zw_subs WHERE chat_id=?', String(chat.id)).one().hb;
+      const next = cmd === '/updates' ? 1 : (cur ? 0 : 1);
+      this.sql.exec('UPDATE zw_subs SET hb=? WHERE chat_id=?', next, String(chat.id));
+      return reply(next ? '🔔 10-minute updates are on. Alerts stay on either way.' : '🔕 10-minute updates muted. You still get every alert. Send /updates to turn them back on.');
+    }
     if (cmd === '/stop' || cmd === '/unsubscribe') {
       if (!(await isAdmin())) return reply('Only group admins can turn alerts off here.');
       this.zbSub(chat, false);
@@ -664,7 +714,7 @@ export function installWatch(Cls, H) {
       this.zwSave(st);
       return reply(c.live ? `🟢 Verified Zero RPC, watching it\n<code>${url}</code>\nblock ${c.block}` : `👀 Watching, not live yet: ${c.why}\n<code>${url}</code>`);
     }
-    if (cmd === '/help') return reply('/start — get Zero alerts here and see the current status\n/status — current status\n/stop — stop alerts (group admins)\n\nAdd me to any group: the group is subscribed automatically.', { reply_markup: kb });
+    if (cmd === '/help') return reply('/start — get Zero alerts here and see the current status\n/status — current status\n/quiet — mute the 10-minute updates (alerts stay on)\n/updates — turn the 10-minute updates back on\n/stop — stop alerts (group admins)\n\nAdd me to any group: the group is subscribed automatically.', { reply_markup: kb });
   };
 
   P.zbSetup = async function (host) {
@@ -675,7 +725,7 @@ export function installWatch(Cls, H) {
     if (me?.ok) this.setMeta('zb_username', me.result.username);
     const out = { me: me?.result?.username };
     out.webhook = await this.zb('setWebhook', { url: `https://${host}/api/zbot/hook/${secret}`, secret_token: secret, allowed_updates: ['message', 'channel_post', 'my_chat_member'], drop_pending_updates: true });
-    const cmds = [{ command: 'start', description: 'Get Zero alerts here + current status' }, { command: 'status', description: 'Zero network and bridge status' }, { command: 'stop', description: 'Stop alerts in this chat' }, { command: 'help', description: 'How it works' }];
+    const cmds = [{ command: 'start', description: 'Get Zero alerts here + current status' }, { command: 'status', description: 'Zero network and bridge status' }, { command: 'quiet', description: 'Mute the 10-minute updates' }, { command: 'updates', description: 'Turn 10-minute updates back on' }, { command: 'stop', description: 'Stop alerts in this chat' }, { command: 'help', description: 'How it works' }];
     out.cmds = await this.zb('setMyCommands', { commands: cmds });
     out.cmdsGroups = await this.zb('setMyCommands', { commands: cmds, scope: { type: 'all_group_chats' } });
     out.desc = await this.zb('setMyDescription', { description: 'Live alerts for Zero, the LayerZero L1: the second the ZRO → Zero bridge opens or closes, ZRO starts moving to Zero, the first LayerZero message leaves Zero, or a Zero RPC goes live.\n\nPress Start, or add me to your group: it gets the alerts automatically.\n\nCommunity tool, not affiliated with LayerZero. Not financial advice.' });
