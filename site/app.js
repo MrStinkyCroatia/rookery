@@ -1185,6 +1185,7 @@ async function viewToken(id) {
   app.innerHTML = `
   <section class="wrap token">
     <div class="tmain">
+      ${(() => { const back = sessionStorage.getItem('termBack') || (m.network === 'zero' || m.network === 'giwa' ? '#/terminal/' + m.network : ''); return back ? `<a class="term-backbtn" href="${esc(back)}">← Back to Terminal</a>` : ''; })()}
       <div class="th">
         ${timg(m)}
         <div>
@@ -3234,6 +3235,7 @@ async function route() {
     document.documentElement.classList.toggle('st-page', a === 'stellar');
   }
   window.scrollTo(0, 0);
+  if (a && a !== 't' && a !== 'terminal') sessionStorage.removeItem('termBack');
   if (!S.stats) await loadStats();
   try {
     if (!a) await viewExplore();
@@ -3668,7 +3670,7 @@ async function viewTerminal(arg1, arg2) {
     $$('[data-pad]').forEach(b => b.onclick = () => { st.pad = b.dataset.pad; go(); load(); });
     $$('[data-net]').forEach(b => b.onclick = () => { if (st.net === b.dataset.net) return; st.net = b.dataset.net; st.pad = 'all'; st.q = ''; go(); load(); });
     $$('[data-sort]').forEach(b => b.onclick = () => { st.sort = b.dataset.sort; load(); });
-    $$('.term-row').forEach(r => r.onclick = (e) => { if (e.target.closest('button,a')) return; if (r.dataset.href) location.hash = r.dataset.href.slice(1); });
+    $$('.term-row').forEach(r => r.onclick = (e) => { if (e.target.closest('button,a')) return; if (r.dataset.href) { sessionStorage.setItem('termBack', location.hash || '#/terminal'); location.hash = r.dataset.href.slice(1); } });
     const q = $('#termQ'); let t0; q.oninput = () => { clearTimeout(t0); t0 = setTimeout(() => { st.q = q.value.trim(); load().then(() => { const n = $('#termQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 350); };
   }
   await load();
@@ -3686,7 +3688,7 @@ async function viewTermToken(net, addr) {
   async function load(first) {
     let d;
     try { d = await api(`/terminal/token?net=${net}&addr=${encodeURIComponent(addr)}`); }
-    catch (e) { app.innerHTML = `<div class="wrap term"><a class="term-back" href="#/terminal/${net}">← ${net === 'giwa' ? 'GIWA' : 'Zero'} Terminal</a><div class="panel pb term-empty">This token is not indexed yet. New tokens show up within seconds of their first transaction.</div></div>`; return; }
+    catch (e) { app.innerHTML = `<div class="wrap term"><a class="term-backbtn" href="#/terminal/${net}">← Back to ${net === 'giwa' ? 'GIWA' : 'Zero'} Terminal</a><div class="panel pb term-empty">This token is not indexed yet. New tokens show up within seconds of their first transaction.</div></div>`; return; }
     const t = d.token, p = d.pad, NL = d.nets[net].label, N = d.native;
     const ex = d.explorer ? d.explorer.replace(/\/$/, '') : null;
     const exA = (a, kind = 'address') => ex ? `<a href="${esc(ex)}/${kind}/${esc(a)}" target="_blank" rel="noopener" class="mono">${esc(short(a))}</a>` : `<span class="mono">${esc(short(a))}</span>`;
@@ -3698,7 +3700,7 @@ async function viewTermToken(net, addr) {
     const pctCls = (v) => v >= 30 ? 'dn' : v >= 15 ? 'warn' : 'up';
     const kindCls = { buy: 'up', sell: 'dn', mint: 'mu', burn: 'dn', transfer: 'mu' };
     app.innerHTML = `<div class="wrap term tt">
-      <a class="term-back" href="#/terminal/${net}${t.pad ? '/' + esc(t.pad) : ''}">← ${esc(NL)} Terminal${p ? ' · ' + esc(p.name) : ''}</a>
+      <a class="term-backbtn" href="${esc(sessionStorage.getItem('termBack') || '#/terminal/' + net + (t.pad ? '/' + t.pad : ''))}">← Back to ${esc(NL)} Terminal${p ? ' · ' + esc(p.name) : ''}</a>
       <div class="tt-head panel pb">
         <div class="tt-id"><span class="term-av-t tt-av">${esc((t.symbol || '?')[0])}</span><div><h1>${esc(t.name || 'Unnamed')} <span class="mu">$${esc(t.symbol || '?')}</span></h1>
           <div class="tt-sub">${p ? `<a class="term-chip" href="#/terminal/${net}/${esc(p.id)}">${p.avatar ? `<img class="term-av-xs" src="${esc(p.avatar)}" alt="" referrerpolicy="no-referrer">` : ''}${esc(p.name)}</a>` : '<span class="term-chip">Unattributed</span>'}
