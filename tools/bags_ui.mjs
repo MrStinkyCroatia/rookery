@@ -1,0 +1,26 @@
+import { spawn } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+const BASE = 'https://rookery-staging.stablepump-ops.workers.dev';
+const [name, value] = readFileSync('.rehearsal/staging_cookie.txt', 'utf8').trim().split('=');
+const chrome = spawn('/usr/bin/chromium', ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=9346', '--hide-scrollbars', 'about:blank'], { stdio: 'ignore' });
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let ws; for (let i = 0; i < 40; i++) { try { const l = await (await fetch('http://127.0.0.1:9346/json')).json(); const pg = l.find(x => x.type === 'page'); if (pg) { ws = new WebSocket(pg.webSocketDebuggerUrl); break; } } catch {} await sleep(250); }
+await new Promise(r => ws.onopen = r);
+let id = 0; const pend = {}; const errs = [];
+const cmd = (method, params = {}) => new Promise(r => { const i = ++id; pend[i] = r; ws.send(JSON.stringify({ id: i, method, params })); });
+ws.onmessage = (m) => { const d = JSON.parse(m.data); if (d.id && pend[d.id]) { pend[d.id](d); delete pend[d.id]; } if (d.method === 'Runtime.exceptionThrown') errs.push(d.params.exceptionDetails?.exception?.description); };
+const ev = async (e) => (await cmd('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true })).result?.result?.value;
+await cmd('Page.enable'); await cmd('Runtime.enable'); await cmd('Network.enable');
+await cmd('Network.setCookie', { name, value, domain: 'rookery-staging.stablepump-ops.workers.dev', path: '/', secure: true, httpOnly: true });
+await cmd('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+await cmd('Page.navigate', { url: `${BASE}/?nocache=${Date.now()}#/terminal/zero` }); await sleep(9000);
+await ev(`document.querySelector('[data-tab=bags]').click()`); await sleep(4000);
+const out = {};
+out.bags = await ev(`({ head: document.querySelector('.tx-fh')?.innerText, sum: [...document.querySelectorAll('.tx-bagsum div')].map(d => d.innerText.replace(/\\n/g, ': ')), rows: [...document.querySelectorAll('.tx-row')].map(r => r.innerText.replace(/\\n/g, ' | ')) })`);
+await ev(`document.querySelector('.tx-row')?.click()`); await sleep(5000);
+out.position = await ev(`[...document.querySelectorAll('.tx-pos .kv')].map(k => k.innerText.replace(/\\n/g, ': '))`);
+out.youHold = await ev(`document.querySelector('.tx-side .tx-note')?.innerText`);
+writeFileSync('out/tx_bags.png', Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
+await ev(`document.querySelector('[data-tab=trending]').click()`); await sleep(3000);
+out.positionOutsideBags = await ev(`!!document.querySelector('.tx-pos')`);
+console.log(JSON.stringify({ ...out, errors: errs }, null, 1)); chrome.kill(); process.exit(0);

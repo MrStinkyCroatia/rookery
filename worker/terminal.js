@@ -237,6 +237,53 @@ export function installTerminal(Cls, H) {
     };
   };
 
+  // the signed-in user's positions on one network: Rookery balances + (with a linked wallet) on-chain tokens
+  P.termBags = function (net, user) {
+    this.termInit();
+    const usd = this.termNativeUsd(net);
+    const items = [];
+    const hold = this.sql.exec(`SELECT b.asset, b.amount FROM balances b JOIN markets m ON m.id = substr(b.asset, 3) WHERE b.user_id=? AND b.asset LIKE 't:%' AND b.amount!='0' AND m.network=?`, user.id, net).toArray();
+    for (const h of hold) {
+      const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) continue;
+      let v = {}; try { v = this.view(m) || {}; } catch { /* */ }
+      const bal = Number(BigInt(h.amount)) / 1e18;
+      let tok = 0, cost = 0, realized = 0, bought = 0, first = null;
+      const netShare = 1 - (50 + (m.tax_mkt || 0) + (m.tax_rew || 0)) / 10000;   // sells are logged gross; the seller gets this share
+      for (const t of this.sql.exec('SELECT side, zro, tokens, usd, ts FROM trades WHERE market=? AND user_id=? ORDER BY id', m.id, user.id).toArray()) {
+        const q = Number(BigInt(t.tokens)) / 1e18, val = Number(BigInt(t.zro)) / 1e18 * (t.usd || usd);
+        if (t.side === 'buy') { tok += q; cost += val; bought += val; first = first ?? t.ts; }
+        else if (tok > 0) { const f = Math.min(1, q / tok); realized += val * netShare - cost * f; cost -= cost * f; tok = Math.max(0, tok - q); }
+      }
+      const price = v.priceUsd || 0, value = bal * price;
+      // tokens received outside trades (transfers, rewards) carry no cost: keep cost proportional to what was bought
+      const costNow = tok > 0 ? cost * Math.min(1, bal / tok) : 0;
+      let address = m.zero_token; if (!address) { try { address = this.netTokenAddr(net, m.id); } catch { address = null; } }
+      items.push({ market: m.id, name: m.name, symbol: m.symbol, image: m.image, pad: 'rookery', address, reserved: !m.migrated, ts: m.created,
+        balance: h.amount, priceUsd: price, mcapUsd: v.mcapUsd ?? null, valueUsd: value, costUsd: costNow, avgEntryUsd: tok > 0 ? cost / tok : null,
+        pnlUsd: value - costNow, pnlPct: costNow > 0 ? (value / costNow - 1) * 100 : null, realizedUsd: realized, investedUsd: bought, since: first, pctOfSupply: bal / 1e9 * 100 });
+    }
+    const wallet = String(user.wallet || '').toLowerCase();
+    if (/^0x[0-9a-f]{40}$/.test(wallet)) {
+      for (const r of this.sql.exec(`SELECT t.*, b.bal FROM term_bal b JOIN term_tokens t ON t.chain=b.chain AND t.addr=b.token WHERE b.chain=? AND b.holder=? AND b.bal!='0'`, net, wallet).toArray()) {
+        const dec = 10 ** (r.decimals ?? 18), bal = Number(BigInt(r.bal)) / dec; if (bal <= 0) continue;
+        let tok = 0, cost = 0, realized = 0, bought = 0;
+        for (const t of this.sql.exec(`SELECT kind, from_a, to_a, amount, value FROM term_tx WHERE chain=? AND token=? AND (to_a=? OR from_a=?) ORDER BY block, idx`, net, r.addr, wallet, wallet).toArray()) {
+          const q = Number(BigInt(t.amount)) / dec, val = Number(BigInt(t.value || '0')) / 1e18 * usd;
+          if (t.kind === 'buy' && t.to_a === wallet) { tok += q; cost += val; bought += val; }
+          else if (t.kind === 'sell' && t.from_a === wallet && tok > 0) { const f = Math.min(1, q / tok); realized += q * (Number(BigInt(r.price_native || '0')) / 1e18 * usd) - cost * f; cost -= cost * f; tok = Math.max(0, tok - q); }
+        }
+        const row = this.termRow(net, r, usd), value = bal * (row.priceUsd || 0), costNow = tok > 0 ? cost * Math.min(1, bal / tok) : 0;
+        items.push({ ...row, balance: r.bal, valueUsd: value, costUsd: costNow, avgEntryUsd: tok > 0 ? cost / tok : null, pnlUsd: value - costNow, pnlPct: costNow > 0 ? (value / costNow - 1) * 100 : null,
+          realizedUsd: realized, investedUsd: bought, wallet: true, pctOfSupply: row.supply ? bal / (Number(BigInt(row.supply)) / dec) * 100 : null });
+      }
+    }
+    items.sort((a, b) => b.valueUsd - a.valueUsd);
+    const sum = (k) => items.reduce((a, x) => a + (x[k] || 0), 0);
+    const totalValue = sum('valueUsd'), totalCost = sum('costUsd');
+    return { net, items, totalValueUsd: totalValue, totalCostUsd: totalCost, totalPnlUsd: totalValue - totalCost, totalPnlPct: totalCost > 0 ? (totalValue / totalCost - 1) * 100 : null,
+      realizedUsd: sum('realizedUsd'), wallet: wallet || null };
+  };
+
   // called from the Zero watcher loop once a verified RPC exists: follow the chain from block 1, a capped range per pass
   P.termTick = async function (rpc, chain = 'zero') {
     this._termBusyBy = this._termBusyBy || {};

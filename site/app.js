@@ -3649,18 +3649,28 @@ async function viewTerminal(arg1, arg2, arg3) {
   let D = null, pads = {};
 
   async function loadFeed() {
-    const tab = st.tab === 'watch' ? '' : st.tab;
+    const tab = st.tab === 'watch' || st.tab === 'bags' ? '' : st.tab;
     D = await api(`/terminal?net=${st.net}&tab=${tab}&pad=${encodeURIComponent(st.pad)}&sort=${st.tab === 'trending' ? 'trending' : st.tab === 'new' ? 'new' : 'mcap'}&q=${encodeURIComponent(st.q)}`);
     pads = Object.fromEntries(D.pads.map(p => [p.id, p]));
     let list = D.tokens;
     if (st.tab === 'watch') list = list.filter(t => watch.has(keyOf(t)));
+    st.bags = null;
+    if (st.tab === 'bags') { if (S.me) { try { st.bags = await api('/terminal/bags?net=' + st.net); list = st.bags.items; } catch { list = []; } } else list = []; }
     st.list = list;
     const N = D.nets[D.net];
     $('.tx-nets').innerHTML = Object.entries(D.nets).map(([k, v]) => `<button data-net="${k}" class="${k === st.net ? 'on' : ''}">${k === 'giwa' ? '<img src="/assets/giwa.png" alt="">' : k === 'litvm' ? '<img src="/assets/chains/litecoin.svg" alt="">' : '<b>Ø</b>'}${esc(v.label)}</button>`).join('');
     $('#txStatus').innerHTML = D.chainLive ? `<i class="tx-dot live"></i>${esc(N.label)} live · block ${D.cursor.toLocaleString('en-US')}` : `<i class="tx-dot"></i>${esc(N.label)} mainnet ${esc(N.mainnet)}`;
     $('#txPad').innerHTML = `<option value="all">All launchpads (${D.pads.length})</option>` + D.pads.map(p => `<option value="${p.id}" ${st.pad === p.id ? 'selected' : ''}>${esc(p.name)} · ${p.tokens}</option>`).join('');
-    $('#txTabs').innerHTML = [['trending', 'Trending'], ['new', 'New'], ['bonding', 'Almost bonded'], ['watch', `Watch${watch.size ? ' ' + watch.size : ''}`]].map(([k, l]) => `<button data-tab="${k}" class="${st.tab === k ? 'on' : ''}">${l}</button>`).join('');
-    $('#txList').innerHTML = list.length ? list.map((t, i) => `<button class="tx-row ${st.sel && keyOf(t) === (st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id) ? 'on' : ''}" data-i="${i}">
+    $('#txTabs').innerHTML = [['trending', 'Trending'], ['new', 'New'], ['bonding', 'Almost bonded'], ['watch', `Watch${watch.size ? ' ' + watch.size : ''}`], ['bags', 'Bags']].map(([k, l]) => `<button data-tab="${k}" class="${st.tab === k ? 'on' : ''}">${l}</button>`).join('');
+    const bagsHead = st.bags && st.bags.items.length ? `<div class="tx-bagsum"><div><span>Value</span><b>${fmtUsd(st.bags.totalValueUsd)}</b></div>
+      <div><span>PnL</span><b class="${cls(st.bags.totalPnlUsd)}">${st.bags.totalPnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(st.bags.totalPnlUsd))}${st.bags.totalPnlPct != null ? ` · ${pct(st.bags.totalPnlPct)}` : ''}</b></div>
+      <div><span>Realized</span><b class="${cls(st.bags.realizedUsd)}">${st.bags.realizedUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(st.bags.realizedUsd))}</b></div></div>` : '';
+    $('.tx-fh').innerHTML = st.tab === 'bags' ? '<span>Position</span><span>Value · PnL</span>' : '<span>Coin</span><span>MC</span>';
+    if (st.tab === 'bags') { $('#txList').innerHTML = bagsHead + (list.length ? list.map((t, i) => `<button class="tx-row ${st.sel && keyOf(t) === (st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id) ? 'on' : ''}" data-i="${i}">
+        ${avatar(t)}<span class="tx-rn"><b>${esc(t.name || 'Unnamed')}</b><span class="mu">${padAv(pads[t.pad])}${fmtT(t.balance)} $${esc(t.symbol || '?')}${t.wallet ? ' · wallet' : ''}</span></span>
+        <span class="tx-rm"><b>${fmtUsd(t.valueUsd || 0)}</b><span class="${cls(t.pnlUsd)}">${t.pnlPct != null ? pct(t.pnlPct) : '—'}</span></span></button>`).join('')
+      : `<div class="tx-empty">${S.me ? `No ${esc(N.label)} positions yet. Buy a coin and it shows up here with its PnL.` : 'Log in to see your bags.<br><a class="btn sm" href="#/login" style="margin-top:10px">Log in</a>'}</div>`); }
+    else $('#txList').innerHTML = list.length ? list.map((t, i) => `<button class="tx-row ${st.sel && keyOf(t) === (st.sel.kind === 'm' ? 'm:' + st.sel.id : 'c:' + st.net + ':' + st.sel.id) ? 'on' : ''}" data-i="${i}">
         ${avatar(t)}<span class="tx-rn"><b>${esc(t.name || 'Unnamed')}</b><span class="mu">${padAv(pads[t.pad])}$${esc(t.symbol || '?')} · ${t.ts ? ago(t.ts) : '—'}${t.address ? ` · <span class="mono">…${esc(t.address.slice(-4))}</span>` : ''}</span></span>
         <span class="tx-rm"><b>${t.mcapUsd ? fmtUsd(t.mcapUsd) : '—'}</b><span class="${t.change24h != null ? cls(t.change24h) : 'mu'}">${t.change24h != null ? pct(t.change24h) : t.x ? t.x.toFixed(1) + 'x' : t.reserved ? 'reserved' : '—'}</span></span></button>`).join('')
       : `<div class="tx-empty">${st.tab === 'watch' ? 'Press W on a coin to add it to your watchlist.' : st.tab === 'bonding' ? 'No coin above 50% of its curve yet.' : D.chainLive ? 'Nothing here yet.' : `${esc(N.label)} mainnet starts ${N.mainnet === 'TBA' ? 'soon' : 'on ' + esc(N.mainnet)}. Tokens of every launchpad land here from the first block.`}</div>`;
@@ -3768,6 +3778,16 @@ async function viewTerminal(arg1, arg2, arg3) {
     ser.setData([...map.values()].sort((x, y) => x.time - y.time));
     S.chart.timeScale().fitContent();
   }
+  function bagCard(marketId) {
+    const b = st.bags?.items?.find(x => x.market === marketId) || st.bagCache?.[marketId];
+    if (!b) return '';
+    return `<div class="tx-pos"><h4>Your position</h4>
+      <div class="kv"><span>Value</span><b>${fmtUsd(b.valueUsd)}</b></div>
+      <div class="kv"><span>PnL</span><b class="${cls(b.pnlUsd)}">${b.pnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(b.pnlUsd))}${b.pnlPct != null ? ' · ' + pct(b.pnlPct) : ''}</b></div>
+      <div class="kv"><span>Avg entry</span><b>${b.avgEntryUsd ? fmtUsd(b.avgEntryUsd * (st.mode === 'mcap' ? 1e9 : 1)) + (st.mode === 'mcap' ? ' mcap' : '') : '—'}</b></div>
+      <div class="kv"><span>Realized</span><b class="${cls(b.realizedUsd)}">${b.realizedUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(b.realizedUsd || 0))}</b></div>
+      <div class="kv"><span>Share of supply</span><b>${b.pctOfSupply != null ? b.pctOfSupply.toFixed(3) + '%' : '—'}</b></div></div>`;
+  }
   function renderSide() {
     const n = norm(), side = $('#txSide');
     const intelCard = I ? `<div class="tx-intel"><i class="tx-dot amber"></i><span><b>${I.inProfit}</b> in profit · <b>${I.supplyInProfitPct.toFixed(1)}%</b> ≈ <b>${fmtUsd(I.valueInProfitUsd)}</b> can sell into your buy</span><button class="tx-link" data-rt="intel">See exit pressure →</button></div>` : '';
@@ -3788,7 +3808,7 @@ async function viewTerminal(arg1, arg2, arg3) {
         <div class="tx-get"><span>Fees</span><b class="mu">${(0.5 + m.taxes.marketing + m.taxes.rewards).toFixed(1)}% + ${m.taxes.burn}% burn</b></div>
         ${intelCard}
         <button class="btn lg wide ${st.side === 'buy' ? 'up' : 'dn'}" id="txGo">${S.me ? (st.side === 'buy' ? 'Buy' : 'Sell') + ' $' + esc(m.symbol) : 'Log in to trade'}</button>
-        ${T.me ? `<p class="mu tx-note">You hold ${fmtT(T.me.tokens || '0')} $${esc(m.symbol)} · ${fmtA(T.me[QA] || '0', QA)}</p>` : ''}`;
+        ${T.me ? `<p class="mu tx-note">You hold ${fmtT(T.me.tokens || '0')} $${esc(m.symbol)} · ${fmtA(T.me[QA] || '0', QA)}</p>` : ''}${bagCard(m.id)}`;
       const amt = $('#txAmt');
       const est = () => {
         const v = toWei(amt.value); let out = '—';
@@ -3842,6 +3862,7 @@ async function viewTerminal(arg1, arg2, arg3) {
     else if (/^[1-4]$/.test(e.key)) { const b = $$('[data-pre]')[+e.key - 1]; if (b) b.click(); }
   };
   document.addEventListener('keydown', onKey);
+  if (S.me) api('/terminal/bags?net=' + st.net).then(b => { st.bagCache = Object.fromEntries(b.items.filter(x => x.market).map(x => [x.market, x])); if (T) renderSide(); }).catch(() => {});
   await loadFeed();
   if (st.sel) loadToken(); else autoPick();
   S.timer = setInterval(() => { if (!location.hash.startsWith('#/terminal')) return; loadFeed().catch(() => {}); if (st.sel && !/INPUT/.test(document.activeElement?.tagName || '')) loadToken().catch(() => {}); }, 15000);

@@ -1242,3 +1242,12 @@ button.tx-tag{cursor:pointer}
 .tx-prog i{display:block;height:100%;background:#3DDC97}
 .tx-stats span{color:var(--tx2)}
 @media (max-width:960px){.tx-netbar{width:100%;justify-content:space-between}.tx-chart{height:280px}}
+
+.tx-bagsum{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:8px 12px 10px;border-bottom:1px solid var(--line)}
+.tx-bagsum div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.tx-bagsum span{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu)}
+.tx-bagsum b{font-size:12.5px;font-family:var(--mono,monospace);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tx-pos{border:1px solid var(--line);border-radius:10px;padding:9px 11px}
+.tx-pos h4{margin:0 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu)}
+.tx-pos .kv{display:flex;justify-content:space-between;padding:4px 0;font-size:12.5px}
+.tx-pos .kv span{color:var(--mu)}

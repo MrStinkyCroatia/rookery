@@ -4041,6 +4041,7 @@ export class Books {
       /* authed */
       if (!user) return json({ error: 'Log in to continue' }, 401);
 
+      if (method === 'GET' && p === '/terminal/bags') return json(this.termBags(['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero', user));
       if (method === 'GET' && /^\/migration\/(zero|giwa)\/me$/.test(p)) return json(await this.migMine(p.split('/')[2], user.id));
       if (method === 'POST' && (p === '/zero/withdraw' || p === '/mig/withdraw')) return json(await this.netWithdraw(user, await req.json()));
       if (method === 'GET' && (p === '/zero/withdrawals' || p === '/mig/withdrawals')) { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created,net FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
