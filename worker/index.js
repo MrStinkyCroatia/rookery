@@ -5,6 +5,7 @@ import { installStx } from './stx.js';
 import { installRhpad } from './rhpad.js';
 import { installLtcdep } from './ltcdep.js';
 import { installLtcaddr } from './ltcaddr.js';
+import { installWatch } from './watch.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2826,6 +2827,7 @@ export class Books {
           timed('rh', this.rhScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
+          timed('watch', this.watchRun().catch(e => ({ error: String(e?.message || e) }))),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
@@ -3560,6 +3562,22 @@ export class Books {
           }
           return json({ ok: true, address: w.address, key: w.privateKey, note: 'shown once: store it offline' });
         }
+        if (p === '/admin/watch') {
+          this.watchInit();
+          if (method === 'POST') {
+            const b = await req.json().catch(() => ({}));
+            if (Array.isArray(b.targets)) { this.setMeta('watch_targets', JSON.stringify(b.targets.slice(0, 20))); }
+            if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
+            if (b.test) {
+              const chat = this.meta('tg_owner_chat') || this.meta('watch_chat');
+              if (!chat) return json({ ok: false, error: 'no owner chat configured' });
+              const r = await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', text: '⛓ <b>Chain watchdog</b> test message — alerts will arrive here when an RPC goes live or down.' });
+              return json({ ok: !!(r && r.ok), sent: !!(r && r.ok), chat });
+            }
+            return json({ ok: true, targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
+          }
+          return json({ ok: true, targets: this.watchTargets(), rows: this.watchRows(), log: JSON.parse(this.meta('watch_log') || '[]') });
+        }
         if (p === '/admin/ltc') {
           this.ltcDepInit();
           return json({ ok: true,
@@ -4001,3 +4019,4 @@ installStx(Books, { B, WEI, now });
 installRhpad(Books, { B, WEI, now, randHex, CHAINS });
 installLtcdep(Books, { B, WEI, now, randHex });
 installLtcaddr(Books, { B, WEI, now });
+installWatch(Books, { now });
