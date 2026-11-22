@@ -3570,6 +3570,16 @@ export class Books {
             if (b.check) return json({ ok: true, results: await this.watchRun(), rows: this.watchRows(), chat: this.meta('tg_owner_chat') || '' });
             if (b.zero) return json({ ok: true, tick: await this.zwTick({ force: true, meta: !!b.meta }), state: this.zwState() });
             if (b.zeroBacktest) return json({ ok: true, backtest: await this.zwBacktest(b.zeroBacktest) });
+            if (b.zeroRpc) {
+              const url = String(b.zeroRpc).trim();
+              if (!/^https:\/\/[^\s]+$/.test(url)) return json({ ok: false, error: 'https url required' });
+              const st = this.zwState();
+              if (b.remove) st.extraRpcs = (st.extraRpcs || []).filter(u => u !== url);
+              else st.extraRpcs = [...new Set([...(st.extraRpcs || []), url])].slice(0, 10);
+              const check = b.remove ? null : await this.zwRpcCheck(url, st);
+              this.zwSave(st);
+              return json({ ok: true, watching: st.extraRpcs, check });
+            }
             if (b.zeroOff !== undefined) { this.setMeta('zw_off', b.zeroOff ? '1' : '0'); if (!b.zeroOff) await this.zwArm(); return json({ ok: true, off: !!b.zeroOff }); }
             if (b.zeroTest) {
               const st = this.zwState();
