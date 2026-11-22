@@ -62,7 +62,10 @@ export async function zeroRun(io, plan) {
   const need = markets.reduce((a, m) => a + requiredReserve(BigInt(m.curve.virtualQuote), BigInt(m.curve.tokensSold)), 0n);
   const ledger = markets.reduce((a, m) => a + BigInt(m.curve.quoteReserve), 0n);
   const bal = BigInt(await io.rpc('eth_getBalance', [io.addr.deployer, 'latest']));
-  rep.funds = { reservesNeededWei: need.toString(), ledgerReservesWei: ledger.toString(), deployerBalanceWei: bal.toString(), markets: markets.length };
+  let zroErc20 = 0n;
+  try { zroErc20 = BigInt(await io.rpc('eth_call', [{ to: '0x1ced7d571059a30db0fc9adc40346d2a1ce55b31', data: '0x70a08231' + io.addr.deployer.slice(2).toLowerCase().padStart(64, '0') }, 'latest'])); } catch { /* no OFT here */ }
+  rep.funds = { reservesNeededWei: need.toString(), ledgerReservesWei: ledger.toString(), deployerBalanceWei: bal.toString(), deployerZroErc20Wei: zroErc20.toString(), markets: markets.length };
+  if (!plan.dryRun && bal < need) throw new Error(`deployer holds ${Number(bal) / 1e18} native ZRO, needs ${Number(need) / 1e18} + gas${zroErc20 ? ` (it has ${Number(zroErc20) / 1e18} as the OFT ERC-20: unwrap first)` : ''}`);
   log(`preflight chain ${rep.chainId} · deployer nonce ${depNonce} · ${markets.length} markets · reserves ${Number(need) / 1e18} (ledger ${Number(ledger) / 1e18}) · balance ${Number(bal) / 1e18}`);
   if (plan.dryRun) return { ...rep, dryRun: true, state: st };
 

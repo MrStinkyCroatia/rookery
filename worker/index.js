@@ -1635,7 +1635,7 @@ export class Books {
       let m = this.market(market);
       if (this.netPaused(m.network)) throw new Error(this.netPauseMsg(m.network));
       if (m.rh_token) throw new Error('This token lives on Robinhood Chain: buy and sell it from your wallet');
-      if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : 'Token migrated to mainnet');
+      if (m.migrated) throw new Error(m.network === 'stellar' ? 'This token graduated to Aquarius on Stellar: trade it there, or withdraw it to your Stellar wallet' : m.network === 'zero' ? 'This token is live on Zero now: withdraw it to your Zero wallet and trade it on-chain' : 'Token migrated to mainnet');
       // bonded Stellar tokens keep trading on the Rookery pool; only the graduation itself freezes the book
       if (m.network === 'stellar' && m.graduated && this.sql.exec('SELECT 1 FROM stellar_jobs WHERE market=?', m.id).toArray().length)
         throw new Error('Graduating to Aquarius right now: the pool opens in about a minute');
@@ -2863,6 +2863,7 @@ export class Books {
           timed('ltcdep', this.ltcDepCron().catch(e => ({ error: String(e?.message || e) }))),
           timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('watch', this.watchRun().catch(e => ({ error: String(e?.message || e) }))),
+          timed('zerowd', this.meta('zero_finalized') ? this.zeroWdTick().catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
         await this.ownerFeed().catch(() => null);
@@ -2889,7 +2890,11 @@ export class Books {
       /* public */
       if (method === 'GET' && p === '/migration/zero') {
         const meta = JSON.parse(this.meta('mig_snapshot_zero') || 'null');
-        return json({ network: 'zero', paused: this.netPaused('zero'), snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: '/api/migration/zero/snapshot.json' } : null,
+        const zs = this.zwState?.() || {};
+        const liveRpc = Object.entries(zs.rpc || {}).filter(([, v]) => v.live).map(([u]) => u)[0] || null;
+        const fin = JSON.parse(this.meta('zero_finalized') || 'null');
+        return json({ network: 'zero', paused: this.netPaused('zero'), live: !!fin, chainId: 33002, rpc: liveRpc, curve: this.zeroAddrs().curve,
+          explorer: Object.entries(zs.explorers || {}).find(([, v]) => v.up)?.[0] || null, snapshot: meta ? { sha256: meta.sha256, takenAt: new Date(meta.ts).toISOString(), markets: meta.markets, holderRows: meta.holderRows, url: '/api/migration/zero/snapshot.json' } : null,
           plan: 'Variant B: each curve moves 1:1 to an on-chain Rookery curve on Zero; balances stay in your account and can be withdrawn to your Zero wallet.' });
       }
       if (method === 'GET' && p === '/migration/zero/addresses') {
@@ -3484,6 +3489,9 @@ export class Books {
             return json({ ok: true, stored: Object.fromEntries(Object.entries(a).filter(([k]) => k !== '_meta').map(([k, v]) => [k, v.sha256])) });
           }
           if (b.run) return json(await this.zeroMigrate(b.run));
+          if (b.finalize) return json(this.zeroFinalize(b.finalize === 'force' ? { force: true } : {}));
+          if (b.fund) return json(await this.zeroFund(b.fund));
+          if (b.wdTick) return json(await this.zeroWdTick());
           if (b.runStatus) return json({ status: JSON.parse(this.meta('zero_run_status') || 'null'), state: JSON.parse(this.meta('zero_run') || 'null'),
             keys: (() => { const K = this.zeroKeys(); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.zeroAddrs() });
           if (b.creators) {
@@ -3594,6 +3602,7 @@ export class Books {
             let curves = 0n, pend = 0n;
             for (const m of mk.filter(m => qa(m) === a)) {
               if (m.network === 'stellar' && m.migrated) continue;           // its XLM left custody into Aquarius
+              if (m.network === 'zero' && m.migrated) continue;              // its ZRO moved into the on-chain curve on Zero
               curves += B(m.graduated ? m.pool_zro : m.reserve_zro);
               if (B(m.acc_rew) > 0n) for (const h of this.sql.exec(`SELECT user_id FROM balances WHERE asset=? AND amount!='0'`, 't:' + m.id).toArray()) pend += this.pendingRewards(h.user_id, m);
             }
@@ -3979,6 +3988,8 @@ export class Books {
       if (!user) return json({ error: 'Log in to continue' }, 401);
 
       if (method === 'GET' && p === '/migration/zero/me') return json(await this.migMine('zero', user.id));
+      if (method === 'POST' && p === '/zero/withdraw') return json(await this.zeroWithdraw(user, await req.json()));
+      if (method === 'GET' && p === '/zero/withdrawals') { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
       if (method === 'GET' && p === '/me') {
         const hold = this.sql.exec(`SELECT asset, amount FROM balances WHERE user_id=? AND asset LIKE 't:%' AND amount!='0'`, user.id).toArray()
           .map(h => { const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) return null;
