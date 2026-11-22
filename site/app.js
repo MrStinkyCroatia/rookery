@@ -3789,6 +3789,68 @@ async function viewTerminal(arg1, arg2, arg3) {
       <div class="kv"><span>Realized</span><b class="${cls(b.realizedUsd)}">${b.realizedUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(b.realizedUsd || 0))}</b></div>
       <div class="kv"><span>Share of supply</span><b>${b.pctOfSupply != null ? b.pctOfSupply.toFixed(3) + '%' : '—'}</b></div></div>`;
   }
+  // any launchpad's coin, bought or sold from the user's wallet through the Rookery Router (0.5% to the $臭企鹅 buy & burn)
+  function routePanel(side, tabs, n, intelCard) {
+    const R = st.route, nat = D.nets[st.net].native, sym = esc(n.symbol || '?');
+    st.rside = st.rside || 'buy'; st.slip = st.slip || 300;
+    const presets = st.rside === 'buy' ? (nat === 'ETH' ? ['0.01', '0.05', '0.1', '0.5'] : ['1', '5', '10', '50']) : ['25%', '50%', '75%', '100%'];
+    side.innerHTML = tabs + `<div class="tx-trade tx-route">
+      <div class="tx-bs"><button data-rs="buy" class="${st.rside === 'buy' ? 'on up' : ''}">Buy</button><button data-rs="sell" class="${st.rside === 'sell' ? 'on dn' : ''}">Sell</button></div>
+      <label class="tx-amt"><input id="rtAmt" inputmode="decimal" placeholder="0.0" autocomplete="off"><span>${st.rside === 'buy' ? esc(nat) : '$' + sym}</span></label>
+      <div class="tx-pre">${presets.map(v => `<button data-rp="${v}">${v}</button>`).join('')}</div>
+      <div class="tx-slip">Slippage ${[100, 300, 500, 1000].map(b => `<button data-sl="${b}" class="${st.slip === b ? 'on' : ''}">${b / 100}%</button>`).join('')}</div>
+      <div class="tx-est" id="rtEst">${st.rside === 'buy' ? 'You get' : 'You receive'} <b>—</b></div>
+      <div class="tx-fee">Platform fee <b>0.5%</b> → $臭企鹅 buy &amp; burn · plus ${n.pad ? esc(n.pad.name) + '’s' : 'the launchpad’s'} own fees</div>
+      <button class="btn lg wide ${st.rside === 'buy' ? 'up' : 'dn'}" id="rtGo">${st.rside === 'buy' ? 'Buy $' + sym : 'Sell $' + sym} from wallet</button>
+      <p class="mu tx-note">Trades run from your own wallet through the Rookery Router ${esc(short(R.router))}${R.via === 'dex' ? ' (DEX pool)' : n.pad ? ' (' + esc(n.pad.name) + ' curve)' : ''}. Simulated on-chain before you sign.</p></div>${intelCard}`;
+    const amt = $('#rtAmt'), est = $('#rtEst'), go = $('#rtGo');
+    if (st.rtAmt && st.rtKey === n.address + st.rside) setTimeout(() => amt.oninput?.(), 0);
+    const errm = (e) => (e?.code === 4001 || /rejected|denied/i.test(e?.message || '')) ? 'Cancelled in your wallet'
+      : /insufficient funds/i.test(e?.message || '') ? `Not enough ${nat} in this wallet (amount + gas)` : String(e?.message || e).slice(0, 180);
+    const toWei = (v) => { const [a, b = ''] = String(v).trim().split('.'); if (!/^\d*$/.test(a) || !/^\d*$/.test(b)) return 0n; return BigInt(a || '0') * 10n ** 18n + BigInt((b + '0'.repeat(18)).slice(0, 18) || '0'); };
+    const fromWei = (w, d = 6) => { const x = BigInt(w); const i = x / 10n ** 18n, f = (x % 10n ** 18n).toString().padStart(18, '0').slice(0, d).replace(/0+$/, ''); return Number(i).toLocaleString('en-US') + (f ? '.' + f : ''); };
+    const walletBal = async (from) => BigInt(await EVMW.eth().request({ method: 'eth_call', params: [{ to: n.address, data: '0x70a08231' + from.slice(2).toLowerCase().padStart(64, '0') }, 'latest'] }));
+    const prep = async (from) => api('/terminal/route/build', { net: st.net, token: n.address, side: st.rside, amount: toWei(amt.value).toString(), from, slippageBps: st.slip });
+    let qt = null;
+    if (st.rtAmt && st.rtKey === n.address + st.rside) amt.value = st.rtAmt;     // survives refreshes and re-renders
+    amt.oninput = () => { st.rtAmt = amt.value; st.rtKey = n.address + st.rside; clearTimeout(qt); qt = setTimeout(async () => {
+      if (toWei(amt.value) <= 0n) { est.innerHTML = (st.rside === 'buy' ? 'You get' : 'You receive') + ' <b>—</b>'; return; }
+      const from = await RHW.peek() || R.router;
+      try { const r = await prep(from); est.innerHTML = r.ok && r.expectedOut ? `${st.rside === 'buy' ? 'You get' : 'You receive'} <b>${fromWei(r.expectedOut, st.rside === 'buy' ? 0 : 6)} ${st.rside === 'buy' ? '$' + sym : esc(nat)}</b> <span class="mu">min ${fromWei(r.minOut, st.rside === 'buy' ? 0 : 6)}</span>` : r.needsApproval ? 'You receive <b>quote after approval</b>' : `<span class="dn">${esc(r.reason || 'not available')}</span>`; }
+      catch (e) { est.innerHTML = `<span class="dn">${esc(e.message || e)}</span>`; }
+    }, 350); };
+    $$('[data-rs]').forEach(b => b.onclick = () => { st.rside = b.dataset.rs; st.rtAmt = ''; renderSide(); });
+    $$('[data-sl]').forEach(b => b.onclick = () => { st.slip = Number(b.dataset.sl); renderSide(); });
+    $$('[data-rp]').forEach(b => b.onclick = async () => {
+      if (!b.dataset.rp.endsWith('%')) { amt.value = b.dataset.rp; amt.oninput(); return; }
+      try { const from = await EVMW.account(); const bal = await walletBal(from); amt.value = fromWei((bal * BigInt(parseInt(b.dataset.rp))) / 100n, 18).replace(/,/g, ''); amt.oninput(); }
+      catch (e) { toast(esc(errm(e)), 'bad'); }
+    });
+    go.onclick = async () => {
+      if (toWei(amt.value) <= 0n) { amt.focus(); return; }
+      const label = go.textContent; go.disabled = true;
+      const wait = async (hash) => { for (let i = 0; i < 120; i++) { const r = await EVMW.eth().request({ method: 'eth_getTransactionReceipt', params: [hash] }).catch(() => null); if (r) { if (r.status !== '0x1') throw new Error('Transaction failed on-chain'); return r; } await new Promise(res => setTimeout(res, 1000)); } throw new Error('Still pending, check your wallet'); };
+      try {
+        go.textContent = 'Connect wallet…'; const from = await EVMW.account();
+        if (R.chainId) { go.textContent = 'Switch network…'; await EVMW.ensureChain(R.chainId); }
+        go.textContent = 'Simulating…'; let r = await prep(from);
+        if (!r.ok) throw new Error(r.reason || 'Not available');
+        if (r.needsApproval) {
+          go.textContent = 'Approve in your wallet…';
+          await wait(await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: r.approve.to, data: r.approve.data }] }));
+          go.textContent = 'Simulating…';
+          for (let i = 0; i < 8; i++) { r = await prep(from); if (!r.ok || !r.needsApproval) break; await new Promise(res => setTimeout(res, 1500)); }   // RPC may lag the approval
+          if (!r.ok || r.needsApproval) throw new Error(r.reason || 'Approval not visible yet, try again');
+        }
+        go.textContent = 'Confirm in your wallet…';
+        const hash = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from, to: r.tx.to, data: r.tx.data, value: r.tx.value }] });
+        go.textContent = 'Waiting for the block…'; await wait(hash);
+        toast(`${st.rside === 'buy' ? 'Bought' : 'Sold'} $${sym} · ${st.rside === 'buy' ? fromWei(r.expectedOut, 0) + ' tokens' : fromWei(r.expectedOut) + ' ' + esc(nat)}`);
+        amt.value = ''; st.rtAmt = ''; loadToken();
+      } catch (e) { toast(esc(errm(e)), 'bad'); }
+      go.disabled = false; go.textContent = label;
+    };
+  }
   function renderSide() {
     const n = norm(), side = $('#txSide');
     const intelCard = I ? `<div class="tx-intel"><i class="tx-dot amber"></i><span><b>${I.inProfit}</b> in profit · <b>${I.supplyInProfitPct.toFixed(1)}%</b> ≈ <b>${fmtUsd(I.valueInProfitUsd)}</b> can sell into your buy</span><button class="tx-link" data-rt="intel">See exit pressure →</button></div>` : '';
@@ -3826,9 +3888,16 @@ async function viewTerminal(arg1, arg2, arg3) {
         try { await api('/trade', { market: m.id, side: st.side, amount: w.toString() }); toast(`${st.side === 'buy' ? 'Bought' : 'Sold'} $${m.symbol}`); amt.value = ''; await loadToken(); loadFeed(); }
         catch (e) { toast(esc(e.message || e), 'bad'); btn.disabled = false; btn.textContent = st.side === 'buy' ? 'Buy' : 'Sell'; }
       };
+    } else if (st.rtab === 'trade' && n.address && st.route?.available && st.routeKey === n.address) {
+      routePanel(side, tabs, n, intelCard);
     } else {
       const p = n.pad;
+      if (n.address && st.routeKey !== n.address) {
+        st.routeKey = n.address; st.route = null;
+        api(`/terminal/route?net=${st.net}&token=${n.address}&r=${Math.random()}`).then(r => { if (st.routeKey === n.address) { st.route = r; if (r.available) renderSide(); else { const el = $('#txRouteNote'); if (el) el.textContent = 'Buy through Rookery: ' + r.reason; } } }).catch(() => {});
+      }
       side.innerHTML = tabs + `<div class="tx-ext"><p>${p ? `$${esc(n.symbol)} trades on <b>${esc(p.name)}</b>.` : 'Trade this coin on its launchpad.'} Open it there to buy or sell with your wallet.</p>
+        <p class="mu tx-note" id="txRouteNote">${st.route && st.routeKey === n.address && !st.route.available ? 'Buy through Rookery: ' + esc(st.route.reason) : ''}</p>
         ${p?.site ? `<a class="btn lg wide up" href="${esc(p.site)}" target="_blank" rel="noopener">Trade on ${esc(p.name)} ↗</a>` : ''}${n.explorer ? `<a class="btn wide ghost" href="${esc(n.explorer.replace(/\/$/, ''))}/token/${esc(n.address)}" target="_blank" rel="noopener">Explorer ↗</a>` : ''}</div>
         ${intelCard}<div class="tx-risk">${n.top10 >= 30 ? `<p class="dn">⚠ Top 10 wallets hold ${n.top10.toFixed(1)}%</p>` : ''}${n.contract?.creatorPct >= 10 ? `<p class="dn">⚠ Creator holds ${n.contract.creatorPct.toFixed(1)}%</p>` : ''}<p class="mu tx-note">Price and market cap are estimated from the coin paid in buys on-chain.</p></div>`;
     }

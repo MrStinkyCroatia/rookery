@@ -8,6 +8,7 @@ import { installLtcaddr } from './ltcaddr.js';
 import { installWatch } from './watch.js';
 import { installZeroMig } from './zeromig.js';
 import { installTerminal } from './terminal.js';
+import { installRouter } from './router.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2891,6 +2892,20 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      // trade any launchpad's token through the Rookery Router (user's own wallet, 0.5% to the $臭企鹅 buy & burn)
+      if (method === 'GET' && p === '/terminal/route') {
+        const n = ['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero';
+        const t = String(url.searchParams.get('token') || '');
+        if (!/^0x[0-9a-fA-F]{40}$/.test(t)) return json({ error: 'token address required' }, 400);
+        return json(await this.routeInfo(n, t));
+      }
+      if (method === 'POST' && p === '/terminal/route/build') {
+        const b = await req.json().catch(() => ({}));
+        const n = ['giwa', 'litvm'].includes(b.net) ? b.net : 'zero';
+        if (!/^0x[0-9a-fA-F]{40}$/.test(String(b.token || '')) || !/^0x[0-9a-fA-F]{40}$/.test(String(b.from || ''))) return json({ error: 'token and wallet address required' }, 400);
+        if (!/^\d{1,40}$/.test(String(b.amount || ''))) return json({ error: 'amount (wei) required' }, 400);
+        return json(await this.routeBuild(n, b));
+      }
       if (method === 'GET' && p === '/terminal/intel') {
         const n = ['zero', 'giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero';
         const d = this.termIntel(n, { market: url.searchParams.get('market') || undefined, addr: url.searchParams.get('addr') || undefined });
@@ -3487,6 +3502,25 @@ export class Books {
             report.reserveEth = Number(resEth) / 1e18;
           });
           return json({ ok: true, ...report });
+        }
+        if (p === '/admin/router') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          const net = ['giwa', 'litvm'].includes(b.net) ? b.net : 'zero';
+          const out = { network: net };
+          if (b.action === 'adapterSet') {                         // { pad, adapter: { target, buy:{sig,args}, sell:{sig,args}, enabled } }
+            const c = this.routerCfg(net);
+            if (!/^0x[0-9a-fA-F]{40}$/.test(b.adapter?.target || '')) throw new Error('adapter.target address required');
+            if (b.pad === 'dex') c.dex = { kind: b.adapter.kind || 'uniswapv2', ...b.adapter }; else c.pads[String(b.pad)] = b.adapter;
+            if (b.wnative) c.wnative = b.wnative;
+            this.routerSaveCfg(net, c);
+          } else if (b.action === 'adapterDel') { const c = this.routerCfg(net); if (b.pad === 'dex') delete c.dex; else delete c.pads[String(b.pad)]; this.routerSaveCfg(net, c); }
+          else if (b.action === 'probe') out.route = await this.routeInfo(net, b.token);
+          else if (b.action === 'deploy') out.deploy = await this.routerDeploy(net, b);
+          else if (b.action === 'allow') out.allow = await this.routerAllow(net);
+          else if (b.action === 'fees') out.fees = await this.routerFees(net);
+          else if (b.action === 'all') { out.addrs = Object.fromEntries(['zero', 'giwa', 'litvm'].map(x => [x, this.routerAddrs(x)])); }
+          out.addrs = out.addrs || this.routerAddrs(net); out.cfg = this.routerCfg(net); out.rpc = !!this.netRpcUrl(net);
+          return json(out);
         }
         if (p === '/admin/terminal') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
@@ -4208,3 +4242,4 @@ installLtcaddr(Books, { B, WEI, now });
 installWatch(Books, { now });
 installZeroMig(Books, { B, WEI, now, vQuote });
 installTerminal(Books, { now });
+installRouter(Books);
