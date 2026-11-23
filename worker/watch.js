@@ -130,7 +130,10 @@ export function installWatch(Cls, H) {
       eth: { name: 'Ethereum', rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://1rpc.io/eth'], tx: 'https://etherscan.io/tx/', quote: true, maxRange: 50 },
       arb: { name: 'Arbitrum', rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com', 'https://arbitrum.llamarpc.com', 'https://arbitrum.drpc.org'], tx: 'https://arbiscan.io/tx/', quote: true, maxRange: 90 },
       base: { name: 'Base', rpcs: ['https://mainnet.base.org', 'https://base.llamarpc.com', 'https://base-rpc.publicnode.com', 'https://base.drpc.org'], tx: 'https://basescan.org/tx/', quote: true, maxRange: 90 },
-      bsc: { name: 'BNB Chain', rpcs: ['https://bsc-dataseed.bnbchain.org', 'https://bsc.drpc.org', 'https://bsc-rpc.publicnode.com'], tx: 'https://bscscan.com/tx/', quote: false, maxRange: 90 },
+      bsc: { name: 'BNB Chain', rpcs: ['https://bsc-dataseed.bnbchain.org', 'https://bsc.drpc.org', 'https://bsc-rpc.publicnode.com'], tx: 'https://bscscan.com/tx/', quote: true, maxRange: 90 },
+      op: { name: 'Optimism', rpcs: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com', 'https://optimism.drpc.org'], tx: 'https://optimistic.etherscan.io/tx/', quote: true, maxRange: 90 },
+      polygon: { name: 'Polygon', rpcs: ['https://polygon-bor-rpc.publicnode.com', 'https://polygon-rpc.com', 'https://polygon.drpc.org'], tx: 'https://polygonscan.com/tx/', quote: true, maxRange: 90 },
+      avax: { name: 'Avalanche', rpcs: ['https://avalanche-c-chain-rpc.publicnode.com', 'https://api.avax.network/ext/bc/C/rpc', 'https://avalanche.drpc.org'], tx: 'https://snowtrace.io/tx/', quote: true, maxRange: 90 },
     },
     // LayerZero's testnet explorer lives at explorer.testnet.zero.layerzero.network; explorer.zero.network is Zerion's
     // sunset "ZERϴ" chain and must never be treated as Zero
@@ -564,6 +567,7 @@ export function installWatch(Cls, H) {
     if (this.meta('zw_off') === '1') return;
     const st = this.zwState();
     if (!st.last || now() - st.last >= ZW.tick - 300) await this.zwTick().catch(() => {});
+    if (this.zbrTick) await this.zbrTick().catch(() => {});             // ZRO -> Zero auto-bridge: fires in the window
     await this.zwArm().catch(() => {});
   };
 

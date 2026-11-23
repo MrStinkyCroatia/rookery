@@ -3241,6 +3241,7 @@ async function route() {
     if (!a) await viewExplore();
     else if (a === 'trading') await viewTrading();
     else if (a === 'terminal') await viewTerminal(b, c, d);
+    else if (a === 'zbridge') await viewZBridge();
     else if (a === 't') await viewToken(b);
     else if (a === 'create') await viewCreate(b);
     else if (a === 'points') await viewPoints();
@@ -3936,4 +3937,147 @@ async function viewTerminal(arg1, arg2, arg3) {
   await loadFeed();
   if (st.sel) loadToken(); else autoPick();
   S.timer = setInterval(() => { if (!location.hash.startsWith('#/terminal')) return; loadFeed().catch(() => {}); if (st.sel && !/INPUT/.test(document.activeElement?.tagName || '')) loadToken().catch(() => {}); }, 15000);
+}
+
+/* ═══════════ ZRO → ZERO BRIDGE (hidden for now: reachable at #/zbridge only) ═══════════ */
+async function viewZBridge() {
+  document.title = 'ZRO → Zero bridge — Rookery';
+  const W = (x, d = 4) => (Number(BigInt(x || 0)) / 1e18).toLocaleString('en-US', { maximumFractionDigits: d });
+  const toWei = (v) => { const [a, b = ''] = String(v || '').trim().replace(/,/g, '').split('.'); if (!/^\d*$/.test(a) || !/^\d*$/.test(b) || (!a && !b)) return 0n; return BigInt(a || '0') * 10n ** 18n + BigInt((b + '0'.repeat(18)).slice(0, 18)); };
+  const st = { chain: 'eth', mode: 'auto', info: null, me: null, from: null };
+  app.innerHTML = `<section class="wrap zb">
+    <div class="zb-hero"><h1>ZRO → Zero</h1>
+      <p class="mu">Bridge ZRO to <b>your own address on Zero</b> through ZRO's own LayerZero contract. One transaction while the route is open, or sign up once and Rookery bridges it the moment LayerZero opens the route, checked every 2 seconds on 7 chains.</p>
+      <div class="zb-stats" id="zbStats"></div></div>
+    <div class="zb-route" id="zbRoute"></div>
+    <div class="zb-warn"><b>⚠ Read before bridging.</b> Zero has no public RPC yet: ZRO you bridge lands at your same address on Zero but cannot be moved, sold or bridged back until Zero gets one. LayerZero's staking page says Zero launches Nov 30; that date is not guaranteed. Use a normal wallet (MetaMask, Rabby…): Safe and other smart-contract wallets do not exist on Zero and are refused. Rookery never holds your ZRO: it moves straight from your wallet into ZRO's LayerZero contract.</div>
+    <div class="zb-grid">
+      <div class="panel zb-card">
+        <div class="zb-tabs"><button data-m="auto">Auto-bridge</button><button data-m="now">Bridge now</button></div>
+        <div class="zb-mode mu" id="zbMode"></div>
+        <div class="zb-chains" id="zbChains"></div>
+        <label class="zb-lbl">Amount (ZRO) <button class="zb-max" id="zbMax">max</button></label>
+        <input class="zb-amt" id="zbAmt" inputmode="decimal" placeholder="0.0" autocomplete="off">
+        <div class="zb-lines" id="zbLines"></div>
+        <label class="zb-ck"><input type="checkbox" id="zbOk"> <span>I understand my ZRO goes to my same address on Zero and stays there, locked, until Zero has a public RPC</span></label>
+        <button class="btn lg wide up" id="zbGo">Connect wallet</button>
+        <p class="mu zb-note" id="zbNote"></p>
+      </div>
+      <div class="panel zb-card">
+        <h3>Your ZRO on Zero</h3><div id="zbZero" class="zb-zero"><p class="mu">Connect your wallet to see it.</p></div>
+        <h4>Your auto-bridge orders</h4><div id="zbOrders"><p class="mu">None yet.</p></div>
+        <a class="btn wide ghost" href="https://t.me/RookeryAlertsBot" target="_blank" rel="noopener">🔔 Telegram: tell me the second the route opens</a>
+      </div>
+    </div>
+    <div class="panel zb-check"><h3>Check any bridge</h3>
+      <div class="zb-row"><select id="zbCkChain"></select><input id="zbCkTx" placeholder="source transaction hash (0x…)"><button class="btn" id="zbCkGo">Check status</button></div>
+      <div id="zbCkOut" class="mu"></div></div>
+    <div class="panel"><div class="panel-h"><h3>Bridges through Rookery</h3><input id="zbFind" placeholder="paste your address (0x…)" class="zb-find"></div>
+      <div style="overflow:auto"><table class="tbl" id="zbList"><thead><tr><th>Chain</th><th>Type</th><th>Address</th><th class="r">ZRO</th><th>Status</th><th>Tx</th></tr></thead><tbody></tbody></table></div>
+      <p class="mu" style="font-size:12px">Public list: sending address, chain and amount of each bridge made here.</p></div>
+  </section>`;
+  const C = () => st.info?.chains?.[st.chain] || {};
+  const nat = () => C().native || 'ETH';
+  const errm = (e) => (e?.code === 4001 || /rejected|denied/i.test(e?.message || '')) ? 'Cancelled in your wallet' : /insufficient funds/i.test(e?.message || '') ? `Not enough ${nat()} for the transaction` : String(e?.message || e).slice(0, 180);
+  const wait = async (hash) => { for (let i = 0; i < 180; i++) { const r = await EVMW.eth().request({ method: 'eth_getTransactionReceipt', params: [hash] }).catch(() => null); if (r) { if (r.status !== '0x1') throw new Error('Transaction failed on-chain'); return r; } await new Promise(res => setTimeout(res, 1000)); } throw new Error('Still pending: check your wallet'); };
+
+  const renderInfo = () => {
+    const I = st.info; if (!I) return;
+    const s = I.stats;
+    const waiting = Object.values(I.chains).reduce((a, c) => a + (c.waiting || 0), 0);
+    $('#zbStats').innerHTML = `<div><b>${s.users}</b><span>users</span></div><div><b>${(s.bridgedZro || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}</b><span>ZRO bridged</span></div><div><b>${fmtUsd(s.volumeUsd || 0)}</b><span>volume</span></div><div><b>${waiting}</b><span>orders waiting</span></div>`;
+    const any = Object.values(I.chains).some(c => c.open);
+    $('#zbRoute').innerHTML = `<p class="${any ? 'up' : 'mu'}">${any ? '● Route open: bridge now, or your auto-bridge fires within seconds.' : '○ Route closed: LayerZero has the route to Zero switched off. Sign up for the auto-bridge and it goes the second it opens. This page updates by itself.'}</p>
+      <div class="zb-pills">${Object.entries(I.chains).map(([k, c]) => `<span class="zb-pill ${c.open ? 'open' : ''}" title="${esc(c.why || '')}">${c.open ? '●' : '○'} ${esc(c.name)} ${c.open ? 'open' : 'closed'}${c.waiting ? ` · ${c.waiting} waiting` : ''}</span>`).join('')}</div>`;
+    if (!$('#zbCkChain').options.length) $('#zbCkChain').innerHTML = Object.entries(I.chains).map(([k, c]) => `<option value="${k}">${esc(c.name)}</option>`).join('');
+    $('#zbList tbody').innerHTML = (I.recent || []).filter(r => !st.find || r.user === st.find).map(r => `<tr><td>${esc(I.chains[r.chain]?.name || r.chain)}</td><td>${r.kind}</td><td class="mono">${esc(short(r.user))}</td><td class="r">${W(r.bridged, 2)}</td><td class="${r.status === 'DELIVERED' ? 'up' : 'mu'}">${esc(r.status)}</td><td><a href="${esc(I.chains[r.chain]?.explorer || '')}/tx/${esc(r.tx)}" target="_blank" rel="noopener">${esc(short(r.tx))} ↗</a></td></tr>`).join('') || '<tr><td colspan="6" class="mu">No bridges yet.</td></tr>';
+    renderForm();
+  };
+  const renderForm = () => {
+    const I = st.info; if (!I) return;
+    $$('.zb-tabs button').forEach(b => b.classList.toggle('on', b.dataset.m === st.mode));
+    $('#zbMode').innerHTML = st.mode === 'auto'
+      ? 'Sign up once. Your ZRO stays in your wallet; the contract can only send it to <b>your own address on Zero</b>, and only when LayerZero\'s route is really open. Rookery pays the gas of the bridge; cancel anytime and get your whole deposit back.'
+      : 'One transaction while the route is open (plus a one-time approval). Pays 0.3% and LayerZero\'s fee; what is not used comes back in the same transaction.';
+    $('#zbChains').innerHTML = Object.entries(I.chains).map(([k, c]) => { const z = st.me?.chains?.[k]?.zro; return `<button data-c="${k}" class="${k === st.chain ? 'on' : ''} ${c.open ? 'open' : ''}"><b>${esc(c.name)}</b><span>${z != null ? W(z, 2) + ' ZRO' : c.deployed ? (c.open ? 'open' : 'closed') : 'soon'}</span></button>`; }).join('');
+    $$('#zbChains button').forEach(b => b.onclick = () => { st.chain = b.dataset.c; renderForm(); });
+    const amt = toWei($('#zbAmt').value), bps = st.mode === 'auto' ? 50 : 30;
+    const fee = (amt * BigInt(bps)) / 10000n, recv = ((amt - fee) / 10n ** 12n) * 10n ** 12n;
+    const c = C();
+    $('#zbLines').innerHTML = `<div class="kv"><span>Rookery fee (${bps / 100}%${st.mode === 'auto' ? ', only when it fires' : ''})</span><b>${amt ? W(fee) + ' ZRO' : '—'}</b></div>
+      <div class="kv"><span>You receive on Zero</span><b class="up">${amt ? W(recv) + ' ZRO' : '—'}</b></div>
+      <div class="kv"><span>LayerZero network fee</span><b>${st.mode === 'auto' ? `from your deposit: ${W(c.deposit || '0', 4)} ${esc(nat())}, unused comes back` : c.open ? 'quoted when you click' : 'route closed now'}</b></div>
+      ${st.mode === 'auto' ? `<div class="kv"><span>Gas of the bridge</span><b class="up">paid by Rookery</b></div>` : ''}
+      <div class="kv"><span>To</span><b>your same address on Zero, always</b></div>`;
+    const go = $('#zbGo');
+    if (!st.from) { go.textContent = 'Connect wallet'; go.disabled = false; return; }
+    if (!c.deployed) { go.textContent = `Not live on ${c.name || 'this chain'} yet`; go.disabled = true; return; }
+    go.disabled = false;
+    go.textContent = st.mode === 'auto' ? `Sign up on ${c.name} (2 signatures)` : c.open ? `Bridge now from ${c.name}` : `Route closed on ${c.name}: use Auto-bridge`;
+    if (st.mode === 'now' && !c.open) go.disabled = true;
+  };
+  const renderMe = () => {
+    const M = st.me; if (!M) return;
+    const z = M.zero;
+    $('#zbZero').innerHTML = `<div class="zb-big"><b>${W(z.live != null ? z.live : z.delivered, 4)}</b><span>ZRO on Zero</span></div>
+      ${BigInt(z.inflight || '0') > 0n ? `<div class="kv"><span>On the way (LayerZero verifying)</span><b>${W(z.inflight)} ZRO</b></div>` : ''}
+      ${BigInt(z.otherAddresses || '0') > 0n ? `<div class="kv"><span>Sent from this wallet to other Zero addresses</span><b class="mu">${W(z.otherAddresses)} ZRO</b></div>` : ''}
+      <div class="kv"><span>Source</span><b class="mu">${esc(z.source)}</b></div>
+      <div class="kv"><span>Address on Zero</span><b class="mono">${esc(short(M.address))}</b></div>
+      ${(M.history || []).slice(0, 6).map(h => `<div class="kv"><span>${esc(st.info?.chains?.[h.chain]?.name || h.chain)} · ${h.kind === 'Fired' ? 'auto' : 'manual'}</span><b class="${h.status === 'DELIVERED' ? 'up' : 'mu'}">${W(h.bridged, 2)} ZRO · ${esc(h.status)}</b></div>`).join('')}`;
+    const orders = Object.entries(M.chains).filter(([, c]) => c.order);
+    $('#zbOrders').innerHTML = orders.length ? orders.map(([k, c]) => { const ci = st.info?.chains?.[k] || {}; return `<div class="zb-order"><div><b>${W(c.order.amount, 2)} ZRO</b> on ${esc(ci.name || k)}<span class="mu">deposit ${W(c.order.deposit, 4)} ${esc(ci.native || '')} · waits for the route on this chain</span></div>
+      <div class="zb-ob">${ci.open ? `<button class="btn sm up" data-fire="${k}">Bridge now</button>` : ''}<button class="btn sm ghost" data-cancel="${k}">Cancel</button></div></div>`; }).join('') : '<p class="mu">None yet.</p>';
+    $$('[data-cancel]').forEach(b => b.onclick = () => act(b.dataset.cancel, 'cancel', b));
+    $$('[data-fire]').forEach(b => b.onclick = () => act(b.dataset.fire, 'fire', b));
+    renderForm();
+  };
+  const loadInfo = async () => { try { st.info = await api('/zbridge/info?r=' + Math.random()); renderInfo(); } catch { /* next tick */ } };
+  const loadMe = async () => { if (!st.from) return; try { st.me = await api('/zbridge/me?addr=' + st.from + '&r=' + Math.random()); renderMe(); } catch { /* next tick */ } };
+  const sendAll = async (prep, btn) => {
+    await EVMW.ensureChain(prep.chainId);
+    const code = await EVMW.eth().request({ method: 'eth_getCode', params: [st.from, 'latest'] }).catch(() => '0x');
+    if (code && code !== '0x') throw new Error('Smart-contract wallets do not exist on Zero: use a normal wallet (MetaMask, Rabby…)');
+    for (const t of prep.txs) {
+      btn.textContent = `${t.label}: confirm in your wallet…`;
+      const h = await EVMW.eth().request({ method: 'eth_sendTransaction', params: [{ from: st.from, to: t.to, data: t.data, value: t.value }] });
+      btn.textContent = `${t.label}: waiting for the block…`;
+      await wait(h); st.lastTx = { chain: st.chain, hash: h };
+    }
+  };
+  const act = async (chain, action, btn) => {
+    const label = btn.textContent; btn.disabled = true;
+    try { const prep = await api('/zbridge/prep', { chain, from: st.from, action }); await sendAll(prep, btn); toast(action === 'cancel' ? 'Cancelled: your deposit is back' : 'Sent to Zero'); await loadMe(); await loadInfo(); }
+    catch (e) { toast(esc(errm(e)), 'bad'); }
+    btn.disabled = false; btn.textContent = label;
+  };
+  $$('.zb-tabs button').forEach(b => b.onclick = () => { st.mode = b.dataset.m; renderForm(); });
+  $('#zbAmt').oninput = renderForm;
+  $('#zbMax').onclick = () => { const z = st.me?.chains?.[st.chain]?.zro; if (z) { $('#zbAmt').value = (Number(BigInt(z) / 10n ** 12n) / 1e6).toString(); renderForm(); } };
+  $('#zbFind').oninput = (e) => { const v = e.target.value.trim().toLowerCase(); st.find = /^0x[0-9a-f]{40}$/.test(v) ? v : null; renderInfo(); };
+  $('#zbCkGo').onclick = async () => {
+    const tx = $('#zbCkTx').value.trim(); if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) { $('#zbCkOut').textContent = 'Paste a transaction hash (0x + 64 characters).'; return; }
+    $('#zbCkOut').textContent = 'Checking…';
+    try { const r = await api(`/zbridge/status?chain=${$('#zbCkChain').value}&tx=${tx}`); $('#zbCkOut').innerHTML = `LayerZero status: <b class="${r.lz === 'DELIVERED' ? 'up' : ''}">${esc(r.lz || 'unknown')}</b>${r.dst_tx ? ` · Zero tx <span class="mono">${esc(short(r.dst_tx))}</span>` : ''} · <a href="https://layerzeroscan.com/tx/${esc(tx)}" target="_blank" rel="noopener">LayerZero Scan ↗</a>`; }
+    catch (e) { $('#zbCkOut').textContent = String(e.message || e); }
+  };
+  $('#zbGo').onclick = async () => {
+    const btn = $('#zbGo'), label = btn.textContent;
+    try {
+      if (!st.from) { st.from = (await EVMW.account()).toLowerCase(); await loadMe(); renderForm(); return; }
+      if (!$('#zbOk').checked) throw new Error('Tick the box to confirm you understand the ZRO is locked on Zero until it has a public RPC');
+      const amount = toWei($('#zbAmt').value); if (amount <= 0n) { $('#zbAmt').focus(); throw new Error('Enter an amount'); }
+      btn.disabled = true; btn.textContent = 'Preparing…';
+      const prep = await api('/zbridge/prep', { chain: st.chain, from: st.from, action: st.mode === 'auto' ? 'signup' : 'bridge', amount: amount.toString() });
+      if (prep.closed) throw new Error(`Route closed on ${C().name} right now: use the Auto-bridge, it goes the second it opens`);
+      await sendAll(prep, btn);
+      toast(st.mode === 'auto' ? `Signed up: your ZRO goes the moment the route opens on ${C().name}` : 'Sent to Zero: LayerZero is verifying it');
+      $('#zbAmt').value = ''; await loadMe(); await loadInfo();
+    } catch (e) { toast(esc(errm(e)), 'bad'); }
+    btn.disabled = false; btn.textContent = label; renderForm();
+  };
+  try { const a = await RHW.peek(); if (a) st.from = a.toLowerCase(); } catch { /* no wallet */ }
+  await loadInfo(); await loadMe();
+  setTimer(loadInfo, 3000, true);
+  setTimer(loadMe, 10000, true);
 }

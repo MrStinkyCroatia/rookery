@@ -9,6 +9,7 @@ import { installWatch } from './watch.js';
 import { installZeroMig } from './zeromig.js';
 import { installTerminal } from './terminal.js';
 import { installRouter } from './router.js';
+import { installZBridge } from './zbridge.js';
 import { XB_NETS, XB_SOON, xbQuote, xbStatus, xbSubmit, xbStellarXdr, xbStellarSubmit, TERMINAL as XB_DONE } from './xbridge.js';
 import { StellarIO, ST_NETS, xlm2wei, wei2xlm, assetCode, issuerFromSeed, verifySep53 } from './stellar.js';
 import { matchOrder, ORDER_TTL_MS } from './orders.js';
@@ -2892,6 +2893,24 @@ export class Books {
       const user = this.session(req);
 
       /* public */
+      // ZRO -> Zero bridge (manual in one tx, auto in LayerZero's windows, cancel anytime)
+      if (method === 'GET' && p === '/zbridge/info') return json(this.zbrInfo());
+      if (method === 'GET' && p === '/zbridge/me') {
+        const a = String(url.searchParams.get('addr') || '');
+        if (!/^0x[0-9a-fA-F]{40}$/.test(a)) return json({ error: 'wallet address required' }, 400);
+        return json(await this.zbrMe(a));
+      }
+      if (method === 'POST' && p === '/zbridge/prep') {
+        const b = await req.json().catch(() => ({}));
+        if (!/^0x[0-9a-fA-F]{40}$/.test(String(b.from || ''))) return json({ error: 'wallet address required' }, 400);
+        if (b.amount != null && !/^\d{1,40}$/.test(String(b.amount))) return json({ error: 'amount (wei) required' }, 400);
+        return json(await this.zbrPrep(b));
+      }
+      if (method === 'GET' && p === '/zbridge/status') {
+        const tx = String(url.searchParams.get('tx') || '');
+        if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return json({ error: 'transaction hash required' }, 400);
+        return json(await this.zbrStatus(url.searchParams.get('chain') || 'eth', tx));
+      }
       // trade any launchpad's token through the Rookery Router (user's own wallet, 0.5% to the $臭企鹅 buy & burn)
       if (method === 'GET' && p === '/terminal/route') {
         const n = ['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero';
@@ -3502,6 +3521,17 @@ export class Books {
             report.reserveEth = Number(resEth) / 1e18;
           });
           return json({ ok: true, ...report });
+        }
+        if (p === '/admin/zbridge') {
+          const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
+          if (b.deploy) return json(await this.zbrDeploy(b.deploy, b));
+          if (b.fund) return json(await this.zbrFund(b.fund, b));
+          if (b.balances) return json({ addrs: this.zbrAddr(), balances: await this.zbrBalances() });
+          if (b.tick) return json({ live: await this.zbrTick() });
+          if (b.index) return json(await this.zbrIndex());
+          if (b.pause) { const { ZB_ABI } = await import('./zbridge.js'); return json(await this.zbrOwnerTx(b.pause.chain, ZB_ABI.encodeFunctionData('setPaused', [!!b.pause.on]))); }
+          if (b.public != null) { this.setMeta('zb_public', b.public ? '1' : '0'); return json({ ok: true, public: !!b.public }); }
+          return json({ addrs: this.zbrAddr(), cfg: this.zbrCfg(), info: this.zbrInfo() });
         }
         if (p === '/admin/router') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};
@@ -4254,3 +4284,4 @@ installWatch(Books, { now });
 installZeroMig(Books, { B, WEI, now, vQuote });
 installTerminal(Books, { now });
 installRouter(Books);
+installZBridge(Books, { now });
