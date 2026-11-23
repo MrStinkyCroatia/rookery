@@ -263,12 +263,13 @@ export function installZBridge(Cls, H) {
     if (row.lz === 'DELIVERED' || (row.lz_checked && now() - row.lz_checked < 20000)) return row;
     try {
       const r = await fetch(`https://scan.layerzero-api.com/v1/messages/tx/${row.tx}`, { headers: LZH, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) throw new Error('scan ' + r.status);
       const j = await r.json(); const m = (j.data || []).find(x => !row.guid || x.guid === row.guid) || (j.data || [])[0];
       const status = m?.status?.name || (m ? 'INFLIGHT' : 'PENDING');
       const dst = m?.destination?.tx?.txHash || m?.dstTxHash || null;
       this.sql.exec('UPDATE zb_ev SET lz=?, dst_tx=?, lz_checked=? WHERE chain=? AND tx=? AND idx=?', status, dst, now(), row.chain, row.tx, row.idx);
       return { ...row, lz: status, dst_tx: dst };
-    } catch { return row; }
+    } catch (e) { this.setMeta('zbr_scan_err', String(e.message || e).slice(0, 80)); return row; }
   };
 
   P.zbrExternal = async function (u) {
