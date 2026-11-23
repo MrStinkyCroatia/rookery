@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/styles.css?v=20261123zb5">
+<link rel="stylesheet" href="/styles.css?v=20261123zb6">
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" defer></script>
 </head>
@@ -28,10 +28,12 @@
       <a href="#/terminal" data-nav="terminal">Terminal</a>
       <a href="#/create" data-nav="create">Create</a>
       <a href="#/bridge" data-nav="bridge">Bridge</a>
+      <a href="#/zbridge" data-nav="zbridge" class="nav-zb"><img src="/assets/chains/zero.svg" alt="">Bridge ZRO</a>
       <a href="#/points" data-nav="points">Points</a>
       <a href="#/docs" data-nav="docs">Docs</a>
     </nav>
     <div class="top-r">
+      <a class="pill docs-m" href="#/docs" title="Docs">Docs</a>
       <span class="pill hide-m num" id="zroPill"><span class="zro-ico" id="pxIco">Z</span><span id="pxLbl">ZRO</span><b id="zroPx">—</b><span id="zroCh" class="mono"></span></span>
       <a class="pill hide-m num" id="burnPill" href="#/proofs/burns" title="0.5% of every trade buys &amp; burns $臭企鹅"><img src="/assets/penguin/mark.webp" alt="" style="width:14px;height:20px;filter:invert(1)"><span class="mono">$臭企鹅 BURN</span><b id="burnPx">—</b></a>
       <a class="pill app-pill" id="appPill" href="#" title="Rookery for Android is coming soon"><svg class="and-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M17.6 9.48l1.84-3.18a.38.38 0 0 0-.66-.38l-1.86 3.22A11.4 11.4 0 0 0 12 8.2c-1.77 0-3.43.38-4.92.94L5.22 5.92a.38.38 0 0 0-.66.38L6.4 9.48A10.8 10.8 0 0 0 1 18h22a10.8 10.8 0 0 0-5.4-8.52zM7 15.25a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5zm10 0a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5z"/></svg><span class="app-l">Android app</span><span class="soon">SOON</span></a>
@@ -67,7 +69,7 @@
   <a href="#/bridge" data-nav="bridge"><span>⇄</span>Bridge</a>
   <a href="#/points" data-nav="points"><span>★</span>Points</a>
   <a href="#/wallet" data-nav="wallet"><span>◈</span>Wallet</a>
-  <a href="#/docs" data-nav="docs"><span>?</span>Docs</a>
+  <a href="#/zbridge" data-nav="zbridge" class="mnav-zb"><span><img src="/assets/chains/zero.svg" alt=""></span>To Zero</a>
 </nav>
 
 <footer class="foot">
@@ -81,6 +83,6 @@
   </div>
 </footer>
 <div class="toast-wrap" id="toasts"></div>
-<script src="/app.js?v=20261123zb5" defer></script>
+<script src="/app.js?v=20261123zb6" defer></script>
 </body>
 </html>

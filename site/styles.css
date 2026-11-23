@@ -1361,3 +1361,24 @@ button.tx-tag{cursor:pointer}
 .zbx-r1 span,.zbx-r3 span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .zbx-det b{min-width:0}
 @media (max-width:560px){.zbx-onzero{padding:4px 9px 4px 4px;font-size:11px}.zbx-seg button{padding:7px 11px}.zbx-chain b{font-size:12.5px}.zbx-det div{flex-wrap:wrap}.zbx-det b{text-align:left;width:100%}}
+
+/* Bridge ZRO in the header */
+.nav-zb{display:inline-flex;align-items:center;gap:6px}
+.nav-zb img{width:16px;height:16px;flex:none}
+.nav-zb::after{content:'NEW';font:600 8.5px var(--mono);letter-spacing:.08em;color:#3DDC97;border:1px solid rgba(61,220,151,.4);border-radius:5px;padding:1px 4px}
+.docs-m{display:none}
+.mnav-zb span{display:flex;align-items:center;justify-content:center;height:17px}
+.mnav-zb span img{width:18px;height:18px}
+.mnav-zb.on span img{box-shadow:0 0 0 2px rgba(61,220,151,.5);border-radius:50%}
+@media (max-width:1180px){.nav-zb::after{display:none}}
+@media (max-width:760px){.docs-m{display:inline-flex;align-items:center;font-size:12px;padding:0 10px}}
+/* header: give the menu room on mid widths (least important pills go first) */
+@media (max-width:1320px){.brand .by{display:none}}
+@media (max-width:1240px){#appPill .app-l{display:none}}
+@media (max-width:1160px){#burnPill{display:none}}
+@media (max-width:1060px){#zroPill{display:none}}
+@media (max-width:980px) and (min-width:761px){#netLabel{display:none}#appPill{display:none}.nav a{padding:7px 7px;font-size:12.5px}}
+@media (max-width:880px) and (min-width:761px){.nav a{padding:7px 5px;font-size:12px}.nav-zb img{display:none}.brand em,.brand{font-size:16px}}
+@media (max-width:1160px) and (min-width:761px){.nav a{padding:8px 8px}}
+@media (max-width:1060px) and (min-width:761px){#netLabel{display:none}.nav a{padding:8px 7px;font-size:13px}}
+@media (max-width:900px) and (min-width:761px){.nav a{padding:7px 4px;font-size:11.5px}.top-in{gap:6px}}
