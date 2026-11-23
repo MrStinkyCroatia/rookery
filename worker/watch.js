@@ -435,7 +435,7 @@ export function installWatch(Cls, H) {
       // 2c' · Zero Terminal indexer: every new token on Zero, attributed to its launchpad (~every 5th tick)
       if (liveRpc && this.termTick && (n % 5 === 1 || opts.force)) {
         const trpc = (m2, p2) => zwRpc([liveRpc], m2, p2);
-        out.terminal = await this.termTick(trpc).catch(e => ({ error: String(e.message || e) }));
+        out.terminal = await this.termTick(trpc, 'zero', 5000).catch(e => ({ error: String(e.message || e) }));
       }
 
       // 2d · Zero explorer (official from LayerZero metadata + likely hosts), ~every 30 s, politely

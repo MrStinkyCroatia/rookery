@@ -454,10 +454,22 @@ export function installTerminal(Cls, H) {
       const head = parseInt(await rpc('eth_blockNumber', []), 16);
       let cur = Number(this.meta(ck) || 0);
       if (cur >= head) return { head, idle: true };
-      const to = Math.min(head, cur + Math.min(maxBlocks, chain === 'rh' ? 5000 : 100000));
-      const r = await this.termIndex(rpc, { from: cur + 1, to, chain });
-      this.setMeta(ck, String(to));
-      return { head, ...r };
+      // the span adapts: it grows while the node keeps up and shrinks when it refuses (log range/size limits),
+      // so a fast chain like Zero is indexed in big bites and a strict node still makes progress
+      const sk = 'term_span_' + chain;
+      let span = Number(this.meta(sk) || 0) || (chain === 'rh' ? 5000 : 5000);
+      span = Math.max(50, Math.min(span, maxBlocks, chain === 'rh' ? 5000 : 100000));
+      const to = Math.min(head, cur + span);
+      try {
+        const r = await this.termIndex(rpc, { from: cur + 1, to, chain });
+        this.setMeta(ck, String(to));
+        if (span < (chain === 'rh' ? 5000 : 50000)) this.setMeta(sk, String(Math.min(span * 2, chain === 'rh' ? 5000 : 50000)));
+        return { head, span, ...r };
+      } catch (e) {
+        this.setMeta(sk, String(Math.max(50, Math.floor(span / 4))));
+        this.setMeta('term_err', String(e.message || e).slice(0, 160));
+        return { head, span: Math.max(50, Math.floor(span / 4)), error: String(e.message || e) };
+      }
     } catch (e) { this.setMeta('term_err', String(e.message || e).slice(0, 160)); return { error: String(e.message || e) }; }
     finally { this._termBusyBy[chain] = false; }
   };
