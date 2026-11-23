@@ -2894,7 +2894,7 @@ export class Books {
 
       /* public */
       // ZRO -> Zero bridge (manual in one tx, auto in LayerZero's windows, cancel anytime)
-      if (method === 'GET' && p === '/zbridge/info') return json(this.zbrInfo());
+      if (method === 'GET' && p === '/zbridge/info') return json(await this.zbrInfo());
       if (method === 'GET' && p === '/zbridge/me') {
         const a = String(url.searchParams.get('addr') || '');
         if (!/^0x[0-9a-fA-F]{40}$/.test(a)) return json({ error: 'wallet address required' }, 400);
@@ -3531,7 +3531,7 @@ export class Books {
           if (b.index) return json(await this.zbrIndex());
           if (b.pause) { const { ZB_ABI } = await import('./zbridge.js'); return json(await this.zbrOwnerTx(b.pause.chain, ZB_ABI.encodeFunctionData('setPaused', [!!b.pause.on]))); }
           if (b.public != null) { this.setMeta('zb_public', b.public ? '1' : '0'); return json({ ok: true, public: !!b.public }); }
-          return json({ addrs: this.zbrAddr(), cfg: this.zbrCfg(), info: this.zbrInfo() });
+          return json({ addrs: this.zbrAddr(), cfg: this.zbrCfg(), info: await this.zbrInfo() });
         }
         if (p === '/admin/router') {
           const b = method === 'POST' ? await req.json().catch(() => ({})) : {};

@@ -343,14 +343,19 @@ export function installZBridge(Cls, H) {
   };
 
   // public page payload
-  P.zbrInfo = function () {
+  P.zbrInfo = async function () {
     this.zbrInit();
     const a = this.zbrAddr(), cfg = this.zbrCfg(), live = JSON.parse(this.meta('zb_live') || '{}');
     const s = this.sql.exec(`SELECT COUNT(DISTINCT user) users, COUNT(*) n, COALESCE(SUM(CAST(bridged AS REAL)),0) b FROM zb_ev WHERE kind IN ('Fired','Bridged')`).one();
     const signed = this.sql.exec(`SELECT COUNT(DISTINCT user) c FROM zb_ev WHERE kind='SignedUp'`).one().c;
     const zw = this.zwState?.() || {};
     let zroUsd = 0; try { zroUsd = this.zroUsd(); } catch { /* */ }
-    const recent = this.sql.exec(`SELECT chain, kind, user, bridged, tx, block, lz FROM zb_ev WHERE kind IN ('Fired','Bridged') ORDER BY block DESC LIMIT 30`).toArray();
+    // a delivery status only changes on LayerZero's side, so refresh a few of the newest undelivered rows per call
+    const stale = this.sql.exec(`SELECT * FROM zb_ev WHERE kind IN ('Fired','Bridged') AND COALESCE(lz,'')!='DELIVERED' ORDER BY block DESC LIMIT 4`).toArray();
+    const fresh = {};
+    for (const r of stale) { const u = await this.zbrLz(r); fresh[r.tx] = u.lz || r.lz; }
+    const recent = this.sql.exec(`SELECT chain, kind, user, bridged, tx, block, lz FROM zb_ev WHERE kind IN ('Fired','Bridged') ORDER BY block DESC LIMIT 30`).toArray()
+      .map(r => ({ ...r, lz: fresh[r.tx] || r.lz }));
     return {
       contract: a.contract, fees: { autoBps: 50, manualBps: 30 }, eid: ZB_EID, zeroRpcLive: Object.values(zw.rpc || {}).some(v => v.live),
       chains: Object.fromEntries(Object.entries(ZB_CHAINS).map(([k, c]) => [k, { name: c.name, chainId: c.chainId, native: c.native, deposit: c.deposit, explorer: c.explorer,
