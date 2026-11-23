@@ -355,6 +355,7 @@ export function installZBridge(Cls, H) {
       contract: a.contract, fees: { autoBps: 50, manualBps: 30 }, eid: ZB_EID, zeroRpcLive: Object.values(zw.rpc || {}).some(v => v.live),
       chains: Object.fromEntries(Object.entries(ZB_CHAINS).map(([k, c]) => [k, { name: c.name, chainId: c.chainId, native: c.native, deposit: c.deposit, explorer: c.explorer,
         deployed: !!cfg[k]?.deployed, open: live[k]?.open ?? (zw.bridge?.[k]?.state === 'open'), why: live[k]?.why || zw.bridge?.[k]?.why || '', waiting: live[k]?.pending?.length || 0, lastFire: live[k]?.lastFire || null }])),
+      zroUsd,
       stats: { users: s.users, bridges: s.n, bridgedZro: s.b / 1e18, volumeUsd: (s.b / 1e18) * zroUsd, signedUp: signed },
       recent: recent.map(r => ({ chain: r.chain, kind: r.kind === 'Fired' ? 'auto' : 'manual', user: r.user, bridged: r.bridged, tx: r.tx, status: r.lz || 'PENDING' })),
     };

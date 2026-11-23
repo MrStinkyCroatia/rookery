@@ -22,29 +22,38 @@ await cmd('Page.addScriptToEvaluateOnNewDocument', { source: `window.__w = []; w
   return null; } };` });
 const shot = async (f) => writeFileSync(f, Buffer.from((await cmd('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
 const out = {};
-await cmd('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+await cmd('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false });
 await cmd('Page.navigate', { url: `${BASE}/?nocache=${Date.now()}#/zbridge` }); await sleep(11000);
-out.page = await ev(`({ title: document.title, stats: [...document.querySelectorAll('.zb-stats div')].map(d => d.innerText.replace(/\\n/g, ' ')), pills: [...document.querySelectorAll('.zb-pill')].map(p => p.innerText),
-  chains: [...document.querySelectorAll('#zbChains button')].map(b => b.innerText.replace(/\\n/g, ' ')), btn: document.querySelector('#zbGo')?.innerText, warn: document.querySelector('.zb-warn')?.innerText.slice(0, 60),
-  inNav: !![...document.querySelectorAll('nav a, header a')].find(a => (a.getAttribute('href') || '').includes('zbridge')) })`);
+out.page = await ev(`({ stats: [...document.querySelectorAll('.zbx-kpis div')].map(d => d.innerText.replace(/\\n/g, ' ')), route: [...document.querySelectorAll('#zbRoute .zbx-rt')].map(b => b.innerText.replace(/\\n/g, ' ')),
+  onZero: document.querySelector('#zbOnZero')?.innerText, bal: document.querySelector('#zbBal')?.innerText, btn: document.querySelector('#zbGo')?.innerText, inNav: !![...document.querySelectorAll('nav a, header a')].find(a => (a.getAttribute('href') || '').includes('zbridge')) })`);
 await shot('out/zb_desktop.png');
-// auto-bridge sign-up on Ethereum: 10 ZRO
-await ev(`(() => { const a = document.querySelector('#zbAmt'); a.value = '10'; a.oninput(); document.querySelector('#zbChains button[data-c=eth]').click(); })()`); await sleep(400);
-out.lines = await ev(`[...document.querySelectorAll('#zbLines .kv')].map(k => k.innerText.replace(/\\n/g, ': '))`);
-out.withoutCheckbox = await ev(`(async () => { document.querySelector('#zbGo').click(); await new Promise(r => setTimeout(r, 1500)); return [...document.querySelectorAll('.toast, #toast, .toasts div')].map(t => t.innerText).join(' | ').slice(0, 120); })()`);
-await ev(`window.__w = []; document.querySelector('#zbOk').checked = true; document.querySelector('#zbGo').click()`); await sleep(9000);
-out.signupWallet = await ev(`window.__w.filter(x => x.method === 'eth_sendTransaction').map(x => ({ to: x.params[0].to, data: x.params[0].data.slice(0, 10), value: x.params[0].value }))`);
-out.toast = await ev(`[...document.querySelectorAll('.toast, #toast, .toasts div')].map(t => t.innerText).join(' | ').slice(0, 160)`);
-// bridge now while closed
-await ev(`document.querySelector('.zb-tabs button[data-m=now]').click()`); await sleep(500);
-out.nowClosed = await ev(`({ btn: document.querySelector('#zbGo').innerText, disabled: document.querySelector('#zbGo').disabled, lz: [...document.querySelectorAll('#zbLines .kv')].find(k => /LayerZero/.test(k.innerText))?.innerText.replace(/\\n/g, ': ') })`);
-out.zeroCard = await ev(`document.querySelector('#zbZero')?.innerText.replace(/\\n/g, ' | ').slice(0, 200)`);
-// status check of the real 1 ZRO test
+// chain picker
+await ev(`document.querySelector('#zbFrom').click()`); await sleep(400);
+out.modal = await ev(`[...document.querySelectorAll('#zbChainList .zbx-mi')].map(b => b.innerText.replace(/\\n/g, ' '))`);
+await shot('out/zb_modal.png');
+await ev(`document.querySelector('#zbChainList .zbx-mi[data-c=arb]').click()`); await sleep(300);
+out.picked = await ev(`document.querySelector('#zbFromName').innerText + ' / ' + document.querySelector('#zbBal').innerText`);
+await ev(`document.querySelector('#zbRoute .zbx-rt[data-c=eth]').click()`); await sleep(300);
+await ev(`(() => { const a = document.querySelector('#zbAmt'); a.value = '25'; a.oninput(); })()`); await sleep(300);
+out.form = await ev(`({ recv: document.querySelector('#zbRecv').innerText, usd: document.querySelector('#zbUsd').innerText, lines: [...document.querySelectorAll('#zbLines div')].map(k => k.innerText.replace(/\\n/g, ': ')), btn: document.querySelector('#zbGo').innerText, route: document.querySelector('#zbRouteLine').innerText.replace(/\\n/g, ' ') })`);
+await ev(`window.__w = []; document.querySelector('#zbGo').click()`); await sleep(1200);
+out.needTick = await ev(`document.querySelector('.zbx-ck').classList.contains('need')`);
+await ev(`document.querySelector('#zbOk').checked = true; document.querySelector('#zbGo').click()`); await sleep(9000);
+out.signupWallet = await ev(`window.__w.filter(x => x.method === 'eth_sendTransaction').map(x => ({ to: x.params[0].to.slice(0, 10), data: x.params[0].data.slice(0, 10), value: x.params[0].value }))`);
+await shot('out/zb_filled.png');
+await ev(`document.querySelector('.zbx-seg button[data-m=now]').click()`); await sleep(300);
+out.instantClosed = await ev(`({ btn: document.querySelector('#zbGo').innerText, disabled: document.querySelector('#zbGo').disabled })`);
+await ev(`document.querySelector('.zbx-tabs button[data-t=mine]').click()`); await sleep(500);
+out.mine = await ev(`[...document.querySelectorAll('#zbHist .zbx-li')].map(r => r.innerText.replace(/\\n/g, ' | '))`);
+await ev(`document.querySelector('.zbx-tabs button[data-t=track]').click()`); await sleep(300);
 await ev(`document.querySelector('#zbCkTx').value = '0x066b8cac6eaf7ef4b8fe4b21f7c259f8ed45b15590c95c6b241fdd29bac9510d'; document.querySelector('#zbCkGo').click()`); await sleep(4000);
-out.statusCheck = await ev(`document.querySelector('#zbCkOut')?.innerText`);
-await shot('out/zb_desktop2.png');
+out.track = await ev(`document.querySelector('#zbCkOut')?.innerText.replace(/\\n/g, ' | ')`);
+await ev(`document.querySelector('.zbx-hist').scrollIntoView()`); await sleep(400);
+await shot('out/zb_track.png');
 await cmd('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
 await cmd('Page.navigate', { url: `${BASE}/?nocache=${Date.now()}#/zbridge` }); await sleep(9000);
 out.mobileOverflow = await ev(`document.documentElement.scrollWidth > innerWidth`);
+out.mobileFit = await ev(`[...document.querySelectorAll('.zbx-card, .zbx-panel, .zbx-kpis')].map(e => { const r = e.getBoundingClientRect(); return Math.round(r.left) + '..' + Math.round(r.right) + (r.left < 0 || r.right > innerWidth + 0.5 ? ' OUT' : ' ok'); })`);
+await ev(`document.querySelector('.zbx-card').scrollIntoView()`); await sleep(400);
 await shot('out/zb_mobile.png');
 console.log(JSON.stringify({ ...out, errors: errs }, null, 1)); chrome.kill(); process.exit(0);
