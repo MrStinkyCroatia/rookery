@@ -7,6 +7,7 @@ import { installLtcdep } from './ltcdep.js';
 import { installLtcaddr } from './ltcaddr.js';
 import { installWatch } from './watch.js';
 import { installZeroMig } from './zeromig.js';
+import { migrationWallet } from './migration-wallet.js';
 import { installTerminal } from './terminal.js';
 import { installRouter } from './router.js';
 import { installZBridge } from './zbridge.js';
@@ -4122,6 +4123,12 @@ export class Books {
 
       /* authed */
       if (!user) return json({ error: 'Log in to continue' }, 401);
+
+      if (p === '/migration/zero/recipient' && method === 'GET') return json(migrationWallet(this,user.id,'status',{},url.origin));
+      if (method === 'POST' && (p === '/migration/zero/recipient/challenge' || p === '/migration/zero/recipient/confirm')) {
+        const b = await req.json();
+        return json(migrationWallet(this,user.id,p.split('/').pop(),b,url.origin));
+      }
 
       if (method === 'GET' && p === '/terminal/bags') return json(this.termBags(['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero', user));
       if (method === 'GET' && /^\/migration\/(zero|giwa)\/me$/.test(p)) return json(await this.migMine(p.split('/')[2], user.id));

@@ -1964,6 +1964,10 @@ async function viewWallet() {
   <section class="wrap page">
     <div class="page-h"><div><h1>Wallet</h1><p>Deposit ZRO, ETH or XLM, trade any token, withdraw instantly.</p></div>
       <div style="text-align:right"><span class="mono mu">Balances</span><div class="bal-xl" id="bal"></div></div></div>
+    <section class="panel pb" style="margin-bottom:16px" aria-labelledby="migrationTitle"><h2 id="migrationTitle">Zero migration wallet</h2>
+      <p class="mu">Register a personal EVM wallet you control for your Zero tokens. Do not use an exchange deposit address. This registers a destination only; it does not move funds or approve spending.</p>
+      <p id="migrationState" aria-live="polite" style="overflow-wrap:anywhere">Checking your destination…</p>
+      <button type="button" class="btn" id="migrationLink" disabled>Connect migration wallet</button></section>
     <div id="pnlHero"></div>
     <div class="pay-sel" id="assetSel" style="margin:0 0 14px"><span class="mu">Currency</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button><button data-a="xlm">XLM</button></div>
     <div class="panel pb" id="ltcDep" style="margin:0 0 14px">
@@ -2024,6 +2028,24 @@ async function viewWallet() {
     </div>
   </section>`;
   const addrOf = () => (asset === 'eth' ? me.ethDepositAddress : asset === 'xlm' ? me.stellarDeposit?.address : me.depositAddress) || '';
+  const migrationBtn = $('#migrationLink'), migrationMsg = $('#migrationState'), path = '/migration/zero/recipient';
+  const paintRecipient = ({recipient,locked}) => {
+    migrationMsg.textContent = recipient ? 'Verified destination: ' + recipient.address : locked ? 'Enrollment is closed.' : 'No destination registered. Signing is free. A confirmed destination cannot be overwritten here.';
+    migrationBtn.hidden = !!recipient || locked; migrationBtn.disabled = !!recipient || locked;
+  };
+  api(path + '?r=' + Date.now()).then(paintRecipient).catch(() => { migrationMsg.textContent = 'Could not check your destination. Reload before registering.'; });
+  migrationBtn.onclick = async () => {
+    migrationBtn.disabled = true;
+    try {
+      if (!window.ethereum) throw new Error('Open Rookery in your EVM wallet browser or connect a wallet extension.');
+      const [address] = await window.ethereum.request({method:'eth_requestAccounts'});
+      const c = await api(path + '/challenge', {address});
+      migrationMsg.textContent = 'Check the full destination in your wallet before signing: ' + c.address;
+      const bytes = '0x' + Array.from(new TextEncoder().encode(c.message), x => x.toString(16).padStart(2,'0')).join('');
+      const signature = await window.ethereum.request({method:'personal_sign',params:[bytes,address]});
+      paintRecipient(await api(path + '/confirm', {nonce:c.nonce,signature}));
+    } catch (e) { migrationMsg.textContent = e.code === 4001 ? 'Signature cancelled. No destination was registered.' : (e.message || 'Could not verify the wallet.'); migrationBtn.disabled = false; }
+  };
   const paintQR = () => {
     if (!window.qrcode || !addrOf()) return;
     const q = window.qrcode(0, 'M'); q.addData(addrOf()); q.make();
