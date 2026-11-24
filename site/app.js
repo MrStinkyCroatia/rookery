@@ -2829,6 +2829,75 @@ async function viewBridge() {
   BRG.history();
 }
 
+
+/* ═══════════ TERMS / RISK GATE (must be accepted before the site is usable) ═══════════ */
+const TERMS_V = 1;
+const TERMS_KEY = 'rk_terms_v';
+const TERMS_HTML = `
+  <h3>1 · What this is</h3>
+  <p>Rookery is an experimental, parody software project around the meme token $臭企鹅 (Stinky Penguin). It is not a company, a fund or a regulated exchange, and it is not affiliated with, endorsed by or sponsored by LayerZero, Upbit or GIWA, Stellar, Robinhood, Uniswap or Litecoin, or any of their teams.</p>
+  <h3>2 · You can lose everything</h3>
+  <p>Tokens launched here can go to zero. Prices, liquidity and the ability to sell are not guaranteed. Nothing on this site is investment advice, a recommendation or an offer of financial services, and no returns or yields are promised anywhere.</p>
+  <h3>3 · How balances are held</h3>
+  <p>Networks marked pre-market trade on Rookery's internal ledger: your balance is a claim on Rookery, not a token sitting in your wallet. Withdrawals follow the procedure in the Docs and can be limited, delayed or paused while a network migrates. Fully on-chain networks (Robinhood Chain, Stellar) are settled directly on their chains.</p>
+  <h3>4 · Dates and third parties</h3>
+  <p>Dates shown on the site, including LayerZero Zero's mainnet date, are not guarantees. Public RPC endpoints, bridge windows, third-party contracts, hosting and price feeds are outside our control and may be delayed, changed or blocked. Migration may be postponed or stopped if a precondition fails.</p>
+  <h3>5 · Smart contracts</h3>
+  <p>The contracts are not audited. Read them before you put money in. Keeper keys, deployer keys and fee addresses are separate; contract owners can pause or set fees where the code allows it. Nothing here protects you from a bug, an exploit or your own mistake.</p>
+  <h3>6 · Fees</h3>
+  <p>Trading charges 0.5% (used to buy and burn $臭企鹅), withdrawals and bridges have their own fees shown before you sign, and network gas is paid by whoever sends the transaction. Fees can change; the page shows the current ones.</p>
+  <h3>7 · Your responsibility</h3>
+  <p>You are responsible for your wallet, your keys and your own decisions. Never share a seed phrase. Do not use this site if using it is illegal where you live, if you are on a sanctions list, or if you are acting for someone else without authority.</p>
+  <h3>8 · No warranty</h3>
+  <p>The site and the contracts are provided "as is", without warranty of any kind. To the maximum extent permitted by law, the project and its contributors are not liable for any loss arising from use of the site or the contracts.</p>
+  <h3>9 · Changes</h3>
+  <p>These terms can change. When they do, the version number goes up and you will be asked to accept the new version before using the site again.</p>`;
+
+function termsAccepted() { try { return Number(localStorage.getItem(TERMS_KEY) || 0) >= TERMS_V; } catch { return false; } }
+async function acceptTerms() {
+  try { localStorage.setItem(TERMS_KEY, String(TERMS_V)); } catch { /* private mode */ }
+  if (S.me) api('/terms/accept', { v: TERMS_V }).catch(() => null);   // a record on the account, not just the browser
+}
+function termsGate() {
+  if (termsAccepted() || document.getElementById('tgate')) return;
+  const el = document.createElement('div');
+  el.className = 'tgate'; el.id = 'tgate';
+  el.innerHTML = `<div class="tgate-card" role="dialog" aria-modal="true" aria-label="Terms and risk">
+    <div class="tgate-h"><img src="/assets/logo-256.png" alt=""><div><b>Before you use Rookery</b><span>Read once, then confirm. Version ${TERMS_V}.</span></div></div>
+    <ul class="tgate-list">
+      <li><b>Experimental.</b> A parody project and a work in progress: things can change, break or stop without notice.</li>
+      <li><b>You can lose everything.</b> Tokens can go to zero. Nothing here is investment advice and no returns are promised.</li>
+      <li><b>Pre-market balances live on our ledger.</b> Until a network is on-chain, your balance is a claim on Rookery, not a token in your wallet.</li>
+      <li><b>Dates are not guarantees.</b> Zero's RPC, bridge windows and migrations are outside our control and can slip.</li>
+      <li><b>Contracts are not audited.</b> Use small amounts and your own judgment.</li>
+    </ul>
+    <details class="tgate-more"><summary>Read the full terms</summary><div class="tgate-full">${TERMS_HTML}</div></details>
+    <label class="tgate-ck"><input type="checkbox" id="tg1"><span>I understand this is an experiment and I can lose all of my funds.</span></label>
+    <label class="tgate-ck"><input type="checkbox" id="tg2"><span>I understand pre-market balances are held on Rookery's ledger until a migration happens.</span></label>
+    <label class="tgate-ck"><input type="checkbox" id="tg3"><span>I accept the terms above and I am allowed to use this site where I live.</span></label>
+    <button class="btn lg wide" id="tgGo" disabled>Enter Rookery</button>
+    <p class="tgate-f">If you do not accept, close this page. Do not invest if you do not feel comfortable with it.</p>
+  </div>`;
+  document.body.appendChild(el);
+  document.documentElement.style.overflow = 'hidden';
+  const upd = () => { $('#tgGo').disabled = !($('#tg1').checked && $('#tg2').checked && $('#tg3').checked); };
+  ['tg1', 'tg2', 'tg3'].forEach(id => { $('#' + id).onchange = upd; });
+  $('#tgGo').onclick = async () => {
+    await acceptTerms();
+    el.remove(); document.documentElement.style.overflow = '';
+  };
+}
+
+function viewTerms() {
+  document.title = 'Terms · Rookery';
+  app.innerHTML = `<section class="wrap terms-page">
+    <h1>Terms and risk</h1>
+    <p class="mu">Version ${TERMS_V} · applies to rookery.stinkypenguin.xyz and everything it links to.</p>
+    <div class="terms-body">${TERMS_HTML}</div>
+    <p class="mu" style="margin-top:22px">Parody project, not affiliated with LayerZero, Upbit/GIWA, Stellar, Robinhood, Uniswap or Litecoin. Nothing on this site is financial advice.</p>
+  </section>`;
+}
+
 /* ═══════════ AUTH ═══════════ */
 function viewAuth(mode) {
   document.title = (mode === 'signup' ? 'Sign up' : 'Log in') + ' — Rookery';
@@ -2847,6 +2916,7 @@ function viewAuth(mode) {
       ${mode === 'signup' ? '<div class="f"><label>Username</label><input class="inp" name="username" placeholder="satoshi" autocomplete="username" required></div>' : ''}
       <div class="f"><label>Email</label><input class="inp" name="email" type="email" placeholder="you@email.com" autocomplete="email" required></div>
       <div class="f"><label>Password</label><input class="inp" name="password" type="password" placeholder="${mode === 'signup' ? 'At least 8 characters' : '••••••••'}" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}" required></div>
+      ${mode === 'signup' ? '<label class="auth-ck"><input type="checkbox" name="terms" value="1" required><span>I accept the <a href="#/terms" target="_blank" rel="noopener">terms</a> and the risks described there.</span></label>' : ''}
       <div class="err" id="aErr"></div>
       <button class="btn lg wide" type="submit">${mode === 'signup' ? 'Create account' : 'Log in'}</button>
     </form>
@@ -2870,7 +2940,7 @@ function viewAuth(mode) {
     $('#aErr').textContent = '';
     try {
       const refNow = (() => { try { return new URLSearchParams(location.search).get('ref') || localStorage.getItem('pl_ref') || ''; } catch { return ''; } })();
-      const body = mode === 'signup' ? { ...fd, ref: refNow } : fd;
+      const body = mode === 'signup' ? { ...fd, ref: refNow, terms: fd.terms ? 1 : 0 } : fd;
       await api(mode === 'signup' ? '/auth/signup' : '/auth/login', body);
       if (mode === 'signup') localStorage.removeItem('pl_ref');
       await loadMe();
@@ -3249,6 +3319,7 @@ async function route() {
     else if (a === 'u') await viewProfile(decodeURIComponent(b || ''));
     else if (a === 'login' || a === 'signup') viewAuth(a);
     else if (a === 'docs') viewDocs();
+    else if (a === 'terms') viewTerms();
     else if (a === 'bridge') await viewBridge();
     else if (a === 'proofs') await viewProofs(b);
     else if (a === 'chain' && typeof ocRoute === 'function') await ocRoute(b, c, d);
@@ -3282,6 +3353,7 @@ async function route() {
   setInterval(() => { const z = $('#zeroCd'); if (z) z.textContent = countdown(S.stats?.networks?.zero?.launchAt); }, 30000);
   window.addEventListener('hashchange', route);
   route();
+  termsGate();
 })();
 
 /* ═══════════ ROBINHOOD CHAIN · ON-CHAIN LAUNCHPAD ═══════════

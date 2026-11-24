@@ -386,6 +386,10 @@ export class Books {
     q(`INSERT INTO meta (k,v) VALUES ('burn_last','0') ON CONFLICT(k) DO NOTHING`);
   }
 
+  // version of the terms a user accepted, kept on the account (not only in the browser)
+  termsInit() {
+    for (const c of ['terms_v INTEGER', 'terms_ts INTEGER']) { try { this.sql.exec(`ALTER TABLE users ADD COLUMN ${c}`); } catch { /* exists */ } }
+  }
   meta(k) { return this.sql.exec('SELECT v FROM meta WHERE k=?', k).toArray()[0]?.v ?? null; }
   setMeta(k, v) { this.sql.exec('INSERT INTO meta (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', k, String(v)); }
 
@@ -3104,6 +3108,7 @@ export class Books {
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Enter a valid email');
         if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) throw new Error('Username: 3–20 letters, numbers or _');
         if (String(b.password || '').length < 8) throw new Error('Password must be at least 8 characters');
+        if (Number(b.terms) !== 1) throw new Error('Accept the terms and the risks before creating an account');
         if (this.sql.exec('SELECT 1 FROM users WHERE email=?', email).toArray().length) throw new Error('Email already registered');
         if (this.sql.exec('SELECT 1 FROM users WHERE username=? COLLATE NOCASE', username).toArray().length) throw new Error('Username taken');
         const salt = randHex(16);
@@ -3117,6 +3122,7 @@ export class Books {
         this.sql.exec(`INSERT INTO users (email,username,pass_hash,salt,dep_index,dep_address,created,referred_by) VALUES (?,?,?,?,?,?,?,?)`,
           email, username, hash, salt, idx, addr, now(), referredBy);
         const id = this.sql.exec('SELECT last_insert_rowid() id').one().id;
+        this.termsInit(); this.sql.exec('UPDATE users SET terms_v=1, terms_ts=? WHERE id=?', now(), id);
         if (referredBy) { this.award(referredBy, 'referral', 500, username); this.award(id, 'referral', 250, 'welcome'); }
         return json({ ok: true, username, ref: referredBy ? refCode : '' }, 200, { 'set-cookie': this.newSession(id) });
       }
@@ -4155,7 +4161,7 @@ export class Books {
           user.eth_dep_address = this.master().deriveChild(ETH_OFFSET + user.dep_index).address;
           this.sql.exec('UPDATE users SET eth_dep_address=? WHERE id=?', user.eth_dep_address, user.id);
         }
-        return json({
+        return json({ terms_v: this.sql.exec('SELECT terms_v FROM users WHERE id=?', user.id).toArray()[0]?.terms_v ?? 0,
           username: user.username, email: user.email, wallet: user.wallet || '', stellarWallet: user.stellar_wallet || '', bio: user.bio, avatar: user.avatar ? `/api/img/u/${user.id}` : '',
           zro: zro.toString(), zroUsd: (Number(zro) / 1e18) * usd, depositAddress: user.dep_address,
           eth: eth.toString(), ethUsd: (Number(eth) / 1e18) * this.ethUsd(), ethPrice: this.ethUsd(), ethDepositAddress: user.eth_dep_address,
@@ -4166,6 +4172,12 @@ export class Books {
           points: this.pointsOf(user.id), ref: this.refStats(user),
           transfers: this.sql.exec(`SELECT kind,chain,amount,txid,to_addr,status,note,ts,COALESCE(asset,'zro') asset FROM transfers WHERE user_id=? ORDER BY id DESC LIMIT 50`, user.id).toArray(),
         });
+      }
+      if (method === 'POST' && p === '/terms/accept') {
+        const b = await req.json().catch(() => ({}));
+        this.termsInit();
+        this.sql.exec('UPDATE users SET terms_v=?, terms_ts=? WHERE id=?', Number(b.v) || 0, now(), user.id);
+        return json({ ok: true, terms_v: Number(b.v) || 0 });
       }
       if (method === 'POST' && p === '/me') {
         const b = await req.json();
