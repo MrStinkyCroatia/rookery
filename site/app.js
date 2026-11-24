@@ -1964,10 +1964,16 @@ async function viewWallet() {
   <section class="wrap page">
     <div class="page-h"><div><h1>Wallet</h1><p>Deposit ZRO, ETH or XLM, trade any token, withdraw instantly.</p></div>
       <div style="text-align:right"><span class="mono mu">Balances</span><div class="bal-xl" id="bal"></div></div></div>
-    <section class="panel pb" style="margin-bottom:16px" aria-labelledby="migrationTitle"><h2 id="migrationTitle">Zero migration wallet</h2>
-      <p class="mu">Register a personal EVM wallet you control for your Zero tokens. Do not use an exchange deposit address. This registers a destination only; it does not move funds or approve spending.</p>
-      <p id="migrationState" aria-live="polite" style="overflow-wrap:anywhere">Checking your destination…</p>
-      <button type="button" class="btn" id="migrationLink" disabled>Connect migration wallet</button></section>
+    <section class="zm-card" aria-labelledby="migrationTitle">
+      <div class="zm-intro"><div class="zm-label"><img src="/assets/chains/zero.svg" alt=""> ZERO NETWORK <span>/</span> MIGRATION</div>
+        <h2 id="migrationTitle">Your receiving wallet</h2>
+        <p>Choose where to receive your tokens on Zero. A free signature confirms your address; it does not approve spending.</p></div>
+      <div class="zm-dest"><span class="zm-label">DESTINATION ADDRESS</span>
+        <p id="migrationState" role="status">Checking your account…</p>
+        <button type="button" class="btn zm-action" id="migrationLink" disabled>Connect wallet <span aria-hidden="true">→</span></button>
+        <small id="migrationHint">Use your own EVM wallet, not an exchange address. Once confirmed, it cannot be changed here.</small></div>
+      <div class="zm-rule"><b>What counts at migration?</b><p>Your balance at the snapshot, not at signup. Tokens sold before the snapshot are not included.</p></div>
+    </section>
     <div id="pnlHero"></div>
     <div class="pay-sel" id="assetSel" style="margin:0 0 14px"><span class="mu">Currency</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button><button data-a="xlm">XLM</button></div>
     <div class="panel pb" id="ltcDep" style="margin:0 0 14px">
@@ -2030,7 +2036,9 @@ async function viewWallet() {
   const addrOf = () => (asset === 'eth' ? me.ethDepositAddress : asset === 'xlm' ? me.stellarDeposit?.address : me.depositAddress) || '';
   const migrationBtn = $('#migrationLink'), migrationMsg = $('#migrationState'), path = '/migration/zero/recipient';
   const paintRecipient = ({recipient,locked}) => {
-    migrationMsg.textContent = recipient ? 'Verified destination: ' + recipient.address : locked ? 'Enrollment is closed.' : 'No destination registered. Signing is free. A confirmed destination cannot be overwritten here.';
+    migrationMsg.textContent = recipient ? recipient.address : locked ? 'Enrollment closed' : 'Not linked';
+    migrationMsg.closest('.zm-card').classList.toggle('zm-verified', !!recipient);
+    if (recipient || locked) $('#migrationHint').textContent = recipient ? 'Verified by wallet signature. No tokens have been moved by linking this address.' : 'This account has no registered destination.';
     migrationBtn.hidden = !!recipient || locked; migrationBtn.disabled = !!recipient || locked;
   };
   api(path + '?r=' + Date.now()).then(paintRecipient).catch(() => { migrationMsg.textContent = 'Could not check your destination. Reload before registering.'; });
