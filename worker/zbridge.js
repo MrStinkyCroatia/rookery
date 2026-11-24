@@ -166,8 +166,10 @@ export function installZBridge(Cls, H) {
   P.zbrFund = async function (chain, b = {}) {
     if (b.confirm !== 'SEND') throw new Error('pass confirm: "SEND"');
     const a = this.zbrAddr(); const v = BigInt(b.amountWei || 0); if (v <= 0n) throw new Error('amountWei required');
-    const s = await this.zbrSign(chk(chain), { to: a.bot, data: '0x', value: v }, { key: this.hotWallet().privateKey });
-    const h = await this.zbrBroadcast(chain, s.raw); return { ok: true, chain, to: a.bot, amountWei: v.toString(), hash: h, receipt: h ? !!(await this.zbrWait(chain, h)) : null };
+    const to = b.to ? getAddress(String(b.to)) : a.bot;                 // owner-approved gas for another operations wallet
+    if (b.to && v > 30_000_000_000_000_000n) throw new Error('cap: 0.03 native per transfer to a custom address');
+    const s = await this.zbrSign(chk(chain), { to, data: '0x', value: v }, { key: this.hotWallet().privateKey });
+    const h = await this.zbrBroadcast(chain, s.raw); return { ok: true, chain, to, amountWei: v.toString(), hash: h, receipt: h ? !!(await this.zbrWait(chain, h)) : null };
   };
   P.zbrBalances = async function () {
     const a = this.zbrAddr(), hot = this.hotWallet().address, out = {};
