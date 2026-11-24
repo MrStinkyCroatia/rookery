@@ -7,6 +7,7 @@ import { installLtcdep } from './ltcdep.js';
 import { installLtcaddr } from './ltcaddr.js';
 import { installWatch } from './watch.js';
 import { installZeroMig } from './zeromig.js';
+import { installZeroDist } from './zerodist.js';
 import { migrationWallet } from './migration-wallet.js';
 import { installTerminal } from './terminal.js';
 import { installRouter } from './router.js';
@@ -2874,6 +2875,7 @@ export class Books {
           timed('ltcscan', this.ltcScan().catch(e => ({ error: String(e?.message || e) }))),
           timed('watch', this.watchRun().catch(e => ({ error: String(e?.message || e) }))),
           timed('termgiwa', this.meta('giwa_rpc') && this.termTick ? this.termTick(this.netRpcFn('giwa'), 'giwa').catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
+          timed('zerodist', this.meta('zero_finalized') ? this.distTick('zero').catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
           timed('zerowd', (this.meta('zero_finalized') || this.meta('giwa_finalized')) ? this.zeroWdTick().catch(e => ({ error: String(e?.message || e) })) : Promise.resolve({ off: true })),
         ]);
         this.setMeta('cron_dur', JSON.stringify(dur));
@@ -2942,6 +2944,14 @@ export class Books {
       }
       if (method === 'GET' && p === '/terminal') {
         return json(this.termView({ net: url.searchParams.get('net') || 'zero', tab: url.searchParams.get('tab') || '', pad: url.searchParams.get('pad') || 'all', sort: url.searchParams.get('sort') || 'new', q: (url.searchParams.get('q') || '').slice(0, 60) }));
+      }
+      const proofM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)\/proof$/);
+      if (proofM) {                                                        // public; chain reads cached for a minute
+        const c = this._proofCache?.[proofM[1]];
+        if (c && Date.now() - c.t < 60000) return json(c.v);
+        const v = await this.distReport(proofM[1], { chain: true });
+        (this._proofCache = this._proofCache || {})[proofM[1]] = { t: Date.now(), v };
+        return json(v);
       }
       const migM = method === 'GET' && p.match(/^\/migration\/(zero|giwa)(\/addresses|\/snapshot\.json)?$/);
       if (migM) {
@@ -3628,6 +3638,10 @@ export class Books {
           if (b.fundPlan) return json(await this.zeroFundPlan(b.fundPlan));
           if (b.fundStatus) return json(await this.zeroFundStatus());
           if (b.wdTick) return json(await this.zeroWdTick());
+          if (b.dist === 'tick') return json(await this.distTick(net));
+          if (b.dist === 'report') return json(await this.distReport(net, { chain: !!b.chain }));
+          if (b.preflight) return json(await this.migPreflight(net, b.rpc ? { rpc: b.rpc } : {}));
+          if (b.autorun !== undefined) { this.setMeta('mig_autorun_' + net, b.autorun ? '1' : '0'); return json({ autorun: !!b.autorun }); }
           if (b.runStatus) return json({ network: net, status: JSON.parse(this.meta(net + '_run_status') || 'null'), state: JSON.parse(this.meta(net + '_run') || 'null'),
             keys: (() => { const K = this.netKeys(net); return { deployer: K.deployer.address, dex: K.dex.address, custody: K.custody.address }; })(), reserved: this.netAddrs(net) });
           if (b.creators) {
@@ -4131,6 +4145,7 @@ export class Books {
       }
 
       if (method === 'GET' && p === '/terminal/bags') return json(this.termBags(['giwa', 'litvm'].includes(url.searchParams.get('net')) ? url.searchParams.get('net') : 'zero', user));
+      if (method === 'GET' && /^\/migration\/(zero|giwa)\/mine$/.test(p)) return json(await this.distMine(p.split('/')[2], user.id));
       if (method === 'GET' && /^\/migration\/(zero|giwa)\/me$/.test(p)) return json(await this.migMine(p.split('/')[2], user.id));
       if (method === 'POST' && (p === '/zero/withdraw' || p === '/mig/withdraw')) return json(await this.netWithdraw(user, await req.json()));
       if (method === 'GET' && (p === '/zero/withdrawals' || p === '/mig/withdrawals')) { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created,net FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
@@ -4303,6 +4318,7 @@ installLtcdep(Books, { B, WEI, now, randHex });
 installLtcaddr(Books, { B, WEI, now });
 installWatch(Books, { now });
 installZeroMig(Books, { B, WEI, now, vQuote });
+installZeroDist(Books, { B, now });
 installTerminal(Books, { now });
 installRouter(Books);
 installZBridge(Books, { now });

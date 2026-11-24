@@ -6,7 +6,7 @@ export function migrationWallet(book, uid, op, input, origin) {
   sql.exec('CREATE TABLE IF NOT EXISTS zero_recipient_v1(uid INTEGER PRIMARY KEY, addr TEXT UNIQUE NOT NULL, confirmed INTEGER NOT NULL, message TEXT NOT NULL, signature TEXT NOT NULL)');
   sql.exec('CREATE TABLE IF NOT EXISTS zero_recipient_challenge(uid INTEGER PRIMARY KEY, addr TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, origin TEXT NOT NULL, message TEXT NOT NULL)');
   const current = () => sql.exec('SELECT addr AS address, confirmed FROM zero_recipient_v1 WHERE uid=?',uid).toArray()[0] || null;
-  const locked = () => !!book.meta('mig_snapshot_zero') || book.netPaused('zero') || book.meta('zero_finalized') === '1';
+  const locked = () => !book.meta('zero_finalized') && (!!book.meta('mig_snapshot_zero') || book.netPaused('zero'));   // closed only while the migration itself runs
   if(op === 'status') return {recipient:current(),locked:locked()};
   if(locked()) throw new Error('Migration enrollment is closed.');
   if(current()) throw new Error('A verified destination already exists for this account.');

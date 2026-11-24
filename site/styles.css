@@ -1391,6 +1391,28 @@ button.tx-tag{cursor:pointer}
 .zm-rule{grid-column:1/-1;display:flex;align-items:baseline;gap:12px;border-top:1px solid var(--line2);margin-top:20px;padding:12px 0}.zm-rule b{font-size:13px;white-space:nowrap}
 @media(max-width:760px){.zm-card{grid-template-columns:1fr;padding:18px 16px 0;gap:16px}.zm-rule{display:block;margin-top:0}.zm-rule p{margin-top:3px}.zm-intro h2{margin-top:10px}}
 @media(max-width:420px){.zm-dest{grid-template-columns:minmax(0,1fr)}.zm-dest .zm-action{grid-row:auto;grid-column:1;margin-top:5px}}
+/* migration proof page */
+.mgp{max-width:1080px;padding-top:28px;padding-bottom:60px}
+.mgp-head h1{font-size:clamp(26px,4vw,38px);margin:10px 0 8px;letter-spacing:-.02em}
+.mgp-head p{max-width:760px;line-height:1.6}
+.mgp-badge{display:inline-block;font:600 11px/1 var(--mono,ui-monospace,monospace);letter-spacing:.12em;padding:7px 10px;border:1px solid var(--line2);color:var(--mu)}
+.mgp-badge.ok{color:#3DDC97;border-color:#3DDC97}
+.mgp-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin:22px 0 16px}
+.mgp-kpis>div{background:var(--bg);padding:14px 16px;min-width:0}
+.mgp-kpis span{display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);margin-bottom:6px}
+.mgp-kpis b{font-size:18px;overflow-wrap:anywhere}
+.mgp .panel{margin-top:14px}.mgp .panel h3{font-size:15px;margin-bottom:10px}
+.mgp-scroll{overflow-x:auto}
+.mgp .mono{text-transform:none}
+.mgp-t{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+.mgp-t th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--line)}
+.mgp-t td{padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.mgp-t .r{text-align:right}
+.mgp-t a{color:inherit;text-decoration:underline;text-decoration-color:var(--line2);text-underline-offset:3px}
+.mgp-st{font:600 10px/1 var(--mono,ui-monospace,monospace);letter-spacing:.1em;text-transform:uppercase;padding:4px 6px;border:1px solid var(--line2);color:var(--mu)}
+.mgp-st.ok{color:#3DDC97;border-color:#3DDC97}.mgp-st.bad{color:#ff5c5c;border-color:#ff5c5c}
+@media(max-width:760px){.mgp-kpis{grid-template-columns:1fr 1fr}}
+
 /* terms gate + page */
 .tgate{position:fixed;inset:0;z-index:9500;background:rgba(4,4,5,.92);backdrop-filter:blur(6px);display:grid;place-items:center;padding:18px;overflow:auto}
 .tgate-card{width:100%;max-width:560px;background:var(--panel);border:1px solid var(--line2);border-radius:20px;padding:20px;display:flex;flex-direction:column;gap:10px;box-shadow:0 40px 120px -50px #000}

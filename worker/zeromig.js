@@ -3,7 +3,7 @@
 // state; holders stay custodial on Rookery and withdraw to their own Zero wallet (as the Docs promise).
 // The snapshot is taken once the Zero RPC is verified live (chain id 33002 + LayerZero endpoint code + moving blocks).
 import { getCreateAddress, getCreate2Address, keccak256, toUtf8Bytes, Wallet, Interface, getAddress, zeroPadValue, JsonRpcProvider } from 'ethers';
-import { zeroRun } from './zerorun.js';
+import { zeroRun, requiredReserve } from './zerorun.js';
 const enc = new TextEncoder();
 
 // Reserved Zero addresses. A dedicated HD child signs ONLY the Zero deployment: its first transaction on Zero (nonce 0)
@@ -465,14 +465,54 @@ export function installZeroMig(Cls, H) {
     return { taken: true, you: me, sha256: d.meta.sha256, takenAt: doc.takenAt, rows };
   };
 
+  // can the whole migration be carried out right now? read-only; used before anything is paused
+  P.migPreflight = async function (net, b = {}) {
+    const c = cfg(net), problems = [], info = {};
+    const rpc = this.netRpcFn(net, b), Kk = this.netKeys(net), A = this.netAddrs(net);
+    const chainId = Number(BigInt(await rpc('eth_chainId', [])));
+    if (c.chainId && chainId !== c.chainId) problems.push(`RPC answers chain id ${chainId}, expected ${c.chainId}`);
+    const ms = this.sql.exec(`SELECT * FROM markets WHERE network=?`, net).toArray().filter(m => !m.migrated && !m.graduated);
+    let need = 0n; for (const m of ms) need += requiredReserve(vQuote(m), B(m.reserve_tok)) + 1n;
+    const rows = this.sql.exec(`SELECT COUNT(*) c FROM balances b JOIN markets m ON m.id = substr(b.asset, 3) WHERE b.asset LIKE 't:%' AND b.amount != '0' AND m.network = ?`, net).one().c;
+    const [depBal, cusBal, depNonce, curveCode, gp] = await Promise.all([rpc('eth_getBalance', [Kk.deployer.address, 'latest']), rpc('eth_getBalance', [Kk.custody.address, 'latest']),
+      rpc('eth_getTransactionCount', [Kk.deployer.address, 'latest']), rpc('eth_getCode', [A.curve, 'latest']), rpc('eth_gasPrice', []).catch(() => '0x0')]);
+    const gasPrice = BigInt(gp) * 2n;
+    const deployGas = gasPrice * (12_000_000n + 2_600_000n * BigInt(ms.length));          // contracts + one import per token, generous
+    const distGas = gasPrice * 120_000n * BigInt(rows);
+    info.markets = ms.length; info.holderRows = rows; info.reservesWei = need.toString(); info.deployGasWei = deployGas.toString(); info.distributionGasWei = distGas.toString();
+    info.deployer = { address: Kk.deployer.address, balanceWei: BigInt(depBal).toString(), nonce: Number(BigInt(depNonce)) };
+    info.custody = { address: Kk.custody.address, balanceWei: BigInt(cusBal).toString() };
+    const f = (x) => (Number(x) / 1e18).toFixed(2);
+    if (BigInt(depBal) < need + deployGas) problems.push(`deployer ${Kk.deployer.address} holds ${f(BigInt(depBal))} ${c.native}, needs ${f(need + deployGas)} (${f(need)} curve reserves + gas)`);
+    if (BigInt(cusBal) < distGas) problems.push(`custody ${Kk.custody.address} holds ${f(BigInt(cusBal))} ${c.native} for gas, needs ${f(distGas)} to send ${rows} balances to holders`);
+    if (curveCode === '0x' && Number(BigInt(depNonce)) !== 0) problems.push(`deployer nonce is ${Number(BigInt(depNonce))}: the reserved addresses can no longer be met`);
+    try { await rpc('eth_estimateGas', [{ from: Kk.deployer.address, data: '0x600a600c600039600a6000f3602a60005260206000f3' }]); }
+    catch (e) { problems.push('the chain refuses a contract deployment from our deployer: ' + String(e.message || e).slice(0, 120)); }
+    if (!(await this.env.BACKUPS?.get('rookery/migration/zero_artifacts.json'))) problems.push('contract artifacts are missing in storage');
+    return { ok: problems.length === 0, network: net, chainId, problems, info };
+  };
+
   // called by the Zero watcher when an RPC passes the identity check; needs two consecutive confirmations
   P.migOnZeroRpc = async function (url, block, st) {
     if (this.meta('mig_auto_zero') === '0') return null;
     if (this.meta('mig_snapshot_zero')) return null;
     st.migConfirm = (st.migConfirm || 0) + 1;
     if (st.migConfirm < 2) return { waiting: st.migConfirm };
-    const r = await this.migSnapshot('zero', { reason: `Zero RPC verified live: ${url} block ${block}`, pause: true });
     const chat = this.meta('tg_owner_chat');
+    // nothing is paused unless the whole migration can actually be carried out right now
+    const pf = await this.migPreflight('zero', { rpc: url }).catch(e => ({ ok: false, problems: ['preflight failed: ' + String(e.message || e).slice(0, 160)] }));
+    if (!pf.ok) {
+      if (chat && this.env.TG_BOT_TOKEN && Date.now() - Number(this.meta('mig_pf_alert') || 0) > 3 * 3600e3) {
+        this.setMeta('mig_pf_alert', String(Date.now()));
+        await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
+          text: `⚠️ <b>Zero RPC is live, migration NOT started</b>\nTrading stays open on the ledger until this is fixed:\n• ${pf.problems.join('\n• ')}\nRPC ${url} (block ${block})` }).catch(() => null);
+      }
+      return { preflight: pf };
+    }
+    const r = await this.migSnapshot('zero', { reason: `Zero RPC verified live: ${url} block ${block}`, pause: true });
+    if (this.meta('mig_autorun_zero') !== '0' && !r.issues) {
+      try { r.run = await this.netMigrate('zero', { rpc: url, dex: JSON.parse(this.meta('mig_dex_zero') || '"own"'), chainId: 33002 }); } catch (e) { r.runError = String(e.message || e).slice(0, 200); }
+    }
     if (chat && this.env.TG_BOT_TOKEN) {
       await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
         text: `🧊 <b>Zero trading paused · 1:1 snapshot taken</b>\nRPC ${url} verified (block ${block}).\n${r.markets} markets · ${r.holderRows} holder rows · ${(Number(B(r.quoteReserveWei)) / 1e18).toFixed(2)} ZRO in reserves\nsha256 <code>${r.sha256}</code>${r.issues ? `\n⚠️ ${r.issues} issue(s) flagged, check /admin/migration` : ''}` }).catch(() => null);

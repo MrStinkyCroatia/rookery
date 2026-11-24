@@ -1972,7 +1972,7 @@ async function viewWallet() {
         <p id="migrationState" role="status">Checking your account…</p>
         <button type="button" class="btn zm-action" id="migrationLink" disabled>Connect wallet <span aria-hidden="true">→</span></button>
         <small id="migrationHint">Use your own EVM wallet, not an exchange address. Once confirmed, it cannot be changed here.</small></div>
-      <div class="zm-rule"><b>What counts at migration?</b><p>Your balance at the snapshot, not at signup. Tokens sold before the snapshot are not included.</p></div>
+      <div class="zm-rule"><b>What counts at migration?</b><p>Your balance at the snapshot, not at signup. Tokens sold before the snapshot are not included. After the migration every delivery has a transaction link on the <a href="#/migration">proof page</a>.</p></div>
     </section>
     <div id="pnlHero"></div>
     <div class="pay-sel" id="assetSel" style="margin:0 0 14px"><span class="mu">Currency</span><button data-a="zro">ZRO</button><button data-a="eth">ETH</button><button data-a="xlm">XLM</button></div>
@@ -2928,6 +2928,53 @@ function viewTerms() {
   </section>`;
 }
 
+/* ═══════════ MIGRATION PROOF ═══════════ */
+async function viewMigration() {
+  document.title = 'Zero migration proof · Rookery';
+  app.innerHTML = `<section class="wrap mgp"><p class="mu">Loading the migration proof…</p></section>`;
+  const r = Math.random();
+  const [p, mine] = await Promise.all([api('/migration/zero/proof?chain=1&r=' + r).catch(e => ({ error: e.message })), S.me ? api('/migration/zero/mine?r=' + r).catch(() => null) : null]);
+  const ex = p.explorer ? p.explorer.replace(/\/$/, '') : '';
+  const amt = (w) => { const n = Number(BigInt(w || 0) / 10n ** 12n) / 1e6; return n.toLocaleString('en-US', { maximumFractionDigits: n < 1000 ? 4 : 0 }); };
+  const tx = (h) => !h ? '<span class="mu">–</span>' : ex ? `<a class="mono" href="${esc(ex)}/tx/${esc(h)}" target="_blank" rel="noopener">${esc(h.slice(0, 10))}…${esc(h.slice(-6))} ↗</a>` : `<button class="mono zr-mini" data-copy="${esc(h)}">${esc(h.slice(0, 10))}…${esc(h.slice(-6))}</button>`;
+  const ad = (a) => !a ? '<span class="mu">–</span>' : ex ? `<a class="mono" href="${esc(ex)}/address/${esc(a)}" target="_blank" rel="noopener">${esc(a.slice(0, 8))}…${esc(a.slice(-6))} ↗</a>` : `<button class="mono zr-mini" data-copy="${esc(a)}">${esc(a.slice(0, 8))}…${esc(a.slice(-6))}</button>`;
+  const done = !!p.finalized, T = p.totals || {};
+  const state = p.error ? ['ERROR', 'Could not load the proof: ' + esc(p.error)] : done
+    ? [p.allOk ? 'ON-CHAIN · VERIFIED' : 'ON-CHAIN · CHECKING', `Every Zero token below is a real contract on Zero (chain ID 33002). For each one: sent to holders' wallets + reserved for holders without a wallet = the snapshot total, to the smallest unit.`]
+    : ['NOT MIGRATED YET', `Zero has no public RPC yet, so nothing has been deployed. Until then Zero tokens trade on Rookery's internal ledger. This page fills in by itself, with a transaction link for every step, the moment the migration runs.`];
+  const mineHtml = !S.me ? `<p class="mu">Log in to see your own tokens and the transaction that delivered each one.</p>`
+    : !mine?.taken ? `<p class="mu">No snapshot yet. Your receiving wallet: ${mine?.destination ? `<b class="mono">${esc(mine.destination)}</b>` : `<b>not linked</b> · <a href="#/wallet">link it in Wallet</a>`}</p>`
+    : !mine.rows.length ? `<p class="mu">Your account held no Zero tokens at the snapshot.</p>`
+    : `<p class="mu" style="margin-bottom:10px">Receiving wallet: ${mine.destination ? `<b class="mono">${esc(mine.destination)}</b>` : `<b>not linked</b> · your tokens are reserved for you · <a href="#/wallet">link a wallet</a> and they are sent automatically`}</p>
+      <div class="mgp-scroll"><table class="mgp-t"><thead><tr><th>Token</th><th class="r">At snapshot</th><th class="r">Still reserved</th><th>Delivered</th></tr></thead><tbody>${mine.rows.map(x => `<tr>
+        <td><a href="#/t/${esc(x.market)}"><b>$${esc(x.symbol)}</b></a></td><td class="r mono">${amt(x.snapshotWei)}</td><td class="r mono">${amt(x.reservedWei)}</td>
+        <td>${x.transfers.length ? x.transfers.map(t => `${tx(t.tx)} <span class="mgp-st ${t.status === 'sent' ? 'ok' : ''}">${esc(t.status)}</span>`).join('<br>') : `<span class="mu">${esc(x.note || (x.migrated ? 'waiting for a wallet' : 'not migrated yet'))}</span>`}</td></tr>`).join('')}</tbody></table></div>`;
+  app.innerHTML = `<section class="wrap mgp">
+    <div class="mgp-head"><span class="mgp-badge ${done && p.allOk ? 'ok' : ''}">${state[0]}</span><h1>Zero migration proof</h1><p class="mu">${state[1]}</p></div>
+    <div class="mgp-kpis">
+      <div><span>Tokens on-chain</span><b>${T.migrated || 0} / ${T.tokens || 0}</b></div>
+      <div><span>Balances sent to wallets</span><b>${T.sentRows || 0}</b></div>
+      <div><span>In the send queue</span><b>${T.queuedRows || 0}</b></div>
+      <div><span>Snapshot SHA-256</span><b class="mono" style="font-size:12px">${p.snapshot ? esc(p.snapshot.sha256.slice(0, 16)) + '…' : 'not taken'}</b></div>
+    </div>
+    <div class="panel pb"><h3>Your tokens</h3>${mineHtml}</div>
+    <div class="panel pb"><h3>Contracts</h3>
+      <div class="kv"><span>Bonding curve</span><b>${ad(p.contracts?.curve)}</b></div>
+      ${p.contracts?.deployTx?.curve ? `<div class="kv"><span>Curve deploy tx</span><b>${tx(p.contracts.deployTx.curve)}</b></div>` : ''}
+      <div class="kv"><span>Token factory</span><b>${ad(p.contracts?.factory)}</b></div>
+      <div class="kv"><span>Reserve for unlinked holders</span><b>${ad(p.contracts?.custody)}</b></div>
+      <div class="kv"><span>Snapshot file</span><b>${p.snapshot ? `<a href="/api/migration/zero/snapshot.json" target="_blank" rel="noopener">snapshot.json ↗</a>` : '<span class="mu">published at migration</span>'}</b></div>
+      <div class="kv"><span>Reserved addresses</span><b><a href="/api/migration/zero/addresses" target="_blank" rel="noopener">addresses ↗</a></b></div>
+    </div>
+    ${p.tokens?.length ? `<div class="panel pb"><h3>Every token</h3><p class="mu" style="margin-bottom:10px">Sent + in flight + reserved must equal the snapshot. The supply and the reserve balance are read live from the chain.</p>
+      <div class="mgp-scroll"><table class="mgp-t"><thead><tr><th>Token</th><th>Contract</th><th>Import tx</th><th class="r">Snapshot</th><th class="r">Sent to wallets</th><th class="r">Reserved</th><th>Check</th></tr></thead><tbody>${p.tokens.map(t => `<tr>
+        <td><a href="#/t/${esc(t.id)}"><b>$${esc(t.symbol)}</b></a> <span class="mu">${t.holders}</span></td><td>${ad(t.token)}</td><td>${tx(t.importTx)}</td>
+        <td class="r mono">${amt(t.snapshotWei)}</td><td class="r mono">${amt(BigInt(t.sentWei) + BigInt(t.inFlightWei))}</td><td class="r mono">${amt(t.reservedWei)}</td>
+        <td>${t.ok === null ? '<span class="mgp-st">pending</span>' : t.ok && t.supplyOk !== false && t.custodyCovers !== false ? '<span class="mgp-st ok">exact</span>' : '<span class="mgp-st bad">mismatch</span>'}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+    <p class="mu" style="font-size:12px;margin-top:14px">Rookery never asks you to sign on another site or to send anything to "claim". The only signature is the free wallet link in <a href="#/wallet">Wallet</a>. Parody project, not affiliated with LayerZero.</p>
+  </section>`;
+}
+
 /* ═══════════ AUTH ═══════════ */
 function viewAuth(mode) {
   document.title = (mode === 'signup' ? 'Sign up' : 'Log in') + ' — Rookery';
@@ -3074,12 +3121,13 @@ function viewDocs() {
         <li>As soon as a Zero RPC is verified live (chain ID 33002, the LayerZero endpoint present, blocks moving), trading on Rookery pauses for Zero tokens and a final snapshot of every balance is published with its SHA-256 at <span class="mono">/api/migration/zero/snapshot.json</span>. Pending holder rewards are paid out in ZRO first, so nothing is lost.</li>
         <li>Each token is deployed on Zero at its reserved address with a fixed supply of 1,000,000,000. Burned tokens stay burned.</li>
         <li>The bonding curve moves on-chain 1:1: the same tokens sold, the same ZRO reserve and the same price, to the wei. Trading continues on the on-chain Rookery curve, from your own wallet.</li>
-        <li>Your balance moves 1:1 too. It stays in your Rookery account, and you withdraw it to your own Zero wallet whenever you want, from the token page.</li>
+        <li>Your balance moves 1:1 too, on-chain. If you linked a receiving wallet in Wallet (a free signature), Rookery sends your exact snapshot balance to it and pays the gas. Without a linked wallet your balance stays reserved for you; link one at any time later and it is sent automatically.</li>
+        <li>Every step is public on the <a href="#/migration">migration proof page</a>: the deploy and import transaction of every token, and for each token the total sent to wallets plus the total still reserved, which must equal the snapshot.</li>
         <li>When an on-chain curve sells out, the token graduates to a DEX pool on Zero with the ZRO raised and the 200M reserved tokens. LP tokens go to the dead address, so the liquidity is locked forever. The DEX is confirmed at Zero mainnet: we wait to see which DEXes are live on day one, and choosing it never changes any reserved address.</li>
       </ol>
       <p><b>Taxes on Zero.</b> The creator's marketing and burn taxes keep working the same way. Holder rewards change form: on-chain they are paid in the token itself to wallets that hold it, instead of in ZRO on the pre-market ledger. Withdraw to your own wallet to receive them.</p>
       <p><b>GIWA and LitVM</b> follow the same steps when their mainnets launch.</p>
-      <div class="callout"><b>Nothing to claim, nothing to connect.</b> Rookery will never ask you to sign anything on a third-party site for the migration. Anything claiming to be a Rookery token on Zero at a different address than the one on its token page is fake.</div>
+      <div class="callout"><b>Nothing to claim on any other site.</b> The only action is linking your receiving wallet in Wallet on rookery.stinkypenguin.xyz: a free signature that approves nothing and moves nothing. Rookery never asks you to send funds or sign on a third-party site for the migration. Anything claiming to be a Rookery token on Zero at a different address than the one on its token page is not ours.</div>
 
       <h2 id="stellar">Stellar</h2>
       <p>Stellar is the one network on Rookery that is already live. A Stellar token is not a pre-market bet: it trades for real from day one, and at <b>${fmtUsd(S.stats.stellar?.gradUsd || 46000)}</b> market cap it graduates on-chain into an Aquarius pool on Stellar mainnet. Everything below is specific to Stellar; the curve itself works exactly like the other networks.</p>
@@ -3350,6 +3398,7 @@ async function route() {
     else if (a === 'login' || a === 'signup') viewAuth(a);
     else if (a === 'docs') viewDocs();
     else if (a === 'terms') viewTerms();
+    else if (a === 'migration') await viewMigration();
     else if (a === 'bridge') await viewBridge();
     else if (a === 'proofs') await viewProofs(b);
     else if (a === 'chain' && typeof ocRoute === 'function') await ocRoute(b, c, d);
