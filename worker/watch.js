@@ -138,9 +138,9 @@ export function installWatch(Cls, H) {
     },
     // LayerZero's testnet explorer lives at explorer.testnet.zero.layerzero.network; explorer.zero.network is Zerion's
     // sunset "ZERϴ" chain and must never be treated as Zero
-    explorerCandidates: ['https://explorer.zero.layerzero.network', 'https://zero-explorer.layerzero.network', 'https://scan.zero.layerzero.network'],
+    explorerCandidates: ['https://explorer.evm.zero.layerzero.network', 'https://explorer.zero.layerzero.network', 'https://zero-explorer.layerzero.network', 'https://scan.zero.layerzero.network'],
     explorerDeny: /(^|\.)zero\.network$/i,
-    rpcCandidates: ['https://rudolph.zero.layerzero.network', 'https://mainnet.zero.layerzero.network', 'https://rpc.zero.layerzero.network', 'https://zero.layerzero.network', 'https://rpc.zerointerop.layerzero.network'],
+    rpcCandidates: ['https://rudolph.zero.layerzero.network', 'https://mainnet.evm.zero.layerzero.network', 'https://mainnet.zero.layerzero.network', 'https://rpc.zero.layerzero.network', 'https://zero.layerzero.network', 'https://rpc.zerointerop.layerzero.network'],
   };
   P.ZW = ZW;
 
