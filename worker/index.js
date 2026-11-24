@@ -388,6 +388,7 @@ export class Books {
 
   // version of the terms a user accepted, kept on the account (not only in the browser)
   termsInit() {
+    if (this._termsInit) return; this._termsInit = true;
     for (const c of ['terms_v INTEGER', 'terms_ts INTEGER']) { try { this.sql.exec(`ALTER TABLE users ADD COLUMN ${c}`); } catch { /* exists */ } }
   }
   meta(k) { return this.sql.exec('SELECT v FROM meta WHERE k=?', k).toArray()[0]?.v ?? null; }
@@ -4127,6 +4128,7 @@ export class Books {
       if (method === 'POST' && (p === '/zero/withdraw' || p === '/mig/withdraw')) return json(await this.netWithdraw(user, await req.json()));
       if (method === 'GET' && (p === '/zero/withdrawals' || p === '/mig/withdrawals')) { this.zwdInit(); return json({ items: this.sql.exec('SELECT id,market,token,to_addr,amount,status,txid,err,created,net FROM zero_wd WHERE user_id=? ORDER BY id DESC LIMIT 50', user.id).toArray() }); }
       if (method === 'GET' && p === '/me') {
+        this.termsInit();
         const hold = this.sql.exec(`SELECT asset, amount FROM balances WHERE user_id=? AND asset LIKE 't:%' AND amount!='0'`, user.id).toArray()
           .map(h => { const m = this.sql.exec('SELECT * FROM markets WHERE id=?', h.asset.slice(2)).toArray()[0]; if (!m) return null;
             const v = this.view(m, usd); const pend = this.pendingRewards(user.id, m);
