@@ -98,7 +98,7 @@ export async function zeroRun(io, plan) {
   // 2 · DEX: WZRO (WETH9), Uniswap V2 factory + router02, from the dedicated dex wallet at nonces 0, 1, 2 (own mode only)
   if (plan.dex === 'own') for (const [i, k, art, args] of [[0, 'weth', 'WETH9', ''], [1, 'factoryV2', 'UniswapV2Factory', coder.encode(['address'], [io.addr.custody]).slice(2)],
     [2, 'router', 'UniswapV2Router02', coder.encode(['address', 'address'], [P.dex.factoryV2, P.dex.weth]).slice(2)]]) {
-    if ((await code(P.dex[k])) !== '0x') { st.steps[k] = 'ok'; continue; }
+    if ((await code(P.dex[k])) !== '0x') { st.steps[k] = st.steps[k] || 'ok'; continue; }   // keep the deploy hash from an earlier pass
     const n = await nonce(io.addr.dex);
     if (n !== i) throw new Error(`ABORT: dex wallet nonce ${n}, expected ${i} for ${k}`);
     const rc = await io.send('dex', { data: plan.artifacts[art].bytecode + args });
@@ -118,6 +118,8 @@ export async function zeroRun(io, plan) {
   if (stub !== PROXY_HASH) throw new Error('CREATE3 proxy hash mismatch');
   const [owner] = await call(P.curve, CURVE, 'owner');
   if (getAddress(owner) !== getAddress(io.addr.deployer)) throw new Error('curve owner is not the deployer');
+
+  if (plan.deployOnly) return { ...rep, deployed: true, state: { build: st.build, steps: st.steps } };
 
   // 4 · import every curve 1:1 at its reserved address
   let done = 0;

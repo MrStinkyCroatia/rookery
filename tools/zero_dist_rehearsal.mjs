@@ -8,14 +8,28 @@ import { DatabaseSync } from 'node:sqlite';
 import { HDNodeWallet, Wallet, Interface } from 'ethers';
 import { installZeroMig } from '../worker/zeromig.js';
 import { installZeroDist } from '../worker/zerodist.js';
+import { installWatch } from '../worker/watch.js';
+import { zeroHdr, zeroKey } from '../worker/zerokey.js';
+import { Transaction } from 'ethers';
 
 const NET = 'zero', CHAIN = 33002, PORT = 8630, RPC = `http://127.0.0.1:${PORT}`;
-const anvil = spawn(process.env.HOME + '/.foundry/bin/anvil', ['--chain-id', String(CHAIN), '--port', String(PORT), '--silent', '--gas-limit', '60000000'], { stdio: 'ignore' });
+const anvil = spawn(process.env.HOME + '/.foundry/bin/anvil', ['--chain-id', String(CHAIN), '--port', String(PORT), '--silent', '--gas-limit', process.env.GASLIMIT || '30000000', ...(process.env.HARDFORK ? ['--hardfork', process.env.HARDFORK] : [])], { stdio: 'ignore' });
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const rpc = async (m, p = []) => { const r = await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: m, params: p }) }); const j = await r.json(); if (j.error) throw new Error(j.error.message); return j.result; };
 for (let i = 0; i < 60; i++) { try { await rpc('eth_chainId'); break; } catch { await sleep(250); } }
 
 const WEI = 10n ** 18n, B = (x) => BigInt(x || 0);
+// a sequencer that silently drops contract creations from non-allowlisted senders (what Zero does), and a header recorder
+const net0 = { dropCreates: false, dropped: 0, keySentToLocal: false };
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, opt = {}) => {
+  if (String(url) === RPC && opt.headers?.['x-api-key']) net0.keySentToLocal = true;
+  if (String(url) === RPC && net0.dropCreates && opt.body?.includes('eth_sendRawTransaction')) {
+    const j = JSON.parse(opt.body), tx = Transaction.from(j.params[0]);
+    if (!tx.to) { net0.dropped++; return new Response(JSON.stringify({ jsonrpc: '2.0', id: j.id, result: tx.hash }), { headers: { 'content-type': 'application/json' } }); }
+  }
+  return realFetch(url, opt);
+};
 const db = new DatabaseSync(':memory:');
 const sql = { exec: (q, ...a) => { const st = db.prepare(q); const isRead = /^\s*(SELECT|PRAGMA)|RETURNING/i.test(q); const rows = isRead ? st.all(...a) : (st.run(...a), []); return { toArray: () => rows, one: () => rows[0] }; } };
 db.exec(`CREATE TABLE markets (id TEXT PRIMARY KEY, network TEXT, symbol TEXT, name TEXT, reserve_zro TEXT, migrated INTEGER DEFAULT 0, creator_id INTEGER, v_wei TEXT, reserve_tok TEXT, graduated INTEGER DEFAULT 0);
@@ -47,7 +61,7 @@ class Books {
   meta(k) { return meta.get(k) || ''; } setMeta(k, v) { meta.set(k, v); } master() { return root; }
   netPaused(n) { return meta.get('net_paused_' + n) === '1'; }
   async migSnapshot(net) { meta.set('mig_snapshot_' + net, JSON.stringify({ key: 'snap.json', sha256: createHash('sha256').update(body).digest('hex') })); meta.set('net_paused_' + net, '1'); return { markets: snap.markets.length, issues: 0 }; }
-  zwState() { return { rpc: { [RPC]: { live: true } }, explorers: {} }; }
+  zwState() { return { rpc: this.watcherSaved ? { [RPC]: { live: true } } : {}, explorers: {} }; }   // like production: the watcher saves its state only after migOnZeroRpc returns
   bal(u, a) { return B(sql.exec('SELECT amount FROM balances WHERE user_id=? AND asset=?', u, a).toArray()[0]?.amount); }
   addBal(u, a, d) { const v = this.bal(u, a) + d; if (v < 0n) throw new Error('Insufficient token balance'); sql.exec('INSERT INTO balances (user_id,asset,amount) VALUES (?,?,?) ON CONFLICT(user_id,asset) DO UPDATE SET amount=excluded.amount', u, a, v.toString()); return v; }
 }
@@ -55,6 +69,9 @@ const harness = { netPaused: Books.prototype.netPaused, migSnapshot: Books.proto
 installZeroMig(Books, { B, WEI, now: () => Date.now(), vQuote: (m) => B(m.v_wei) });
 for (const k of ['netPaused', 'migSnapshot']) Books.prototype[k] = harness[k];   // the harness versions (the real ones need the full ledger schema)
 installZeroDist(Books, { B, now: () => Date.now() });
+const hz = Books.prototype.zwState;
+installWatch(Books, { now: () => Date.now() });
+Books.prototype.zwState = hz;
 const bk = new Books();
 r2.set('snap.json', body);
 r2.set('rookery/migration/zero_artifacts.json', readFileSync('out/zero_artifacts.json', 'utf8'));
@@ -80,15 +97,32 @@ try {
   await rpc('anvil_setBalance', [K.deployer.address, '0x' + (need + WEI).toString(16)]);
   await rpc('anvil_setBalance', [K.dex.address, '0x' + (50n * WEI).toString(16)]);
   await rpc('anvil_setBalance', [K.custody.address, '0x' + (B(a1.preflight.info.distributionGasWei) + WEI).toString(16)]);
+  // the chain accepts calls but silently drops our contract creation (not on the allowlist): nothing may be paused
+  net0.dropCreates = true; zst.deployWaitTries = 6;
+  const ad = await bk.migOnZeroRpc(RPC, 3, zst);
+  const again = await bk.migOnZeroRpc(RPC, 3, zst);
+  out.autoNotAllowlisted = { deployFailed: !!ad.deployFailed, why: String(ad.deployFailed || '').replace(/0x[0-9a-f]{64}/, '0x…').slice(0, 90), creationsDropped: net0.dropped, tradingPaused: bk.netPaused(NET), snapshotTaken: !!meta.get('mig_snapshot_zero'),
+    retryThrottled: again.waiting === 'deploy retry window', curveStillUndeployed: (await rpc('eth_getCode', [bk.netAddrs(NET).curve, 'latest'])) === '0x' };
+  check('autoNotAllowlisted', !!ad.deployFailed && !bk.netPaused(NET) && !meta.get('mig_snapshot_zero') && out.autoNotAllowlisted.retryThrottled && out.autoNotAllowlisted.curveStillUndeployed);
+  // allowlisted later: the dropped transactions never landed, so the very same nonces deploy at the reserved addresses
+  net0.dropCreates = false; meta.set('mig_deploy_try', '0');
+  await rpc('anvil_dropAllTransactions', []).catch(() => null);
   const a2 = await bk.migOnZeroRpc(RPC, 3, zst);
+  out.deployFirst = { curveDeployedBeforeImport: (await rpc('eth_getCode', [bk.netAddrs(NET).curve, 'latest'])) !== '0x' };
   out.autoFunded = { paused: bk.netPaused(NET), snapshotTaken: !!meta.get('mig_snapshot_zero'), runStarted: !!a2.run?.started, runError: a2.runError, reservesZro: Number(B(a1.preflight.info.reservesWei)) / 1e18 };
   check('autoFunded', bk.netPaused(NET) && a2.run?.started === true);
+  bk.watcherSaved = true;
   await Promise.all(jobs.splice(0));
   const st = JSON.parse(meta.get('zero_run_status'));
   out.migration = { state: st.state, error: st.error, checks: st.report?.checks?.failed === 0 ? 'all passed' : st.report?.checks, finalized: !!st.report?.finalized };
   check('migration', st.state === 'done' && !!st.report?.finalized, st.error);
   const run = JSON.parse(meta.get('zero_run'));
   out.migration.importTxs = Object.values(run.imports).filter(i => i.tx).length;
+  const gasOf = async (h) => Number(BigInt((await rpc('eth_getTransactionReceipt', [h])).gasUsed));
+  const stepGas = {}; for (const [k, h] of Object.entries(run.steps)) stepGas[k] = await gasOf(h);   // every step must still carry its transaction hash
+  let maxImp = 0; for (const i of Object.values(run.imports)) if (i.tx) maxImp = Math.max(maxImp, await gasOf(i.tx));
+  out.gas = { hardfork: process.env.HARDFORK || 'default', blockGasLimit: Number(BigInt((await rpc('eth_getBlockByNumber', ['latest', false])).gasLimit)), steps: stepGas, largestImport: maxImp,
+    curveRuntimeBytes: ((await rpc('eth_getCode', [bk.netAddrs(NET).curve, 'latest'])).length - 2) / 2, underOsakaTxCap: Math.max(maxImp, ...Object.values(stepGas)) < 16777216 };
 
   // 2 · queue + send, with a crash between "hash stored" and "broadcast" on the second batch
   const q1 = await bk.distEnqueue(NET);
@@ -174,6 +208,16 @@ try {
   out.onchainTrading = { token: big.symbol, sellStatus: Number(sellRc.status), sellerTokensLeftExact: (await balOf(tok, sw.address)) === seller.amt - half, sellerReceivedNativeZro: n1 > n0 - WEI / 100n && n1 !== n0,
     buyStatus: Number(buyRc.status), buyerGotTokens: (await balOf(tok, buyer.address)) > 0n, ledgerNotInvolved: bk.bal(seller.u, 't:' + big.id) === 0n };
   check('trading', Number(sellRc.status) === 1 && Number(buyRc.status) === 1 && out.onchainTrading.sellerTokensLeftExact && out.onchainTrading.buyerGotTokens);
+  // 8 · API key goes only to LayerZero's own hosts; a quiet chain (no new blocks) still counts as live
+  zeroKey.v = 'lzk_test';
+  out.apiKey = { toLayerZero: zeroHdr('https://rudolph.zero.layerzero.network')['x-api-key'] === 'lzk_test', toTestnet: !!zeroHdr('https://testnet.zero.layerzero.network/')['x-api-key'],
+    notToOthers: !zeroHdr('https://layerzero.network.evil.com/')['x-api-key'] && !zeroHdr('https://evil.com/zero.layerzero.network')['x-api-key'] && !zeroHdr('http://rudolph.zero.layerzero.network')['x-api-key'] && !zeroHdr(RPC)['x-api-key'], neverSentToLocalRpc: !net0.keySentToLocal };
+  zeroKey.v = '';
+  check('apiKey', out.apiKey.toLayerZero && out.apiKey.toTestnet && out.apiKey.notToOthers && out.apiKey.neverSentToLocalRpc);
+  await rpc('anvil_setCode', ['0xc8cb2dfb4e970e66cc1566703cdcd25a3e7cb9c0', '0x6080604052600080fd']);
+  const qs = {}; const l1 = await bk.zwRpcCheck(RPC, qs), l2 = await bk.zwRpcCheck(RPC, qs);
+  out.quietChain = { firstCheckLive: l1.live, sameBlockStillLive: l2.live && l2.block === l1.block, note: l2.why };
+  check('quietChain', l1.live && l2.live && l2.block === l1.block);
   writeFileSync('.rehearsal/dist_per_token.json', JSON.stringify(perToken, null, 1));
   writeFileSync('.rehearsal/dist_report.json', JSON.stringify({ report: await bk.distReport(NET, { chain: true }), mine: await bk.distMine(NET, late) }));
 } catch (e) { out.error = String(e.stack || e).slice(0, 900); fail.push('exception'); }

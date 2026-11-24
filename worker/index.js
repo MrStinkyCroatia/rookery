@@ -3640,6 +3640,7 @@ export class Books {
           if (b.wdTick) return json(await this.zeroWdTick());
           if (b.dist === 'tick') return json(await this.distTick(net));
           if (b.dist === 'report') return json(await this.distReport(net, { chain: !!b.chain }));
+          if (b.zeroRpcKey !== undefined) { this.setMeta('zero_rpc_key', String(b.zeroRpcKey || '')); return json({ ok: true, keySet: !!b.zeroRpcKey }); }
           if (b.preflight) return json(await this.migPreflight(net, b.rpc ? { rpc: b.rpc } : {}));
           if (b.autorun !== undefined) { this.setMeta('mig_autorun_' + net, b.autorun ? '1' : '0'); return json({ autorun: !!b.autorun }); }
           if (b.runStatus) return json({ network: net, status: JSON.parse(this.meta(net + '_run_status') || 'null'), state: JSON.parse(this.meta(net + '_run') || 'null'),

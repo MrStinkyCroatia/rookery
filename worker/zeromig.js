@@ -4,6 +4,7 @@
 // The snapshot is taken once the Zero RPC is verified live (chain id 33002 + LayerZero endpoint code + moving blocks).
 import { getCreateAddress, getCreate2Address, keccak256, toUtf8Bytes, Wallet, Interface, getAddress, zeroPadValue, JsonRpcProvider } from 'ethers';
 import { zeroRun, requiredReserve } from './zerorun.js';
+import { zeroHdr, zeroKeyLoad } from './zerokey.js';
 const enc = new TextEncoder();
 
 // Reserved Zero addresses. A dedicated HD child signs ONLY the Zero deployment: its first transaction on Zero (nonce 0)
@@ -92,12 +93,12 @@ export function installZeroMig(Cls, H) {
     const raw = await w.signTransaction(base);
     const hash = await rpc('eth_sendRawTransaction', [raw]);
     if (onHash) onHash(hash);
-    for (let i = 0; i < 240; i++) {
+    for (let i = 0; i < (tx.waitTries || 240); i++) {
       const rc = await rpc('eth_getTransactionReceipt', [hash]);
       if (rc) return rc;
       await new Promise(r => setTimeout(r, 500));
     }
-    throw new Error('no receipt for ' + hash);
+    throw new Error('no receipt for ' + hash + ' (the chain did not include it: on Zero a refused transaction gets no receipt)');
   };
 
   // Zero: only an RPC the watcher verified (impostor chains exist). GIWA: the official RPC the owner sets (meta giwa_rpc).
@@ -113,8 +114,9 @@ export function installZeroMig(Cls, H) {
   P.netRpcFn = function (net, b = {}) {
     const url = this.netRpcUrl(net, b);
     if (!url) throw new Error(`${cfg(net).label} RPC is not available yet`);
+    if (net === 'zero') zeroKeyLoad(this);
     return async (method, params) => {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(15000) });
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...zeroHdr(url) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(15000) });
       const j = await r.json(); if (j.error) throw new Error(j.error.message || 'rpc error'); return j.result;
     };
   };
@@ -148,7 +150,7 @@ export function installZeroMig(Cls, H) {
     // virtual reserve for FUTURE native launches on that chain: same starting market cap as a ZRO launch (3,150 ZRO)
     const vNative = b.vNative ? String(b.vNative) : net === 'zero' ? (3150n * WEI).toString()
       : (BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n).toString();
-    const plan = { dex: b.dex, snapshot, artifacts, creators, chainId, vNative, build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
+    const plan = { dex: b.dex, snapshot, artifacts, creators, chainId, vNative: b.vNative ? vNative : (this.meta(K(net) + '_vnative') || vNative), build: b.build || 'auto', dryRun: !!b.dryRun, recheck: !!b.recheck };
     if (plan.dryRun) return zeroRun(io, plan);
     this._netRunning = this._netRunning || {};
     if (this._netRunning[net]) return { running: true };
@@ -465,6 +467,20 @@ export function installZeroMig(Cls, H) {
     return { taken: true, you: me, sha256: d.meta.sha256, takenAt: doc.takenAt, rows };
   };
 
+  // deploy the contracts (DEX if own, then the curve) BEFORE anything is paused: proves the chain really accepts our
+  // deployments (allowlist), costs only gas, and changes nothing for users. Safe to call again: finished steps are skipped.
+  P.netDeployFirst = async function (net, b = {}) {
+    const url = this.netRpcUrl(net, b); if (!url) throw new Error('no rpc');
+    const art = await this.env.BACKUPS.get('rookery/migration/zero_artifacts.json'); if (!art) throw new Error('artifacts missing in R2');
+    const rpc = this.netRpcFn(net, { ...b, rpc: url }), Kk = this.netKeys(net);
+    const vNative = this.meta(K(net) + '_vnative') || (net === 'zero' ? (3150n * WEI).toString() : (BigInt(Math.round(3150 * this.zroUsd() / this.ethUsd() * 1e9)) * 1_000_000_000n).toString());
+    this.setMeta(K(net) + '_vnative', vNative);                         // the full run must use the very same constructor argument
+    const io = { rpc, send: (role, tx) => this.netSend(net, rpc, role, { ...tx, waitTries: b.waitTries || 120 }),
+      addr: { deployer: Kk.deployer.address, dex: Kk.dex.address, custody: Kk.custody.address, feeTo: Kk.custody.address },
+      load: async () => JSON.parse(this.meta(K(net) + '_run') || 'null'), save: async (st) => this.setMeta(K(net) + '_run', JSON.stringify(st)), log: () => {} };
+    return zeroRun(io, { dex: b.dex || 'own', snapshot: { v: 2, markets: [] }, artifacts: JSON.parse(await art.text()), creators: {}, chainId: this.netChainId(net), vNative, build: 'auto', deployOnly: true });
+  };
+
   // can the whole migration be carried out right now? read-only; used before anything is paused
   P.migPreflight = async function (net, b = {}) {
     const c = cfg(net), problems = [], info = {};
@@ -485,6 +501,13 @@ export function installZeroMig(Cls, H) {
     const f = (x) => (Number(x) / 1e18).toFixed(2);
     if (BigInt(depBal) < need + deployGas) problems.push(`deployer ${Kk.deployer.address} holds ${f(BigInt(depBal))} ${c.native}, needs ${f(need + deployGas)} (${f(need)} curve reserves + gas)`);
     if (BigInt(cusBal) < distGas) problems.push(`custody ${Kk.custody.address} holds ${f(BigInt(cusBal))} ${c.native} for gas, needs ${f(distGas)} to send ${rows} balances to holders`);
+    const dexMode = JSON.parse(this.meta('mig_dex_' + net) || '"own"');
+    if (dexMode === 'own') {
+      const [dexBal, routerCode] = await Promise.all([rpc('eth_getBalance', [Kk.dex.address, 'latest']), rpc('eth_getCode', [getCreateAddress({ from: Kk.dex.address, nonce: 2 }), 'latest'])]);
+      info.dex = { address: Kk.dex.address, balanceWei: BigInt(dexBal).toString() };
+      if (routerCode === '0x' && BigInt(dexBal) < gasPrice * 9_000_000n) problems.push(`DEX deployer ${Kk.dex.address} holds ${f(BigInt(dexBal))} ${c.native}, needs ${f(gasPrice * 9_000_000n)} for gas to deploy the graduation DEX`);
+    }
+    if (net === 'zero') info.rpcKey = zeroKeyLoad(this);
     if (curveCode === '0x' && Number(BigInt(depNonce)) !== 0) problems.push(`deployer nonce is ${Number(BigInt(depNonce))}: the reserved addresses can no longer be met`);
     try { await rpc('eth_estimateGas', [{ from: Kk.deployer.address, data: '0x600a600c600039600a6000f3602a60005260206000f3' }]); }
     catch (e) { problems.push('the chain refuses a contract deployment from our deployer: ' + String(e.message || e).slice(0, 120)); }
@@ -500,7 +523,7 @@ export function installZeroMig(Cls, H) {
     if (st.migConfirm < 2) return { waiting: st.migConfirm };
     const chat = this.meta('tg_owner_chat');
     // nothing is paused unless the whole migration can actually be carried out right now
-    const pf = await this.migPreflight('zero', { rpc: url }).catch(e => ({ ok: false, problems: ['preflight failed: ' + String(e.message || e).slice(0, 160)] }));
+    const pf = await this.migPreflight('zero', { rpc: url, allowUnverified: true })   /* the watcher verified this URL a moment ago; its state is saved after this call */.catch(e => ({ ok: false, problems: ['preflight failed: ' + String(e.message || e).slice(0, 160)] }));
     if (!pf.ok) {
       if (chat && this.env.TG_BOT_TOKEN && Date.now() - Number(this.meta('mig_pf_alert') || 0) > 3 * 3600e3) {
         this.setMeta('mig_pf_alert', String(Date.now()));
@@ -509,9 +532,21 @@ export function installZeroMig(Cls, H) {
       }
       return { preflight: pf };
     }
+    // contracts first, while trading is still open: if Zero does not include our deployment (allowlist), nothing gets paused
+    if (this.meta('mig_autorun_zero') !== '0') {
+      if (Date.now() - Number(this.meta('mig_deploy_try') || 0) < 20 * 60e3) return { waiting: 'deploy retry window' };
+      this.setMeta('mig_deploy_try', String(Date.now()));
+      try { await this.netDeployFirst('zero', { rpc: url, allowUnverified: true, dex: JSON.parse(this.meta('mig_dex_zero') || '"own"'), waitTries: st.deployWaitTries }); this.setMeta('mig_deploy_try', '0'); }
+      catch (e) {
+        const why = String(e.message || e).slice(0, 260);
+        if (chat && this.env.TG_BOT_TOKEN) await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
+          text: `⚠️ <b>Zero: contract deployment did not go through, migration NOT started</b>\nTrading stays open on the ledger. Most likely our deployer is not on LayerZero's contract-creation allowlist yet.\n<code>${why.replace(/[<>&]/g, '')}</code>\nNext try in 20 min.` }).catch(() => null);
+        return { deployFailed: why };
+      }
+    }
     const r = await this.migSnapshot('zero', { reason: `Zero RPC verified live: ${url} block ${block}`, pause: true });
     if (this.meta('mig_autorun_zero') !== '0' && !r.issues) {
-      try { r.run = await this.netMigrate('zero', { rpc: url, dex: JSON.parse(this.meta('mig_dex_zero') || '"own"'), chainId: 33002 }); } catch (e) { r.runError = String(e.message || e).slice(0, 200); }
+      try { r.run = await this.netMigrate('zero', { rpc: url, allowUnverified: true, dex: JSON.parse(this.meta('mig_dex_zero') || '"own"'), chainId: 33002 }); } catch (e) { r.runError = String(e.message || e).slice(0, 200); }
     }
     if (chat && this.env.TG_BOT_TOKEN) {
       await this.tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,

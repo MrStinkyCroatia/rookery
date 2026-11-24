@@ -1,7 +1,8 @@
 // Chain watchdog: probes the RPC endpoints of the chains we care about and pings Telegram when one comes alive
 // (or dies). Built for the Zero launch: nobody knows the RPC until LayerZero publishes it, so the target list is
 // editable from the admin API without a deploy. A probe asks for the chain id, then for the block number twice a
-// few seconds apart: a chain is "live" only when it answers both and the block actually advanced.
+// few seconds apart. (Zero mints blocks only when there are transactions, so its block number may stand still.)
+import { zeroHdr, zeroKeyLoad } from './zerokey.js';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 export function installWatch(Cls, H) {
@@ -139,7 +140,7 @@ export function installWatch(Cls, H) {
     // sunset "ZERϴ" chain and must never be treated as Zero
     explorerCandidates: ['https://explorer.zero.layerzero.network', 'https://zero-explorer.layerzero.network', 'https://scan.zero.layerzero.network'],
     explorerDeny: /(^|\.)zero\.network$/i,
-    rpcCandidates: ['https://mainnet.zero.layerzero.network', 'https://rpc.zero.layerzero.network', 'https://zero.layerzero.network', 'https://rpc.zerointerop.layerzero.network'],
+    rpcCandidates: ['https://rudolph.zero.layerzero.network', 'https://mainnet.zero.layerzero.network', 'https://rpc.zero.layerzero.network', 'https://zero.layerzero.network', 'https://rpc.zerointerop.layerzero.network'],
   };
   P.ZW = ZW;
 
@@ -148,7 +149,7 @@ export function installWatch(Cls, H) {
     for (let k = 0; k < urls.length; k++) {
       const url = urls[(i0 + k) % urls.length];
       try {
-        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(6000) });
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...zeroHdr(url) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(6000) });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
         if (j.error) { const e = new Error(String(j.error.message || 'rpc error')); e.rpc = j.error; e.reverted = /revert/i.test(e.message) || j.error.code === 3; throw e; }
@@ -236,6 +237,7 @@ export function installWatch(Cls, H) {
   // a candidate counts only if it really is LayerZero's Zero: chain id 33002 + LZ endpoint code + moving blocks
   P.zwRpcCheck = async function (url, st) {
     try {
+      zeroKeyLoad(this);
       const id = parseInt(await zwRpc([url], 'eth_chainId', []), 16);
       if (id !== ZW.eid) return { url, live: false, why: 'chain id ' + id };
       const code = await zwRpc([url], 'eth_getCode', [ZW.zeroEndpoint, 'latest']);
@@ -243,10 +245,11 @@ export function installWatch(Cls, H) {
       const block = parseInt(await zwRpc([url], 'eth_blockNumber', []), 16);
       const prev = st.rpcBlock?.[url] || 0;
       st.rpcBlock = { ...(st.rpcBlock || {}), [url]: block };
-      if (block <= prev && prev) return { url, live: false, why: 'blocks stalled at ' + block, block };
+      // Zero produces a block only when there are transactions: a block number that stands still is normal, not a dead chain
+      const quiet = !!prev && block <= prev;
       let supply = 0;
       try { supply = Number(BigInt(await zwRpc([url], 'eth_call', [{ to: ZW.zeroZro, data: '0x18160ddd' }, 'latest']))) / 1e18; } catch { /* optional */ }
-      return { url, live: block > 0, block, supply };
+      return { url, live: block > 0, block, supply, why: quiet ? 'no new block since the last check (normal on a quiet chain)' : '' };
     } catch (e) { return { url, live: false, why: String(e.message || e).slice(0, 60) }; }
   };
 
